@@ -1,0 +1,5 @@
+{
+  "name": "Mushroom Supply Chain Login",
+  "description": "A centralized login portal for Village A, Village B, and Village C in the mushroom supply chain ecosystem using Firebase Authentication.",
+  "requestFramePermissions": []
+}
