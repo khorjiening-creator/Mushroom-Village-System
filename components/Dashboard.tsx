@@ -798,7 +798,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ villageId, userEmail, user
         {successMessage && (
           <div className="mb-6 p-4 bg-green-50 border border-green-200 rounded-lg flex items-center text-green-700 animate-fade-in-up">
              <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-2" viewBox="0 0 20 20" fill="currentColor">
-                <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM6.707 9.293a1 1 0 00-1.414 1.414L3 3a1 1 0 001.414 0l7-7a1 1 0 00-1.414-1.414L10 10.586 6.707 9.293z" clipRule="evenodd" />
+                <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM6.707 9.293a1 1 0 00-1.414 1.414l3 3a1 1 0 001.414 0l7-7a1 1 0 00-1.414-1.414L10 10.586 6.707 9.293z" clipRule="evenodd" />
              </svg>
              <span className="text-sm font-medium">{successMessage}</span>
           </div>
@@ -981,7 +981,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ villageId, userEmail, user
                  </div>
 
                  {/* Outstanding Tracker */}
-                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                 <div className="space-y-6">
                      {/* Receivables List */}
                      <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
                          <div className="px-6 py-4 border-b border-gray-100 bg-orange-50 flex justify-between items-center">
@@ -990,14 +990,14 @@ export const Dashboard: React.FC<DashboardProps> = ({ villageId, userEmail, user
                                  Outstanding Receivables
                              </h3>
                          </div>
-                         <div className="overflow-x-auto max-h-80">
-                             <table className="min-w-full divide-y divide-gray-200">
-                                 <thead className="bg-gray-50 sticky top-0">
+                         <div className="overflow-x-auto">
+                             <table className="min-w-full divide-y divide-gray-200 table-fixed">
+                                 <thead className="bg-gray-50">
                                      <tr>
-                                         <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Date</th>
-                                         <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Customer Order Number</th>
-                                         <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Amount</th>
-                                         <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Action</th>
+                                         <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-[15%]">Date</th>
+                                         <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-[55%]">Customer Order Number</th>
+                                         <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider w-[15%]">Amount</th>
+                                         <th className="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider w-[15%]">Action</th>
                                      </tr>
                                  </thead>
                                  <tbody className="bg-white divide-y divide-gray-200">
@@ -1006,17 +1006,17 @@ export const Dashboard: React.FC<DashboardProps> = ({ villageId, userEmail, user
                                      ) : (
                                         financeOverviewData.receivables.map(rec => (
                                              <tr key={rec.id} className="hover:bg-gray-50">
-                                                 <td className="px-4 py-3 whitespace-nowrap text-xs text-gray-500">{new Date(rec.date).toLocaleDateString()}</td>
-                                                 <td className="px-4 py-3 text-xs font-medium text-gray-900">
+                                                 <td className="px-6 py-4 whitespace-nowrap text-xs text-gray-500">{new Date(rec.date).toLocaleDateString()}</td>
+                                                 <td className="px-6 py-4 text-xs font-medium text-gray-900">
                                                      {rec.orderNumber ? (
                                                          <span className="bg-gray-100 text-gray-700 px-1.5 py-0.5 rounded border border-gray-200">{rec.orderNumber}</span>
                                                      ) : (
                                                          <span className="text-gray-400 italic">--</span>
                                                      )}
-                                                     <div className="text-[10px] text-gray-400 mt-0.5 truncate max-w-[120px]">{rec.category}</div>
+                                                     <div className="text-[10px] text-gray-400 mt-0.5 truncate">{rec.category}</div>
                                                  </td>
-                                                 <td className="px-4 py-3 whitespace-nowrap text-xs font-bold text-orange-600 text-right">RM{rec.amount.toFixed(2)}</td>
-                                                 <td className="px-4 py-3 text-center">
+                                                 <td className="px-6 py-4 whitespace-nowrap text-xs font-bold text-orange-600 text-right">RM{rec.amount.toFixed(2)}</td>
+                                                 <td className="px-6 py-4 text-center">
                                                      <button 
                                                         onClick={() => { setActiveTab('financial'); openEditTransModal(rec); }}
                                                         className="text-indigo-600 hover:text-indigo-900 text-xs underline"
@@ -1040,14 +1040,14 @@ export const Dashboard: React.FC<DashboardProps> = ({ villageId, userEmail, user
                                  Outstanding Payables
                              </h3>
                          </div>
-                         <div className="overflow-x-auto max-h-80">
-                             <table className="min-w-full divide-y divide-gray-200">
-                                 <thead className="bg-gray-50 sticky top-0">
+                         <div className="overflow-x-auto">
+                             <table className="min-w-full divide-y divide-gray-200 table-fixed">
+                                 <thead className="bg-gray-50">
                                      <tr>
-                                         <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Date</th>
-                                         <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Invoice Number</th>
-                                         <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Amount</th>
-                                         <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Action</th>
+                                         <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-[15%]">Date</th>
+                                         <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-[55%]">Invoice Number</th>
+                                         <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider w-[15%]">Amount</th>
+                                         <th className="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider w-[15%]">Action</th>
                                      </tr>
                                  </thead>
                                  <tbody className="bg-white divide-y divide-gray-200">
@@ -1056,17 +1056,17 @@ export const Dashboard: React.FC<DashboardProps> = ({ villageId, userEmail, user
                                      ) : (
                                         financeOverviewData.payables.map(rec => (
                                              <tr key={rec.id} className="hover:bg-gray-50">
-                                                 <td className="px-4 py-3 whitespace-nowrap text-xs text-gray-500">{new Date(rec.date).toLocaleDateString()}</td>
-                                                 <td className="px-4 py-3 text-xs font-medium text-gray-900">
+                                                 <td className="px-6 py-4 whitespace-nowrap text-xs text-gray-500">{new Date(rec.date).toLocaleDateString()}</td>
+                                                 <td className="px-6 py-4 text-xs font-medium text-gray-900">
                                                      {rec.orderNumber ? (
                                                          <span className="bg-gray-100 text-gray-700 px-1.5 py-0.5 rounded border border-gray-200">{rec.orderNumber}</span>
                                                      ) : (
                                                          <span className="text-gray-400 italic">--</span>
                                                      )}
-                                                     <div className="text-[10px] text-gray-400 mt-0.5 truncate max-w-[120px]">{rec.category}</div>
+                                                     <div className="text-[10px] text-gray-400 mt-0.5 truncate">{rec.category}</div>
                                                  </td>
-                                                 <td className="px-4 py-3 whitespace-nowrap text-xs font-bold text-red-600 text-right">RM{rec.amount.toFixed(2)}</td>
-                                                 <td className="px-4 py-3 text-center">
+                                                 <td className="px-6 py-4 whitespace-nowrap text-xs font-bold text-red-600 text-right">RM{rec.amount.toFixed(2)}</td>
+                                                 <td className="px-6 py-4 text-center">
                                                      <button 
                                                         onClick={() => { setActiveTab('financial'); openEditTransModal(rec); }}
                                                         className="text-indigo-600 hover:text-indigo-900 text-xs underline"
@@ -1146,7 +1146,8 @@ export const Dashboard: React.FC<DashboardProps> = ({ villageId, userEmail, user
             </>
         )}
 
-        {/* ... (Farming Tab, Environment Tab, Resources Tab, Processing Tab remain same) ... */}
+
+   {/* ... (Farming Tab, Environment Tab, Resources Tab, Processing Tab remain same) ... */}
         {activeTab === 'farming' && (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
@@ -1436,173 +1437,305 @@ export const Dashboard: React.FC<DashboardProps> = ({ villageId, userEmail, user
             </div>
         )}
 
-        {/* ... (Registry Tab remains same) ... */}
+        {/* --- VIEW: REGISTRY (ADMIN ONLY) --- */}
         {activeTab === 'registry' && isAdmin && (
-            <div className="space-y-6">
-                <div className="bg-white shadow sm:rounded-lg">
-                    {/* ... */}
-                    {/* User Registry Code Omitted for Brevity (unchanged) */}
-                    <div className="px-4 py-5 sm:px-6 flex justify-between items-center">
-                        <h3 className="text-lg leading-6 font-medium text-gray-900">User Registry</h3>
-                        <button
-                            onClick={() => setShowAddForm(!showAddForm)}
-                            className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
-                        >
-                            {showAddForm ? 'Cancel' : 'Add User'}
-                        </button>
+          <div className="space-y-8 mb-8 animate-fade-in-up">
+            <div className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden relative">
+              
+              {/* User Search Bar */}
+              <div className="px-6 py-4 border-b border-gray-200 bg-white">
+                 <div className="relative">
+                    <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                        <svg className="h-5 w-5 text-gray-400" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
+                           <path fillRule="evenodd" d="M8 4a4 4 0 100 8 4 4 0 000-8zM2 8a6 6 0 1110.89 3.476l4.817 4.817a1 1 0 01-1.414 1.414l-4.816-4.816A6 6 0 012 8z" clipRule="evenodd" />
+                        </svg>
                     </div>
-                    
-                    {showAddForm && (
-                        <div className="px-4 py-5 sm:px-6 bg-gray-50 border-t border-gray-200">
-                             <form onSubmit={handleAddUser} className="grid grid-cols-1 gap-y-6 gap-x-4 sm:grid-cols-6">
-                                 <div className="sm:col-span-3">
-                                     <label className="block text-sm font-medium text-gray-700">Name</label>
-                                     <input type="text" required value={newUserName} onChange={e => setNewUserName(e.target.value)} className="mt-1 focus:ring-indigo-500 focus:border-indigo-500 block w-full shadow-sm sm:text-sm border-gray-300 rounded-md p-2 border" />
-                                 </div>
-                                 <div className="sm:col-span-3">
-                                     <label className="block text-sm font-medium text-gray-700">Email (Gmail only)</label>
-                                     <input type="email" required value={newUserEmail} onChange={e => setNewUserEmail(e.target.value)} className="mt-1 focus:ring-indigo-500 focus:border-indigo-500 block w-full shadow-sm sm:text-sm border-gray-300 rounded-md p-2 border" />
-                                 </div>
-                                 <div className="sm:col-span-3">
-                                     <label className="block text-sm font-medium text-gray-700">Password</label>
-                                     <input type="password" required value={newUserPassword} onChange={e => setNewUserPassword(e.target.value)} className="mt-1 focus:ring-indigo-500 focus:border-indigo-500 block w-full shadow-sm sm:text-sm border-gray-300 rounded-md p-2 border" />
-                                 </div>
-                                 <div className="sm:col-span-3">
-                                     <label className="block text-sm font-medium text-gray-700">Role</label>
-                                     <select value={newUserRole} onChange={e => setNewUserRole(e.target.value as UserRole)} className="mt-1 block w-full py-2 px-3 border border-gray-300 bg-white rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
-                                         {USER_ROLES.map(r => <option key={r} value={r}>{r}</option>)}
-                                     </select>
-                                 </div>
-                                 <div className="sm:col-span-3">
-                                     <label className="block text-sm font-medium text-gray-700">Village</label>
-                                     <select value={newUserVillage} onChange={e => setNewUserVillage(e.target.value as VillageType)} className="mt-1 block w-full py-2 px-3 border border-gray-300 bg-white rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
-                                         {Object.values(VILLAGES).map(v => <option key={v.id} value={v.id}>{v.name}</option>)}
-                                     </select>
-                                 </div>
-                                  <div className="sm:col-span-3">
-                                     <label className="block text-sm font-medium text-gray-700">Job Title</label>
-                                     <select value={newUserJobTitle} onChange={e => setNewUserJobTitle(e.target.value)} className="mt-1 block w-full py-2 px-3 border border-gray-300 bg-white rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
-                                         {JOB_ROLES.map(r => <option key={r} value={r}>{r}</option>)}
-                                     </select>
-                                 </div>
-                                 <div className="sm:col-span-6">
-                                     <button type="submit" disabled={isAddingUser} className="w-full inline-flex justify-center py-2 px-4 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
-                                         {isAddingUser ? 'Creating...' : 'Create User'}
-                                     </button>
-                                 </div>
-                             </form>
-                        </div>
-                    )}
-                    
-                    <div className="border-t border-gray-200">
-                         <div className="px-4 py-3 bg-gray-50">
-                             <input type="text" placeholder="Search users..." value={searchQuery} onChange={e => setSearchQuery(e.target.value)} className="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md p-2 border" />
-                         </div>
-                         <ul className="divide-y divide-gray-200 max-h-96 overflow-y-auto">
-                             {filteredUsers.map((user) => (
-                                 <li key={user.uid} className="px-4 py-4 sm:px-6 hover:bg-gray-50 cursor-pointer" onClick={() => openEditModal(user)}>
-                                     <div className="flex items-center justify-between">
-                                         <p className="text-sm font-medium text-indigo-600 truncate">{user.name}</p>
-                                         <div className="ml-2 flex-shrink-0 flex">
-                                             <p className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${user.role === 'admin' ? 'bg-red-100 text-red-800' : 'bg-green-100 text-green-800'}`}>
-                                                 {user.role}
-                                             </p>
-                                         </div>
-                                     </div>
-                                     <div className="mt-2 sm:flex sm:justify-between">
-                                         <div className="sm:flex">
-                                             <p className="flex items-center text-sm text-gray-500">
-                                                 <span className="truncate">{user.email}</span>
-                                             </p>
-                                         </div>
-                                         <div className="mt-2 flex items-center text-sm text-gray-500 sm:mt-0">
-                                             <p>{VILLAGES[user.villageId]?.name}</p>
-                                         </div>
-                                     </div>
-                                 </li>
-                             ))}
-                         </ul>
-                    </div>
-                </div>
+                    <input 
+                        type="text"
+                        placeholder="Search users by name, email, role..."
+                        className="block w-full pl-10 pr-3 py-2 border border-gray-300 rounded-md leading-5 bg-white text-gray-900 placeholder-gray-500 focus:outline-none focus:placeholder-gray-400 focus:ring-1 focus:ring-emerald-500 focus:border-emerald-500 sm:text-sm transition duration-150 ease-in-out"
+                        value={searchQuery}
+                        onChange={(e) => setSearchQuery(e.target.value)}
+                    />
+                 </div>
+              </div>
 
-                {/* System Logs */}
-                <div className="bg-white shadow sm:rounded-lg">
-                    <div className="px-4 py-5 sm:px-6">
-                        <h3 className="text-lg leading-6 font-medium text-gray-900">System Activity Logs</h3>
-                    </div>
-                    <div className="border-t border-gray-200">
-                        <ul className="divide-y divide-gray-200 max-h-60 overflow-y-auto">
-                            {registryLogs.map((log) => (
-                                <li key={log.id} className="px-4 py-4 sm:px-6">
-                                    <div className="flex items-center justify-between">
-                                        <div className="text-sm text-gray-900">{log.details || log.action}</div>
-                                        <div className="text-xs text-gray-500">{log.timestamp ? new Date(log.timestamp).toLocaleString() : ''}</div>
-                                    </div>
-                                    <div className="text-xs text-gray-400 mt-1">{log.userEmail}</div>
-                                </li>
-                            ))}
-                        </ul>
+              {/* Add User Form - kept in code state-wise but hidden since trigger button is removed. */}
+              {showAddForm && (
+                <div className="bg-emerald-50 p-6 border-b border-gray-200">
+                  <h3 className="text-sm font-bold text-emerald-800 mb-4 uppercase tracking-wider">ADD NEW USER PROFILE</h3>
+                  <form onSubmit={handleAddUser} className="space-y-4">
+                      {/* ... form content same as before ... */}
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                          <div className="col-span-1 md:col-span-2">
+                             <label className="block text-sm font-medium text-gray-700 mb-1">Full Name</label>
+                             <input type="text" required value={newUserName} onChange={(e) => setNewUserName(e.target.value)} className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-emerald-500 focus:border-emerald-500 sm:text-sm" placeholder="e.g. John Doe" />
+                          </div>
+                          <div className="col-span-1 md:col-span-2">
+                            <label className="block text-sm font-medium text-gray-700 mb-1">Email (@gmail.com only)</label>
+                            <input type="email" required value={newUserEmail} onChange={(e) => setNewUserEmail(e.target.value)} className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-emerald-500 focus:border-emerald-500 sm:text-sm" placeholder="name@gmail.com" />
+                          </div>
+                          <div className="col-span-1 md:col-span-2">
+                            <label className="block text-sm font-medium text-gray-700 mb-1">Initial Password</label>
+                            <input type="text" required value={newUserPassword} onChange={(e) => setNewUserPassword(e.target.value)} className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-emerald-500 focus:border-emerald-500 sm:text-sm" placeholder="Secret123 (Min 6 chars + number)" />
+                          </div>
+                          <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">Village</label>
+                            <select value={newUserVillage} onChange={(e) => setNewUserVillage(e.target.value as VillageType)} className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-emerald-500 focus:border-emerald-500 sm:text-sm">
+                              {Object.values(VILLAGES).map(v => (<option key={v.id} value={v.id}>{v.name}</option>))}
+                            </select>
+                          </div>
+                          <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">System Role</label>
+                            <select value={newUserRole} onChange={(e) => setNewUserRole(e.target.value as UserRole)} className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-emerald-500 focus:border-emerald-500 sm:text-sm">
+                              {USER_ROLES.map(r => (<option key={r} value={r}>{r.charAt(0).toUpperCase() + r.slice(1)}</option>))}
+                            </select>
+                          </div>
+                          <div className="col-span-1 md:col-span-2">
+                            <label className="block text-sm font-medium text-gray-700 mb-1">Job Title</label>
+                            <select value={newUserJobTitle} onChange={(e) => setNewUserJobTitle(e.target.value)} className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-emerald-500 focus:border-emerald-500 sm:text-sm">
+                              {JOB_ROLES.map(role => (<option key={role} value={role}>{role}</option>))}
+                            </select>
+                          </div>
+                      </div>
+                      <div className="flex justify-end pt-2">
+                          <button type="submit" disabled={isAddingUser} className={`w-full sm:w-auto inline-flex justify-center py-2 px-6 border border-transparent shadow-sm text-sm font-bold rounded-md text-white bg-emerald-600 hover:bg-emerald-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-emerald-500 transition-all ${isAddingUser ? 'opacity-75 cursor-not-allowed' : ''}`}>{isAddingUser ? 'Creating...' : 'Save User'}</button>
+                      </div>
+                  </form>
+                </div>
+              )}
+
+              <div className="overflow-hidden border border-gray-200 rounded-lg shadow-sm">
+                <div className="max-h-[500px] overflow-y-auto">
+                {loadingUsers ? (
+                  <div className="p-8 text-center text-gray-500">Loading directory...</div>
+                ) : (
+                  <table className="min-w-full divide-y divide-gray-200">
+                    <thead className="bg-gray-50 sticky top-0 z-10 shadow-sm">
+                      <tr>
+                        <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider bg-gray-50">User / Email</th>
+                        <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider bg-gray-50">Village</th>
+                        <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider bg-gray-50">Role</th>
+                        <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider bg-gray-50">Title</th>
+                        <th scope="col" className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider bg-gray-50">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody className="bg-white divide-y divide-gray-200">
+                      {filteredUsers.length === 0 ? (
+                        <tr>
+                          <td colSpan={5} className="px-6 py-4 text-center text-sm text-gray-500">
+                            {users.length === 0 ? "No users found in directory." : "No matching users found."}
+                          </td>
+                        </tr>
+                      ) : (
+                        filteredUsers.map((user) => (
+                          <tr key={user.uid || Math.random().toString()} className="hover:bg-gray-50 transition-colors">
+                            <td className="px-6 py-4 whitespace-nowrap">
+                              <div className="flex items-center">
+                                <div className="h-8 w-8 rounded-full bg-indigo-100 flex items-center justify-center text-indigo-700 font-bold text-xs">
+                                  {(user.name || user.email || '?').substring(0, 2).toUpperCase()}
+                                </div>
+                                <div className="ml-4">
+                                  <div className="text-sm font-medium text-gray-900">{user.name || 'No Name'}</div>
+                                  <div className="text-xs text-gray-500">{user.email}</div>
+                                </div>
+                              </div>
+                            </td>
+                            <td className="px-6 py-4 whitespace-nowrap">
+                              <span className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${COLOR_THEMES[VILLAGES[user.villageId]?.color as keyof typeof COLOR_THEMES]?.badgeBg || 'bg-gray-100'} ${COLOR_THEMES[VILLAGES[user.villageId]?.color as keyof typeof COLOR_THEMES]?.badgeText || 'text-gray-800'}`}>
+                                {VILLAGES[user.villageId]?.name || user.villageId}
+                              </span>
+                            </td>
+                            <td className="px-6 py-4 whitespace-nowrap">
+                              <span className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${user.role === 'admin' ? 'bg-purple-100 text-purple-800' : user.role === 'finance' ? 'bg-amber-100 text-amber-800' : 'bg-gray-100 text-gray-800'}`}>
+                                {(user.role || 'user').toUpperCase()}
+                              </span>
+                            </td>
+                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                              {user.jobTitle || '-'}
+                            </td>
+                            <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium space-x-2">
+                              <button 
+                                onClick={() => openEditModal(user)}
+                                className="text-indigo-600 hover:text-indigo-900 bg-indigo-50 px-3 py-1.5 rounded hover:bg-indigo-100 transition-colors"
+                              >
+                                Edit
+                              </button>
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                )}
+                </div>
+              </div>
+
+              {/* System Activity Logs Section */}
+              <div className="mt-10 border-t border-gray-200 pt-8">
+                <div className="flex justify-between items-center mb-4">
+                    <h3 className="text-lg font-semibold text-gray-900">System Activity Log</h3>
+                    <button 
+                        onClick={fetchRegistryLogs} 
+                        className="text-xs text-indigo-600 hover:text-indigo-800 font-medium flex items-center"
+                    >
+                        <svg xmlns="http://www.w3.org/2000/svg" className={`h-3 w-3 mr-1 ${loadingLogs ? 'animate-spin' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                        </svg>
+                        Refresh Logs
+                    </button>
+                </div>
+                <div className="bg-white shadow-sm border border-gray-200 rounded-lg overflow-hidden flex flex-col">
+                    <div className="max-h-[400px] overflow-y-auto">
+                    <table className="min-w-full divide-y divide-gray-200">
+                        <thead className="bg-gray-50 sticky top-0 z-10 shadow-sm">
+                            <tr>
+                                <th className="pl-8 py-4 text-left text-xs font-medium text-gray-500 uppercase bg-gray-50">Timestamp</th>
+                                <th className="px-6 py-4 text-left text-xs font-medium text-gray-500 uppercase bg-gray-50">Action</th>
+                                <th className="px-6 py-4 text-left text-xs font-medium text-gray-500 uppercase bg-gray-50">User</th>
+                                <th className="pr-8 py-4 text-left text-xs font-medium text-gray-500 uppercase bg-gray-50">Details</th>
+                            </tr>
+                        </thead>
+                        <tbody className="bg-white divide-y divide-gray-200">
+                            {registryLogs.length === 0 ? (
+                                <tr>
+                                    <td colSpan={4} className="px-6 py-4 text-center text-sm text-gray-400">
+                                        {loadingLogs ? 'Loading logs...' : 'No logs found in "activity_logs" collection.'}
+                                    </td>
+                                </tr>
+                            ) : (
+                                registryLogs.map((log) => (
+                                    <tr key={log.id} className="hover:bg-gray-50">
+                                        <td className="pl-8 py-4 whitespace-nowrap text-xs text-gray-500">
+                                            {log.timestamp ? new Date(log.timestamp).toLocaleString() : '-'}
+                                        </td>
+                                        <td className="px-6 py-4 whitespace-nowrap text-xs font-medium text-gray-900">
+                                            <span className={`px-2 py-0.5 rounded-full ${log.action && log.action.includes('CREATED') ? 'bg-green-100 text-green-800' : 'bg-blue-100 text-blue-800'}`}>
+                                                {log.action || 'UNKNOWN'}
+                                            </span>
+                                        </td>
+                                        <td className="px-6 py-4 whitespace-nowrap text-xs text-gray-600">
+                                            {log.userEmail || log.adminEmail || 'System'}
+                                        </td>
+                                        <td className="pr-8 py-4 text-xs text-gray-500 max-w-xs truncate" title={log.details}>
+                                            {log.details || '-'}
+                                        </td>
+                                    </tr>
+                                ))
+                            )}
+                        </tbody>
+                    </table>
                     </div>
                 </div>
+              </div>
+
+              {editingUser && (
+                  <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
+                      <div className="bg-white rounded-lg shadow-xl w-full max-w-lg overflow-hidden animate-fade-in-up">
+                          <div className="px-6 py-4 border-b border-gray-100 flex justify-between items-center">
+                              <h3 className="text-lg font-bold text-gray-900">Edit User Profile</h3>
+                              <button onClick={closeEditModal} className="text-gray-400 hover:text-gray-600">
+                                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                              </button>
+                          </div>
+                          <form onSubmit={handleUpdateUser} className="p-6">
+                              {/* READ ONLY EMAIL */}
+                              <div className="mb-4">
+                                  <label className="block text-sm font-medium text-gray-500 mb-1">User Email (Read Only)</label>
+                                  <input type="text" value={editingUser.email} disabled className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-md text-gray-500 text-sm cursor-not-allowed" />
+                              </div>
+
+                              {/* NAME EDIT */}
+                              <div className="mb-4">
+                                  <label className="block text-sm font-medium text-gray-700 mb-1">Full Name</label>
+                                  <input 
+                                    type="text" 
+                                    value={editName} 
+                                    onChange={(e) => setEditName(e.target.value)} 
+                                    className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+                                  />
+                              </div>
+
+                              {/* VILLAGE EDIT */}
+                              <div className="mb-4">
+                                  <label className="block text-sm font-medium text-gray-700 mb-1">Village</label>
+                                  <select 
+                                      value={editVillage}
+                                      onChange={(e) => setEditVillage(e.target.value as VillageType)}
+                                      className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+                                  >
+                                      {Object.values(VILLAGES).map(v => (
+                                          <option key={v.id} value={v.id}>{v.name}</option>
+                                      ))}
+                                  </select>
+                              </div>
+
+                              {/* ROLE EDIT */}
+                              <div className="mb-4">
+                                  <label className="block text-sm font-medium text-gray-700 mb-1">System Role</label>
+                                  <select 
+                                      value={editRole}
+                                      onChange={(e) => setEditRole(e.target.value as UserRole)}
+                                      className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+                                  >
+                                      {USER_ROLES.map(r => (
+                                          <option key={r} value={r}>{r.charAt(0).toUpperCase() + r.slice(1)}</option>
+                                      ))}
+                                  </select>
+                              </div>
+
+                              {/* JOB TITLE EDIT */}
+                              <div className="mb-4">
+                                  <label className="block text-sm font-medium text-gray-700 mb-1">Job Title</label>
+                                  <select 
+                                      value={editJobTitle}
+                                      onChange={(e) => setEditJobTitle(e.target.value)}
+                                      className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+                                  >
+                                      {JOB_ROLES.map(role => (
+                                          <option key={role} value={role}>{role}</option>
+                                      ))}
+                                  </select>
+                              </div>
+
+                              {/* PASSWORD EDIT */}
+                              <div className="mb-6">
+                                  <label className="block text-sm font-medium text-gray-700 mb-1">Change Password</label>
+                                  <input 
+                                      type="text" 
+                                      value={editPassword}
+                                      onChange={(e) => setEditPassword(e.target.value)}
+                                      placeholder="Enter new password to update"
+                                      className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+                                  />
+                                  <p className="mt-1 text-xs text-gray-500">Leave blank to keep current password in registry.</p>
+                              </div>
+
+                              <div className="flex justify-end gap-3">
+                                  <button 
+                                      type="button" 
+                                      onClick={closeEditModal}
+                                      className="px-4 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 hover:bg-gray-50"
+                                  >
+                                      Cancel
+                                  </button>
+                                  <button 
+                                      type="submit" 
+                                      disabled={isUpdatingUser}
+                                      className="px-4 py-2 border border-transparent rounded-md text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                                  >
+                                      {isUpdatingUser ? 'Saving...' : 'Save Changes'}
+                                  </button>
+                              </div>
+                          </form>
+                      </div>
+                  </div>
+              )}
             </div>
+          </div>
         )}
 
       </main>
-
-      {/* ... (Edit User Modal unchanged) ... */}
-      {editingUser && (
-        <div className="fixed inset-0 z-50 overflow-y-auto" aria-labelledby="modal-title" role="dialog" aria-modal="true">
-            <div className="flex items-end justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:block sm:p-0">
-                <div className="fixed inset-0 bg-gray-500 bg-opacity-75 transition-opacity" aria-hidden="true" onClick={closeEditModal}></div>
-                <span className="hidden sm:inline-block sm:align-middle sm:h-screen" aria-hidden="true">&#8203;</span>
-                <div className="inline-block align-bottom bg-white rounded-lg px-4 pt-5 pb-4 text-left overflow-hidden shadow-xl transform transition-all sm:my-8 sm:align-middle sm:max-w-lg sm:w-full sm:p-6">
-                    <div>
-                        <div className="mt-3 text-center sm:mt-5">
-                            <h3 className="text-lg leading-6 font-medium text-gray-900" id="modal-title">Edit User: {editingUser.email}</h3>
-                            <div className="mt-2">
-                                <form onSubmit={handleUpdateUser} className="space-y-4 text-left">
-                                     <div>
-                                         <label className="block text-sm font-medium text-gray-700">Name</label>
-                                         <input type="text" value={editName} onChange={e => setEditName(e.target.value)} className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm p-2" />
-                                     </div>
-                                     <div>
-                                         <label className="block text-sm font-medium text-gray-700">Role</label>
-                                         <select value={editRole} onChange={e => setEditRole(e.target.value as UserRole)} className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm p-2">
-                                              {USER_ROLES.map(r => <option key={r} value={r}>{r}</option>)}
-                                         </select>
-                                     </div>
-                                     <div>
-                                         <label className="block text-sm font-medium text-gray-700">Village</label>
-                                         <select value={editVillage} onChange={e => setEditVillage(e.target.value as VillageType)} className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm p-2">
-                                              {Object.values(VILLAGES).map(v => <option key={v.id} value={v.id}>{v.name}</option>)}
-                                         </select>
-                                     </div>
-                                     <div>
-                                         <label className="block text-sm font-medium text-gray-700">Job Title</label>
-                                         <select value={editJobTitle} onChange={e => setEditJobTitle(e.target.value)} className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm p-2">
-                                              {JOB_ROLES.map(r => <option key={r} value={r}>{r}</option>)}
-                                         </select>
-                                     </div>
-                                     <div>
-                                         <label className="block text-sm font-medium text-gray-700">New Password (Optional)</label>
-                                         <input type="password" value={editPassword} onChange={e => setEditPassword(e.target.value)} placeholder="Leave blank to keep current" className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm p-2" />
-                                     </div>
-                                     <div className="mt-5 sm:mt-6 sm:grid sm:grid-cols-2 sm:gap-3 sm:grid-flow-row-dense">
-                                        <button type="submit" disabled={isUpdatingUser} className="w-full inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-indigo-600 text-base font-medium text-white hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:col-start-2 sm:text-sm">
-                                            {isUpdatingUser ? 'Saving...' : 'Save Changes'}
-                                        </button>
-                                        <button type="button" onClick={closeEditModal} className="mt-3 w-full inline-flex justify-center rounded-md border border-gray-300 shadow-sm px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:mt-0 sm:col-start-1 sm:text-sm">
-                                            Cancel
-                                        </button>
-                                     </div>
-                                </form>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-      )}
 
       {/* Transaction Modal */}
       {showTransModal && (
@@ -1705,8 +1838,8 @@ export const Dashboard: React.FC<DashboardProps> = ({ villageId, userEmail, user
                     </div>
                 </div>
             </div>
-        )}
-
+        </div>
+      )}
     </div>
   );
 };

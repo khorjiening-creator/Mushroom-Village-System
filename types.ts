@@ -38,17 +38,18 @@ export interface UserProfile {
 }
 
 export interface FinancialRecord {
-  id?: string;
+  id: string;
   type: 'INCOME' | 'EXPENSE';
   category: string;
   amount: number;
   date: string;
-  batchId?: string;
-  orderNumber?: string;
   description?: string;
+  batchId?: string | null;
+  orderNumber?: string | null;
   recordedBy: string;
   villageId: VillageType;
-  createdAt: string;
   paymentMethod?: string;
   status?: 'COMPLETED' | 'PENDING';
+  createdAt?: string;
+  updatedAt?: string;
 }
