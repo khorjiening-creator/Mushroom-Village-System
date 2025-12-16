@@ -1,11 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { signInWithEmailAndPassword, onAuthStateChanged, User, signOut } from 'firebase/auth';
-import { doc, setDoc, getDoc } from 'firebase/firestore';
+import { doc, getDoc, setDoc } from 'firebase/firestore';
 import { auth, db } from './services/firebase';
-import { VillageType } from './types';
+import { VillageType, UserProfile } from './types';
 import { VILLAGES } from './constants';
 import VillageSelector from './components/VillageSelector';
-import Dashboard from './components/Dashboard';
+import { Dashboard } from './components/Dashboard';
 
 function App() {
   const [user, setUser] = useState<User | null>(null);
@@ -21,29 +21,39 @@ function App() {
   
   // Admin State
   const [isAdmin, setIsAdmin] = useState(false);
+  const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
       if (!isLoggingIn) {
         if (currentUser) {
           try {
-            const adminDocRef = doc(db, 'management', currentUser.uid);
-            const adminSnap = await getDoc(adminDocRef);
-            setIsAdmin(adminSnap.exists());
-          } catch (error: any) {
-            // Swallow permission denied as it simply means not an admin
-            if (error.code !== 'permission-denied') {
-                console.error("Error verifying admin status:", error);
+            // Fetch User Profile from Firestore to check Role and Validity
+            const userDocRef = doc(db, 'users', currentUser.uid);
+            const userSnap = await getDoc(userDocRef);
+            
+            if (userSnap.exists()) {
+                const profile = userSnap.data() as UserProfile;
+                setIsAdmin(profile.role === 'admin');
+                setUserProfile(profile);
+                setUser(currentUser);
+            } else {
+                console.warn("User authenticated but no profile found.");
+                setUser(null);
+                setIsAdmin(false);
             }
+          } catch (error) {
+            console.error("Error fetching user profile:", error);
             setIsAdmin(false);
           }
         } else {
           setIsAdmin(false);
+          setUserProfile(null);
+          setUser(null);
           // Clear inputs on logout/session end
           setEmail('');
           setPassword('');
         }
-        setUser(currentUser);
         setLoading(false);
       }
     });
@@ -63,79 +73,93 @@ function App() {
     }
     
     try {
-      let currentUser: User | null = null;
-
-      // 1. Attempt Sign In - STRICTLY Login Only
+      // 1. Attempt Sign In
+      let userCredential;
       try {
-        const userCredential = await signInWithEmailAndPassword(auth, email, password);
-        currentUser = userCredential.user;
+        userCredential = await signInWithEmailAndPassword(auth, email, password);
       } catch (signInError: any) {
-        // Explicitly handle user not found to deny access
         if (signInError.code === 'auth/user-not-found' || signInError.code === 'auth/invalid-credential') {
            throw new Error("auth/user-not-found");
         }
         throw signInError;
       }
 
-      if (currentUser) {
-        // Check if user is management/admin first
-        let isManagement = false;
-        try {
-            const adminDocRef = doc(db, 'management', currentUser.uid);
-            const adminSnap = await getDoc(adminDocRef);
-            isManagement = adminSnap.exists();
-        } catch (err: any) {
-            // Treat permission denied as "not admin" instead of login failure
-            if (err.code !== 'permission-denied') {
-                console.warn("Admin check failed:", err);
-            }
-            isManagement = false;
-        }
-        
-        // Update local admin state immediately
-        setIsAdmin(isManagement);
+      const currentUser = userCredential.user;
 
-        if (isManagement) {
-           // If management, skip user profile creation/validation in 'users' collection
-           setUser(currentUser);
-        } else {
-           const userDocRef = doc(db, "users", currentUser.uid);
-           const userDocSnap = await getDoc(userDocRef);
-
-           if (!userDocSnap.exists()) {
-             // If user exists in Auth but not in Firestore 'users', we can try to create the profile
-             // or deny access depending on strictness. Assuming we allow them to init profile if they have Auth.
-             try {
-               await setDoc(userDocRef, {
-                 uid: currentUser.uid,
-                 email: currentUser.email,
-                 villageId: selectedVillage,
-                 role: VILLAGES[selectedVillage].role,
-                 createdAt: new Date().toISOString()
-               });
-               setUser(currentUser);
-             } catch (fsError) {
-               console.error("Profile creation failed:", fsError);
-               await signOut(auth);
-               throw new Error("permission-denied");
-             }
-           } else {
-              // Check if user belongs to the selected village
-              const userData = userDocSnap.data();
-              if (userData && userData.villageId !== selectedVillage) {
-                await signOut(auth);
-                throw new Error("village-mismatch");
-              }
-              setUser(currentUser);
-           }
-        }
+      // 2. Check Firestore Profile
+      const userDocRef = doc(db, "users", currentUser.uid);
+      let userDocSnap;
+      try {
+        userDocSnap = await getDoc(userDocRef);
+      } catch (err) {
+        console.error("Error reading profile:", err);
+        // If we can't read, we might not have permissions or offline. 
+        // We will proceed to recovery only if we are sure it doesn't exist or read failed.
       }
+
+      if (!userDocSnap || !userDocSnap.exists()) {
+          // AUTO-RECOVERY: Create missing profile
+          console.log("Profile missing. Attempting auto-creation...");
+          
+          const timestamp = new Date().toISOString();
+          const baseProfile: UserProfile = {
+              uid: currentUser.uid,
+              name: currentUser.displayName || 'System User',
+              email: currentUser.email || email,
+              jobTitle: 'Unassigned',
+              role: 'admin', // Try Admin first
+              villageId: selectedVillage,
+              createdAt: timestamp
+          };
+
+          try {
+              // Attempt 1: Create as Admin
+              await setDoc(userDocRef, baseProfile);
+              setUserProfile(baseProfile);
+              setIsAdmin(true);
+          } catch (adminError) {
+              console.warn("Could not create Admin profile (likely permission issues). Retrying as User...", adminError);
+              
+              try {
+                  // Attempt 2: Create as standard User
+                  const userProfileFallback = { ...baseProfile, role: 'user' as const };
+                  await setDoc(userDocRef, userProfileFallback);
+                  setUserProfile(userProfileFallback);
+                  setIsAdmin(false);
+              } catch (userError) {
+                  console.error("Critical: Could not create any profile in Firestore.", userError);
+                  // Attempt 3: In-Memory Fallback (Login allowed, but no persistence)
+                  // This fixes "profile-not-found" blocking the user entirely.
+                  const memoryProfile = { ...baseProfile, role: 'user' as const, note: 'Temporary Session' };
+                  setUserProfile(memoryProfile);
+                  setIsAdmin(false);
+              }
+          }
+          
+          setUser(currentUser);
+          setIsLoggingIn(false);
+          return;
+      }
+
+      const userData = userDocSnap.data() as UserProfile;
+
+      // 3. Auto-correct Village Selection
+      // If the user's profile belongs to a different village than selected (and not admin),
+      // strictly enforce the profile's village by updating the state.
+      if (userData.villageId && userData.villageId !== selectedVillage && userData.role !== 'admin') {
+          console.log(`Auto-switching village from ${selectedVillage} to ${userData.villageId}`);
+          setSelectedVillage(userData.villageId);
+      }
+
+      // Success
+      setIsAdmin(userData.role === 'admin');
+      setUserProfile(userData);
+      setUser(currentUser);
 
     } catch (error: any) {
       console.error(error);
       let message = "Authentication failed. Please check your credentials.";
-      if (error.message === 'permission-denied') message = "Permission denied: Unable to create village profile.";
-      else if (error.message === 'village-mismatch') message = `Access Denied: You are not registered to ${VILLAGES[selectedVillage].name}.`;
+      if (error.message === 'profile-not-found') message = "Access Denied: No profile found.";
       else if (error.message === 'auth/wrong-password' || error.code === 'auth/wrong-password') message = "Invalid password.";
       else if (error.message === 'auth/user-not-found') message = "Access Denied: Email not registered in the system.";
       else if (error.code === 'auth/invalid-email') message = "Invalid email format.";
@@ -144,7 +168,6 @@ function App() {
       
       setAuthError(message);
       setUser(null);
-      // Clear inputs on failure
       setEmail('');
       setPassword('');
     } finally {
@@ -161,11 +184,13 @@ function App() {
   }
 
   // Authenticated View
-  if (user && !isLoggingIn) {
+  if (user && !isLoggingIn && userProfile) {
     return (
       <Dashboard 
         villageId={selectedVillage} 
         userEmail={user.email || 'User'} 
+        userName={userProfile.name}
+        userRole={userProfile.role}
         isAdmin={isAdmin}
       />
     );
@@ -181,40 +206,31 @@ function App() {
   } else if (themeColor === 'blue') {
     btnColorClass = 'bg-blue-600 hover:bg-blue-700 text-white';
   } else {
-    // Slate/Gray
     btnColorClass = 'bg-slate-800 hover:bg-slate-900 text-white';
   }
 
   return (
     <div className="min-h-screen min-h-[100dvh] flex flex-col justify-center py-6 sm:py-12 sm:px-6 lg:px-8 relative overflow-hidden font-sans">
       
-      {/* Updated Background: Dark Forest */}
+      {/* Background */}
       <div className="absolute inset-0 z-0">
           <div className="absolute inset-0 bg-[url('https://images.unsplash.com/photo-1623164227084-297f62086c8f?q=80&w=2669&auto=format&fit=crop')] bg-cover bg-center"></div>
-          {/* Overlay gradient to darken it heavily as per screenshot */}
           <div className="absolute inset-0 bg-green-950/80 bg-gradient-to-b from-green-900/50 to-slate-950/90 backdrop-blur-[2px]"></div>
       </div>
 
       <div className="sm:mx-auto sm:w-full sm:max-w-md relative z-10 animate-fade-in-up">
-        {/* Header Content Floating on Background */}
         <div className="text-center mb-8">
-          {/* Custom Logo from Screenshot */}
           <div className="mx-auto h-20 w-20 flex items-center justify-center rounded-full bg-white/10 backdrop-blur-md border border-white/20 shadow-xl mb-6">
              <svg xmlns="http://www.w3.org/2000/svg" className="h-10 w-10 text-white" viewBox="0 0 24 24" fill="currentColor">
-                {/* 3 Trees / Mushrooms Symbol */}
                 <path d="M12 2L15 8H9L12 2Z" fill="currentColor" opacity="0.9" />
                 <path d="M12 10C13.6569 10 15 11.3431 15 13H9C9 11.3431 10.3431 10 12 10Z" fill="currentColor" />
                 <rect x="11" y="13" width="2" height="4" fill="currentColor" />
-                
-                {/* Side Mushrooms */}
                 <path d="M6 12C7.10457 12 8 12.8954 8 14H4C4 12.8954 4.89543 12 6 12Z" fill="currentColor" opacity="0.8"/>
                 <rect x="5" y="14" width="2" height="2" fill="currentColor" opacity="0.8"/>
-                
                 <path d="M18 12C19.1046 12 20 12.8954 20 14H16C16 12.8954 16.8954 12 18 12Z" fill="currentColor" opacity="0.8"/>
                 <rect x="17" y="14" width="2" height="2" fill="currentColor" opacity="0.8"/>
              </svg>
           </div>
-          
           <h2 className="text-3xl font-extrabold text-white drop-shadow-md tracking-tight mb-2">
             Mushroom Village System
           </h2>
@@ -363,7 +379,7 @@ function App() {
       
       {/* Footer Version Info */}
       <div className="absolute bottom-4 left-0 right-0 text-center z-10">
-          <p className="text-[10px] text-white/30">© 2025 Mushroom Village Systems v2.4.1</p>
+          <p className="text-[10px] text-white/30">© 2025 Mushroom Village Systems v2.5.0</p>
       </div>
     </div>
   );

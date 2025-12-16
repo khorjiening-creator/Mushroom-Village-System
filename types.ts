@@ -9,6 +9,8 @@ export enum VillageRole {
   PROCESSING = 'PROCESSING'
 }
 
+export type UserRole = 'admin' | 'user' | 'finance';
+
 export interface VillageConfig {
   id: VillageType;
   name: string;
@@ -26,10 +28,27 @@ export interface AuthState {
 
 export interface UserProfile {
   uid: string;
+  name: string;
   email: string;
-  villageId: VillageType;
-  role: VillageRole;
-  jobTitle?: string;
-  createdAt: string;
+  jobTitle: string;
+  role: UserRole;
   password?: string;
+  villageId: VillageType;
+  createdAt: string;
+}
+
+export interface FinancialRecord {
+  id?: string;
+  type: 'INCOME' | 'EXPENSE';
+  category: string;
+  amount: number;
+  date: string;
+  batchId?: string;
+  orderNumber?: string;
+  description?: string;
+  recordedBy: string;
+  villageId: VillageType;
+  createdAt: string;
+  paymentMethod?: string;
+  status?: 'COMPLETED' | 'PENDING';
 }
