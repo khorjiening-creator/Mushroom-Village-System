@@ -415,6 +415,8 @@ export const Dashboard: React.FC<DashboardProps> = ({ villageId, userEmail, user
                 villageId={villageId}
                 userEmail={userEmail}
                 theme={theme}
+                onSuccess={(msg) => showNotification(msg, 'success')}
+                onError={(msg) => showNotification(msg, 'error')}
             />
         )}
         

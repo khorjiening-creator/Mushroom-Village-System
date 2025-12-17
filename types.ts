@@ -67,6 +67,7 @@ export interface ActivityLog {
   totalYield?: number; // Added for Yield Tracking feature
   mushroomStrain?: string; // Added for Batch Registry display
   predictedYield?: number; // Added for Productivity Prediction
+  batchStatus?: string; // Added for lifecycle tracking
 }
 
 export interface HarvestLog {

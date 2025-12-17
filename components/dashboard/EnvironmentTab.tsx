@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { collection, query, orderBy, limit, onSnapshot, addDoc, where, getDocs } from 'firebase/firestore';
+import { collection, query, orderBy, limit, onSnapshot, addDoc, where, getDocs, doc, updateDoc } from 'firebase/firestore';
 import { db } from '../../services/firebase';
 import { VillageType, EnvironmentLog, ActivityLog } from '../../types';
 
@@ -7,6 +7,8 @@ interface EnvironmentTabProps {
     villageId: VillageType;
     userEmail: string;
     theme?: any;
+    onSuccess?: (msg: string) => void;
+    onError?: (msg: string) => void;
 }
 
 // --- Knowledge Base: Optimal Conditions per Species ---
@@ -20,6 +22,7 @@ const SPECIES_PROFILES: Record<string, { minT: number, maxT: number, minH: numbe
 };
 
 interface BatchPrediction {
+    id: string; // Document ID
     batchId: string;
     villageId: VillageType;
     strain: string;
@@ -28,13 +31,13 @@ interface BatchPrediction {
     baseDaysRemaining: number;
     adjustedDaysRemaining: number;
     predictedDate: Date;
-    status: 'On Track' | 'Delayed (Heat)' | 'Delayed (Cold)' | 'Delayed (Dry)' | 'Harvest Ready' | 'Critical';
+    status: 'On Track' | 'Delayed (Heat)' | 'Delayed (Cold)' | 'Delayed (Dry)' | 'Harvest Ready' | 'Critical' | 'Target Met';
     stressFactor: number; // Days added due to stress
     isTemperatureBad: boolean;
     isHumidityBad: boolean;
 }
 
-export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userEmail, theme }) => {
+export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userEmail, theme, onSuccess, onError }) => {
     const [logs, setLogs] = useState<EnvironmentLog[]>([]);
     const [activeBatches, setActiveBatches] = useState<ActivityLog[]>([]);
     const [loading, setLoading] = useState(true);
@@ -59,54 +62,78 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userE
             setLogs(data);
         });
 
-        // 2. Fetch Active Batches (BED_PREP logs) from both A and B collections
-        const fetchBatches = async () => {
-            try {
-                // Query Optimization: Removed where('type', '==', 'BED_PREP') to avoid composite index requirement.
-                // We fetch a larger subset of recent logs and filter client-side.
-                const [snapA, snapB] = await Promise.all([
-                    getDocs(query(
-                        collection(db, 'dailyfarming_logA'), 
-                        orderBy('timestamp', 'desc'),
-                        limit(150)
-                    )),
-                    getDocs(query(
-                        collection(db, 'dailyfarming_logB'), 
-                        orderBy('timestamp', 'desc'),
-                        limit(150)
-                    ))
-                ]);
-
-                const batches: ActivityLog[] = [];
-                
-                snapA.forEach(doc => {
-                    const data = doc.data() as ActivityLog;
-                    if (data.type === 'BED_PREP') {
-                        batches.push({ id: doc.id, ...data });
-                    }
-                });
-
-                snapB.forEach(doc => {
-                    const data = doc.data() as ActivityLog;
-                    if (data.type === 'BED_PREP') {
-                        batches.push({ id: doc.id, ...data });
-                    }
-                });
-
-                // Sort merged list by newest first
-                batches.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
-                
-                setActiveBatches(batches);
-            } catch (e) {
-                console.warn("Error fetching active batches for prediction:", e);
-            }
-        };
-
         fetchBatches();
         setLoading(false);
 
         return () => unsubEnv();
     }, [villageId]);
+
+    const fetchBatches = async () => {
+        try {
+            // Determine collection based on Village ID to ensure separation
+            let colName = '';
+            if (villageId === VillageType.A) colName = 'dailyfarming_logA';
+            else if (villageId === VillageType.B) colName = 'dailyfarming_logB';
+            
+            if (!colName) {
+                setActiveBatches([]);
+                return;
+            }
+
+            const q = query(
+                collection(db, colName),
+                orderBy('timestamp', 'desc'),
+                limit(150)
+            );
+
+            const snap = await getDocs(q);
+            const batches: ActivityLog[] = [];
+            
+            snap.forEach(doc => {
+                const data = doc.data() as ActivityLog;
+                if (data.type === 'BED_PREP') {
+                    batches.push({ id: doc.id, ...data });
+                }
+            });
+
+            setActiveBatches(batches);
+        } catch (e) {
+            console.warn("Error fetching active batches for prediction:", e);
+            if (onError) onError("Failed to load active batches.");
+        }
+    };
+
+    // --- Actions ---
+    const handleStopMonitoring = async (batchDocId: string, originVillage: VillageType) => {
+        if (!confirm("Confirm to delete harvest forecast for this batch? This will stop monitoring but keep the registry data.")) return;
+
+        const colName = originVillage === VillageType.A ? 'dailyfarming_logA' : 
+                        originVillage === VillageType.B ? 'dailyfarming_logB' : null;
+        
+        if (!colName) return;
+
+        // Optimistic UI Update: Remove batch from active list immediately to update predictions
+        setActiveBatches(current => current.filter(b => b.id !== batchDocId));
+
+        try {
+            const docRef = doc(db, colName, batchDocId);
+            await updateDoc(docRef, {
+                batchStatus: 'COMPLETED'
+            });
+            // Do NOT refetch immediately to avoid race condition where read happens before write propagation
+            if (onSuccess) onSuccess(`Batch monitoring ended.`);
+        } catch (e) {
+            console.error("Failed to archive batch", e);
+            if (onError) onError("Could not update batch status.");
+            // Revert optimistic update by fetching real state
+            fetchBatches();
+        }
+    };
+
+    const handleContinueMonitoring = () => {
+        // Just notification, keeps the card visible
+        if (onSuccess) onSuccess("Batch monitoring continued.");
+    };
 
     // --- Core Logic: Prediction Engine ---
     const latest = logs[0] || { temperature: 0, humidity: 0, moisture: 0 };
@@ -114,7 +141,12 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userE
     const predictions: BatchPrediction[] = useMemo(() => {
         if (!latest.timestamp) return []; // No sensor data yet
 
-        return activeBatches.map(batch => {
+        return activeBatches.filter(batch => {
+            // Filter out completed items.
+            // Note: Optimistic updates in handleStopMonitoring remove the item from activeBatches directly,
+            // so this filter is a secondary check for data coming from DB.
+            return batch.batchStatus !== 'COMPLETED';
+        }).map(batch => {
             const profile = SPECIES_PROFILES[batch.mushroomStrain || 'Unknown'] || SPECIES_PROFILES['Unknown'];
             const planted = new Date(batch.timestamp);
             const now = new Date();
@@ -123,6 +155,12 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userE
             const diffTime = Math.abs(now.getTime() - planted.getTime());
             const daysElapsed = Math.ceil(diffTime / (1000 * 60 * 60 * 24)); 
             const baseRemaining = Math.max(0, profile.cycleDays - daysElapsed);
+
+            // Yield Check (Calculated for status display, not filtering)
+            const predicted = batch.predictedYield || 0;
+            const actual = batch.totalYield || 0;
+            const waste = batch.totalWastage || 0;
+            const isYieldMet = predicted > 0 && (actual + waste) >= predicted;
 
             // Environmental Impact Analysis
             const t = latest.temperature;
@@ -156,12 +194,15 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userE
             const predictDate = new Date();
             predictDate.setDate(predictDate.getDate() + totalRemaining);
 
-            // Override if cycle completed
-            if (baseRemaining <= 0 && !isTemperatureBad && !isHumidityBad) {
+            // Status Overrides
+            if (isYieldMet) {
+                status = 'Target Met';
+            } else if (baseRemaining <= 0 && !isTemperatureBad && !isHumidityBad) {
                 status = 'Harvest Ready';
             }
 
             return {
+                id: batch.id || 'unknown',
                 batchId: batch.batchId || '???',
                 villageId: batch.villageId,
                 strain: batch.mushroomStrain || 'Unknown',
@@ -175,7 +216,7 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userE
                 isTemperatureBad,
                 isHumidityBad
             };
-        }).sort((a, b) => a.adjustedDaysRemaining - b.adjustedDaysRemaining); // Show soonest harvest first
+        }).sort((a, b) => a.adjustedDaysRemaining - b.adjustedDaysRemaining); 
     }, [activeBatches, logs]);
 
     // --- Actions ---
@@ -197,9 +238,10 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userE
             setTempInput('');
             setHumidityInput('');
             setMoistureInput('');
+            if (onSuccess) onSuccess("Sensor reading added.");
         } catch (err) {
             console.error(err);
-            alert("Failed to save reading");
+            if (onError) onError("Failed to save reading");
         } finally {
             setIsSubmitting(false);
         }
@@ -285,7 +327,7 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userE
                 <div className="px-6 py-4 border-b border-gray-200 bg-gray-50 flex justify-between items-center">
                     <div>
                         <h3 className="text-lg font-bold text-gray-900">Active Batch Harvest Forecast</h3>
-                        <p className="text-xs text-gray-500">Real-time predictions based on species & environment</p>
+                        <p className="text-xs text-gray-500">Real-time predictions based on species & environment ({villageId})</p>
                     </div>
                     {/* Legend */}
                     <div className="hidden sm:flex gap-2 text-[10px] font-medium uppercase text-gray-400">
@@ -296,7 +338,7 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userE
                 
                 {predictions.length === 0 ? (
                     <div className="p-10 text-center text-gray-400">
-                        <p>No active batches or sensor data available to generate predictions.</p>
+                        <p>No active batches or sensor data available for {villageId}.</p>
                         <p className="text-xs mt-2">Ensure "Bed Prep" has been logged in Farming tab and sensors are active.</p>
                     </div>
                 ) : (
@@ -304,6 +346,7 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userE
                         {predictions.map((p) => {
                             const isDelayed = p.stressFactor > 0;
                             const isReady = p.status === 'Harvest Ready';
+                            const isTargetMet = p.status === 'Target Met';
                             
                             // Visual Styles based on status
                             let cardBorder = "border-gray-200";
@@ -312,6 +355,9 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userE
                             if (isReady) {
                                 cardBorder = "border-green-400 ring-2 ring-green-100";
                                 statusBadge = "bg-green-100 text-green-800";
+                            } else if (isTargetMet) {
+                                cardBorder = "border-blue-400 ring-2 ring-blue-100";
+                                statusBadge = "bg-blue-100 text-blue-800";
                             } else if (p.status.includes('Heat')) {
                                 cardBorder = "border-red-300";
                                 statusBadge = "bg-red-100 text-red-800";
@@ -327,60 +373,82 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userE
                             }
 
                             return (
-                                <div key={p.batchId} className={`bg-white rounded-lg shadow-sm border p-4 relative ${cardBorder} transition-all duration-300 hover:shadow-md`}>
-                                    {/* Header */}
-                                    <div className="flex justify-between items-start mb-2">
-                                        <div>
-                                            <h4 className="font-bold text-gray-900 flex items-center gap-2">
-                                                {p.batchId}
-                                                <span className="text-[10px] px-1.5 py-0.5 bg-gray-100 text-gray-500 rounded border border-gray-200">
-                                                    {p.villageId}
-                                                </span>
-                                            </h4>
-                                            <div className="text-xs text-gray-500">{p.strain} • Planted {p.plantingDate.toLocaleDateString()}</div>
-                                        </div>
-                                        <span className={`text-[10px] font-bold uppercase px-2 py-1 rounded-full ${statusBadge}`}>
-                                            {p.status}
-                                        </span>
-                                    </div>
-
-                                    {/* Countdown */}
-                                    <div className="my-4 text-center">
-                                        {isReady ? (
-                                            <div className="text-green-600 font-bold text-xl animate-bounce">
-                                                Ready Now
+                                <div key={p.batchId} className={`bg-white rounded-lg shadow-sm border p-4 relative ${cardBorder} transition-all duration-300 hover:shadow-md flex flex-col justify-between`}>
+                                    <div>
+                                        {/* Header */}
+                                        <div className="flex justify-between items-start mb-2 pr-6">
+                                            <div>
+                                                <h4 className="font-bold text-gray-900 flex items-center gap-2">
+                                                    {p.batchId}
+                                                    <span className="text-[10px] px-1.5 py-0.5 bg-gray-100 text-gray-500 rounded border border-gray-200">
+                                                        {p.villageId}
+                                                    </span>
+                                                </h4>
+                                                <div className="text-xs text-gray-500">{p.strain} • Planted {p.plantingDate.toLocaleDateString()}</div>
                                             </div>
-                                        ) : (
-                                            <div className="flex justify-center items-baseline gap-1">
-                                                <span className={`text-4xl font-extrabold tracking-tight ${isDelayed ? 'text-gray-500' : 'text-indigo-600'}`}>
-                                                    {p.adjustedDaysRemaining}
-                                                </span>
-                                                <span className="text-sm text-gray-500 font-medium">days left</span>
+                                            <span className={`text-[10px] font-bold uppercase px-2 py-1 rounded-full whitespace-nowrap ${statusBadge}`}>
+                                                {p.status}
+                                            </span>
+                                        </div>
+
+                                        {/* Countdown */}
+                                        <div className="my-4 text-center">
+                                            {isReady ? (
+                                                <div className="text-green-600 font-bold text-xl animate-bounce">
+                                                    Ready Now
+                                                </div>
+                                            ) : isTargetMet ? (
+                                                <div className="text-blue-600 font-bold text-lg">
+                                                    Production Goal Met
+                                                </div>
+                                            ) : (
+                                                <div className="flex justify-center items-baseline gap-1">
+                                                    <span className={`text-4xl font-extrabold tracking-tight ${isDelayed ? 'text-gray-500' : 'text-indigo-600'}`}>
+                                                        {p.adjustedDaysRemaining}
+                                                    </span>
+                                                    <span className="text-sm text-gray-500 font-medium">days left</span>
+                                                </div>
+                                            )}
+                                            <div className="text-xs text-gray-400 mt-1">
+                                                Est: {p.predictedDate.toLocaleDateString(undefined, {month:'short', day:'numeric'})}
                                             </div>
-                                        )}
-                                        <div className="text-xs text-gray-400 mt-1">
-                                            Est: {p.predictedDate.toLocaleDateString(undefined, {month:'short', day:'numeric'})}
+                                        </div>
+
+                                        {/* Environment Check for this Batch */}
+                                        <div className="border-t border-gray-100 pt-3 flex justify-between items-center text-xs">
+                                            <div className="flex items-center gap-2">
+                                                <span className={`flex items-center gap-1 ${p.isTemperatureBad ? 'text-red-500 font-bold' : 'text-green-600'}`}>
+                                                    <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M10 2a1 1 0 011 1v1a1 1 0 11-2 0V3a1 1 0 011-1zm4 8a4 4 0 11-8 0 4 4 0 018 0zm-.464 4.95l.707.707a1 1 0 001.414-1.414l-.707-.707a1 1 0 00-1.414 1.414zm2.12-10.607a1 1 0 010 1.414l-.706.707a1 1 0 11-1.414-1.414l.707-.707a1 1 0 011.414 0zM17 11a1 1 0 100-2h-1a1 1 0 100 2h1zm-7 4a1 1 0 011 1v1a1 1 0 11-2 0v-1a1 1 0 011-1zM5.05 6.464A1 1 0 106.465 5.05l-.708-.707a1 1 0 00-1.414 1.414l.707.707zm1.414 8.486l-.707.707a1 1 0 01-1.414-1.414l.707-.707a1 1 0 011.414 1.414zM4 11a1 1 0 100-2H3a1 1 0 000 2h1z" clipRule="evenodd" /></svg>
+                                                    Temp
+                                                </span>
+                                                <span className={`flex items-center gap-1 ${p.isHumidityBad ? 'text-orange-500 font-bold' : 'text-blue-600'}`}>
+                                                     <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clipRule="evenodd" /></svg>
+                                                    Humid
+                                                </span>
+                                            </div>
+                                            
+                                            {isDelayed && (
+                                                <span className="text-red-500 font-bold">
+                                                    +{p.stressFactor} day delay
+                                                </span>
+                                            )}
                                         </div>
                                     </div>
-
-                                    {/* Environment Check for this Batch */}
-                                    <div className="border-t border-gray-100 pt-3 flex justify-between items-center text-xs">
-                                        <div className="flex items-center gap-2">
-                                            <span className={`flex items-center gap-1 ${p.isTemperatureBad ? 'text-red-500 font-bold' : 'text-green-600'}`}>
-                                                <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M10 2a1 1 0 011 1v1a1 1 0 11-2 0V3a1 1 0 011-1zm4 8a4 4 0 11-8 0 4 4 0 018 0zm-.464 4.95l.707.707a1 1 0 001.414-1.414l-.707-.707a1 1 0 00-1.414 1.414zm2.12-10.607a1 1 0 010 1.414l-.706.707a1 1 0 11-1.414-1.414l.707-.707a1 1 0 011.414 0zM17 11a1 1 0 100-2h-1a1 1 0 100 2h1zm-7 4a1 1 0 011 1v1a1 1 0 11-2 0v-1a1 1 0 011-1zM5.05 6.464A1 1 0 106.465 5.05l-.708-.707a1 1 0 00-1.414 1.414l.707.707zm1.414 8.486l-.707.707a1 1 0 01-1.414-1.414l.707-.707a1 1 0 011.414 1.414zM4 11a1 1 0 100-2H3a1 1 0 000 2h1z" clipRule="evenodd" /></svg>
-                                                Temp
-                                            </span>
-                                            <span className={`flex items-center gap-1 ${p.isHumidityBad ? 'text-orange-500 font-bold' : 'text-blue-600'}`}>
-                                                 <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clipRule="evenodd" /></svg>
-                                                Humid
-                                            </span>
-                                        </div>
-                                        
-                                        {isDelayed && (
-                                            <span className="text-red-500 font-bold">
-                                                +{p.stressFactor} day delay
-                                            </span>
-                                        )}
+                                    
+                                    {/* Action Buttons */}
+                                    <div className="mt-4 flex gap-2 border-t border-gray-100 pt-3">
+                                        <button 
+                                            onClick={() => handleStopMonitoring(p.id, p.villageId)}
+                                            className="flex-1 py-1.5 px-2 bg-white border border-red-200 text-red-600 hover:bg-red-50 text-xs font-medium rounded transition-colors"
+                                        >
+                                            End Batch
+                                        </button>
+                                        <button 
+                                            onClick={handleContinueMonitoring}
+                                            className="flex-1 py-1.5 px-2 bg-gray-50 border border-gray-200 text-gray-600 hover:bg-gray-100 text-xs font-medium rounded transition-colors"
+                                        >
+                                            Continue
+                                        </button>
                                     </div>
                                 </div>
                             );

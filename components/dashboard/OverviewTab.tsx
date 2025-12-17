@@ -1,5 +1,7 @@
-import React, { useState } from 'react';
-import { VillageType, VillageRole, FinancialRecord } from '../../types';
+import React, { useState, useEffect } from 'react';
+import { collection, query, getDocs, orderBy, limit } from 'firebase/firestore';
+import { db } from '../../services/firebase';
+import { VillageType, VillageRole, FinancialRecord, ActivityLog } from '../../types';
 import { VILLAGES } from '../../constants';
 
 interface OverviewTabProps {
@@ -14,13 +16,82 @@ interface OverviewTabProps {
   setChartFilter?: (filter: 'DAILY' | 'WEEKLY' | 'MONTHLY' | 'YEARLY') => void;
 }
 
+// Minimal profile for checking harvest readiness
+const SPECIES_CYCLES: Record<string, number> = {
+    'Oyster': 21,
+    'Shiitake': 90,
+    'Button': 35,
+    "Lion's Mane": 35,
+    'Unknown': 30
+};
+
 export const OverviewTab: React.FC<OverviewTabProps> = ({ 
     villageId, userName, theme, financeOverviewData, isFinance, setActiveTab, openEditTransModal, chartFilter, setChartFilter
 }) => {
     const village = VILLAGES[villageId];
+    const [harvestReadyCount, setHarvestReadyCount] = useState(0);
+
+    // Fetch harvest ready status for Users
+    useEffect(() => {
+        const checkHarvestReadiness = async () => {
+            if (isFinance) return;
+            if (village.role !== VillageRole.FARMING) return;
+
+            const colName = villageId === VillageType.A ? 'dailyfarming_logA' : 'dailyfarming_logB';
+            
+            try {
+                // Fetch recent batches
+                const q = query(collection(db, colName), orderBy('timestamp', 'desc'), limit(100));
+                const snapshot = await getDocs(q);
+                
+                let readyCount = 0;
+                const now = new Date().getTime();
+
+                snapshot.forEach(doc => {
+                    const data = doc.data() as ActivityLog;
+                    if (data.type === 'BED_PREP' && data.batchStatus !== 'COMPLETED') {
+                        const planted = new Date(data.timestamp).getTime();
+                        const daysElapsed = (now - planted) / (1000 * 60 * 60 * 24);
+                        const cycle = SPECIES_CYCLES[data.mushroomStrain || 'Unknown'] || 30;
+                        
+                        // Simple check: If days elapsed > cycle days
+                        if (daysElapsed >= cycle) {
+                            readyCount++;
+                        }
+                    }
+                });
+                setHarvestReadyCount(readyCount);
+            } catch (e) {
+                console.warn("Error checking harvest readiness in overview", e);
+            }
+        };
+
+        checkHarvestReadiness();
+    }, [villageId, isFinance, village.role]);
 
     return (
         <div className="animate-fade-in-up">
+            {/* Harvest Ready Banner (For Users) */}
+            {!isFinance && harvestReadyCount > 0 && (
+                <div className="bg-green-100 border-l-4 border-green-500 text-green-800 p-4 rounded-md shadow-sm mb-6 flex items-center justify-between">
+                    <div className="flex items-center">
+                        <svg className="h-6 w-6 text-green-600 mr-3 animate-bounce" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                        </svg>
+                        <div>
+                            <p className="font-bold text-lg">Harvest Action Required</p>
+                            <p className="text-sm">You have {harvestReadyCount} batch{harvestReadyCount > 1 ? 'es' : ''} ready for harvest based on their growth cycle.</p>
+                        </div>
+                    </div>
+                    <button 
+                        onClick={() => setActiveTab('environment')}
+                        className="bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded shadow transition-colors text-sm whitespace-nowrap"
+                    >
+                        Go to Environment
+                    </button>
+                </div>
+            )}
+
             {isFinance && financeOverviewData ? (
              <div className="space-y-6">
                  <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-200">
