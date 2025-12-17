@@ -74,16 +74,7 @@ function App() {
     
     try {
       // 1. Attempt Sign In
-      let userCredential;
-      try {
-        userCredential = await signInWithEmailAndPassword(auth, email, password);
-      } catch (signInError: any) {
-        if (signInError.code === 'auth/user-not-found' || signInError.code === 'auth/invalid-credential') {
-           throw new Error("auth/user-not-found");
-        }
-        throw signInError;
-      }
-
+      const userCredential = await signInWithEmailAndPassword(auth, email, password);
       const currentUser = userCredential.user;
 
       // 2. Check Firestore Profile
@@ -93,8 +84,6 @@ function App() {
         userDocSnap = await getDoc(userDocRef);
       } catch (err) {
         console.error("Error reading profile:", err);
-        // If we can't read, we might not have permissions or offline. 
-        // We will proceed to recovery only if we are sure it doesn't exist or read failed.
       }
 
       if (!userDocSnap || !userDocSnap.exists()) {
@@ -129,7 +118,6 @@ function App() {
               } catch (userError) {
                   console.error("Critical: Could not create any profile in Firestore.", userError);
                   // Attempt 3: In-Memory Fallback (Login allowed, but no persistence)
-                  // This fixes "profile-not-found" blocking the user entirely.
                   const memoryProfile = { ...baseProfile, role: 'user' as const, note: 'Temporary Session' };
                   setUserProfile(memoryProfile);
                   setIsAdmin(false);
@@ -144,8 +132,6 @@ function App() {
       const userData = userDocSnap.data() as UserProfile;
 
       // 3. Auto-correct Village Selection
-      // If the user's profile belongs to a different village than selected (and not admin),
-      // strictly enforce the profile's village by updating the state.
       if (userData.villageId && userData.villageId !== selectedVillage && userData.role !== 'admin') {
           console.log(`Auto-switching village from ${selectedVillage} to ${userData.villageId}`);
           setSelectedVillage(userData.villageId);
@@ -159,16 +145,26 @@ function App() {
     } catch (error: any) {
       console.error(error);
       let message = "Authentication failed. Please check your credentials.";
-      if (error.message === 'profile-not-found') message = "Access Denied: No profile found.";
-      else if (error.message === 'auth/wrong-password' || error.code === 'auth/wrong-password') message = "Invalid password.";
-      else if (error.message === 'auth/user-not-found') message = "Access Denied: Email not registered in the system.";
-      else if (error.code === 'auth/invalid-email') message = "Invalid email format.";
-      else if (error.code === 'auth/weak-password') message = "Password should be at least 6 characters.";
-      else if (error.code === 'auth/too-many-requests') message = "Too many failed attempts. Please try again later.";
+      const errorCode = error.code;
+      
+      if (errorCode === 'auth/user-not-found' || errorCode === 'auth/invalid-email') {
+          message = "Account not found. Please contact your village administrator.";
+      } else if (errorCode === 'auth/wrong-password') {
+          message = "Invalid password.";
+      } else if (errorCode === 'auth/invalid-credential' || errorCode === 'auth/invalid-login-credentials') {
+          // Handles newer Firebase errors where user/pass errors are unified
+          message = "Invalid credentials. Please check your email and password.";
+      } else if (errorCode === 'auth/too-many-requests') {
+          message = "Too many failed attempts. Please try again later.";
+      } else if (errorCode === 'auth/weak-password') {
+          message = "Password should be at least 6 characters.";
+      } else if (error.message === 'profile-not-found') {
+          message = "Access Denied: No profile found.";
+      }
       
       setAuthError(message);
       setUser(null);
-      setEmail('');
+      // Only clear password on failure to allow user to correct typo
       setPassword('');
     } finally {
       setIsLoggingIn(false);
@@ -264,7 +260,7 @@ function App() {
                   type="email"
                   required
                   value={email}
-                  onChange={(e) => setEmail(e.target.value)}
+                  onChange={(e) => { setEmail(e.target.value); setAuthError(null); }}
                   className="block w-full pl-10 pr-3 py-3 border border-transparent rounded-lg leading-5 bg-slate-800 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-green-500 sm:text-sm transition duration-150 ease-in-out"
                   placeholder="name@gmail.com"
                 />
@@ -287,7 +283,7 @@ function App() {
                   type={showPassword ? "text" : "password"}
                   required
                   value={password}
-                  onChange={(e) => setPassword(e.target.value)}
+                  onChange={(e) => { setPassword(e.target.value); setAuthError(null); }}
                   className="block w-full pl-10 pr-10 py-3 border border-transparent rounded-lg leading-5 bg-slate-800 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-green-500 sm:text-sm transition duration-150 ease-in-out"
                   placeholder="●●●●●●●●●●●"
                 />

@@ -1,3 +1,4 @@
+
 export enum VillageType {
   A = 'Village A',
   B = 'Village B',
@@ -39,6 +40,7 @@ export interface UserProfile {
 
 export interface FinancialRecord {
   id: string;
+  transactionId?: string; // Auto-generated readable ID
   type: 'INCOME' | 'EXPENSE';
   category: string;
   amount: number;
@@ -52,4 +54,55 @@ export interface FinancialRecord {
   status?: 'COMPLETED' | 'PENDING';
   createdAt?: string;
   updatedAt?: string;
+}
+
+export interface ActivityLog {
+  id?: string;
+  type: 'BED_PREP' | 'WATERING' | 'INSPECTION' | 'HARVEST' | 'OTHER';
+  details: string;
+  userEmail: string;
+  timestamp: string;
+  villageId: VillageType;
+  batchId?: string;
+  totalYield?: number; // Added for Yield Tracking feature
+  mushroomStrain?: string; // Added for Batch Registry display
+  predictedYield?: number; // Added for Productivity Prediction
+}
+
+export interface HarvestLog {
+  id?: string;
+  batchId: string;
+  weightKg?: number;
+  totalYield?: number;
+  strain: string;
+  recordedBy?: string;
+  timestamp: string;
+  villageId: VillageType;
+}
+
+export interface EnvironmentLog {
+  id?: string;
+  temperature: number;
+  humidity: number;
+  moisture: number;
+  recordedBy: string;
+  timestamp: string;
+  villageId: VillageType;
+}
+
+export interface ResourceItem {
+  id: string;
+  name: string;
+  quantity: number;
+  unit: string;
+  status: 'OK' | 'LOW' | 'CRITICAL';
+}
+
+export interface SystemLog {
+  id: string;
+  action?: string;
+  details?: string;
+  userEmail?: string;
+  timestamp?: string;
+  [key: string]: any;
 }
