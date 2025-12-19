@@ -38,16 +38,56 @@ interface BatchPrediction {
     isHumidityBad: boolean;
 }
 
+interface RealWeather {
+    temp: number;
+    humidity: number;
+    condition: string;
+    locationName: string;
+}
+
 export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userEmail, theme, onSuccess, onError }) => {
     const [logs, setLogs] = useState<EnvironmentLog[]>([]);
     const [activeBatches, setActiveBatches] = useState<ActivityLog[]>([]);
     const [loading, setLoading] = useState(true);
+    const [externalWeather, setExternalWeather] = useState<RealWeather | null>(null);
+    const [weatherLoading, setWeatherLoading] = useState(false);
     
     // Input State
     const [tempInput, setTempInput] = useState('');
     const [humidityInput, setHumidityInput] = useState('');
     const [moistureInput, setMoistureInput] = useState('');
     const [isSubmitting, setIsSubmitting] = useState(false);
+
+    // --- Weather Fetching ---
+    const fetchRealWorldWeather = async (lat: number, lon: number) => {
+        setWeatherLoading(true);
+        try {
+            // Using Open-Meteo (Free, no API key required for basic usage)
+            const response = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,relative_humidity_2m,weather_code&timezone=auto`);
+            const data = await response.json();
+            
+            if (data.current) {
+                setExternalWeather({
+                    temp: data.current.temperature_2m,
+                    humidity: data.current.relative_humidity_2m,
+                    condition: getWeatherCondition(data.current.weather_code),
+                    locationName: "Local Area"
+                });
+            }
+        } catch (err) {
+            console.warn("Weather fetch failed", err);
+        } finally {
+            setWeatherLoading(false);
+        }
+    };
+
+    const getWeatherCondition = (code: number) => {
+        if (code === 0) return "Clear Sky";
+        if (code < 4) return "Partly Cloudy";
+        if (code < 70) return "Rainy";
+        if (code < 80) return "Snowy";
+        return "Stormy";
+    };
 
     // --- Data Fetching ---
     useEffect(() => {
@@ -63,6 +103,16 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userE
             setLogs(data);
         });
 
+        // 2. Fetch External Weather via Geolocation
+        if ("geolocation" in navigator) {
+            navigator.geolocation.getCurrentPosition(
+                (pos) => fetchRealWorldWeather(pos.coords.latitude, pos.coords.longitude),
+                () => fetchRealWorldWeather(3.1390, 101.6869) // Default to KL, Malaysia if denied
+            );
+        } else {
+            fetchRealWorldWeather(3.1390, 101.6869);
+        }
+
         fetchBatches();
         setLoading(false);
 
@@ -71,7 +121,6 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userE
 
     const fetchBatches = async () => {
         try {
-            // Determine collection based on Village ID to ensure separation
             let colName = '';
             if (villageId === VillageType.A) colName = 'dailyfarming_logA';
             else if (villageId === VillageType.B) colName = 'dailyfarming_logB';
@@ -92,7 +141,6 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userE
             
             snap.forEach(doc => {
                 const data = doc.data() as ActivityLog;
-                // Correcting 'BED_PREP' to 'SUBSTRATE_PREP' to match type definition
                 if (data.type === 'SUBSTRATE_PREP') {
                     batches.push({ id: doc.id, ...data });
                 }
@@ -101,7 +149,6 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userE
             setActiveBatches(batches);
         } catch (e) {
             console.warn("Error fetching active batches for prediction:", e);
-            if (onError) onError("Failed to load active batches.");
         }
     };
 
@@ -114,7 +161,6 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userE
         
         if (!colName) return;
 
-        // Optimistic UI Update: Remove batch from active list immediately to update predictions
         setActiveBatches(current => current.filter(b => b.id !== batchDocId));
 
         try {
@@ -122,18 +168,15 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userE
             await updateDoc(docRef, {
                 batchStatus: 'COMPLETED'
             });
-            // Do NOT refetch immediately to avoid race condition where read happens before write propagation
             if (onSuccess) onSuccess(`Batch monitoring ended.`);
         } catch (e) {
             console.error("Failed to archive batch", e);
             if (onError) onError("Could not update batch status.");
-            // Revert optimistic update by fetching real state
             fetchBatches();
         }
     };
 
     const handleContinueMonitoring = () => {
-        // Just notification, keeps the card visible
         if (onSuccess) onSuccess("Batch monitoring continued.");
     };
 
@@ -141,30 +184,24 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userE
     const latest = logs[0] || { temperature: 0, humidity: 0, moisture: 0 };
     
     const predictions: BatchPrediction[] = useMemo(() => {
-        if (!latest.timestamp) return []; // No sensor data yet
+        if (!latest.timestamp) return [];
 
         return activeBatches.filter(batch => {
-            // Filter out completed items.
-            // Note: Optimistic updates in handleStopMonitoring remove the item from activeBatches directly,
-            // so this filter is a secondary check for data coming from DB.
             return batch.batchStatus !== 'COMPLETED';
         }).map(batch => {
             const profile = SPECIES_PROFILES[batch.mushroomStrain || 'Unknown'] || SPECIES_PROFILES['Unknown'];
             const planted = new Date(batch.timestamp);
             const now = new Date();
             
-            // Time Calc
             const diffTime = Math.abs(now.getTime() - planted.getTime());
             const daysElapsed = Math.ceil(diffTime / (1000 * 60 * 60 * 24)); 
             const baseRemaining = Math.max(0, profile.cycleDays - daysElapsed);
 
-            // Yield Check (Calculated for status display, not filtering)
             const predicted = batch.predictedYield || 0;
             const actual = batch.totalYield || 0;
             const waste = batch.totalWastage || 0;
             const isYieldMet = predicted > 0 && (actual + waste) >= predicted;
 
-            // Environmental Impact Analysis
             const t = latest.temperature;
             const h = latest.humidity;
             
@@ -173,30 +210,26 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userE
             let isTemperatureBad = false;
             let isHumidityBad = false;
 
-            // 1. Temperature Check
             if (t > profile.maxT) {
-                stressDelay += 3; // Significant delay due to heat stress
+                stressDelay += 3;
                 status = 'Delayed (Heat)';
                 isTemperatureBad = true;
             } else if (t < profile.minT) {
-                stressDelay += 2; // Metabolic slowdown
+                stressDelay += 2;
                 status = 'Delayed (Cold)';
                 isTemperatureBad = true;
             }
 
-            // 2. Humidity Check
             if (h < profile.minH) {
-                stressDelay += 2; // Drying out
-                status = isTemperatureBad ? 'Critical' : 'Delayed (Dry)'; // Compound issue if temp is also bad
+                stressDelay += 2;
+                status = isTemperatureBad ? 'Critical' : 'Delayed (Dry)';
                 isHumidityBad = true;
             }
 
-            // Calculate Final Dates
             const totalRemaining = baseRemaining + stressDelay;
             const predictDate = new Date();
             predictDate.setDate(predictDate.getDate() + totalRemaining);
 
-            // Status Overrides
             if (isYieldMet) {
                 status = 'Target Met';
             } else if (baseRemaining <= 0 && !isTemperatureBad && !isHumidityBad) {
@@ -221,7 +254,6 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userE
         }).sort((a, b) => a.adjustedDaysRemaining - b.adjustedDaysRemaining); 
     }, [activeBatches, logs]);
 
-    // --- Actions ---
     const handleAddReading = async (e: React.FormEvent) => {
         e.preventDefault();
         if(!tempInput || !humidityInput) return;
@@ -249,7 +281,6 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userE
         }
     };
 
-    // --- Chart Data ---
     const chartData = useMemo(() => {
         return [...logs].reverse().slice(-20);
     }, [logs]);
@@ -260,60 +291,78 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userE
     return (
         <div className="space-y-6 animate-fade-in-up">
             
-            {/* 1a. Harvest Ready Alert Banner */}
-            {predictions.some(p => p.status === 'Harvest Ready') && (
-                <div className="bg-green-50 border-l-4 border-green-500 p-4 rounded-md shadow-sm flex items-start">
-                    <div className="flex-shrink-0">
-                        <svg className="h-5 w-5 text-green-400" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
-                           <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
-                        </svg>
-                    </div>
-                    <div className="ml-3">
-                        <h3 className="text-sm font-medium text-green-800">Harvest Ready</h3>
-                        <div className="mt-2 text-sm text-green-700">
-                             <p>
-                                {predictions.filter(p => p.status === 'Harvest Ready').length} batch(es) have completed their growth cycle and are ready for harvesting.
-                            </p>
+            {/* Real World Weather Comparison Banner */}
+            <div className="bg-indigo-600 rounded-xl p-6 text-white shadow-lg overflow-hidden relative">
+                <div className="absolute top-0 right-0 -mr-16 -mt-16 w-64 h-64 bg-indigo-500 rounded-full opacity-20"></div>
+                <div className="relative z-10 flex flex-col md:flex-row justify-between items-center gap-6">
+                    <div className="flex items-center gap-4">
+                        <div className="p-4 bg-white/20 rounded-2xl backdrop-blur-md">
+                            <svg className="w-10 h-10" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 15a4 4 0 004 4h9a5 5 0 10-.1-9.999 5.002 5.002 0 10-9.78 2.096A4.001 4.001 0 003 15z" />
+                            </svg>
+                        </div>
+                        <div>
+                            <h3 className="text-xl font-bold">Outside Weather Forecast</h3>
+                            <p className="text-indigo-100 text-sm">Real-time external conditions for your location</p>
                         </div>
                     </div>
-                </div>
-            )}
-
-            {/* 1b. Global Alert Banner (If Critical) */}
-            {predictions.some(p => p.status === 'Critical' || p.status.includes('Delayed')) && (
-                <div className="bg-red-50 border-l-4 border-red-500 p-4 rounded-md shadow-sm flex items-start">
-                    <div className="flex-shrink-0">
-                        <svg className="h-5 w-5 text-red-400" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
-                            <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
-                        </svg>
-                    </div>
-                    <div className="ml-3">
-                        <h3 className="text-sm font-medium text-red-800">Environmental Stress Detected</h3>
-                        <div className="mt-2 text-sm text-red-700">
-                            <p>Current conditions are outside optimal ranges for active batches. Harvest dates have been automatically delayed to account for slow growth.</p>
+                    
+                    {weatherLoading ? (
+                        <div className="animate-pulse flex space-x-4">
+                            <div className="h-10 w-24 bg-indigo-500 rounded"></div>
+                            <div className="h-10 w-24 bg-indigo-500 rounded"></div>
                         </div>
-                    </div>
+                    ) : externalWeather ? (
+                        <div className="flex gap-8 items-center bg-black/10 px-6 py-3 rounded-2xl backdrop-blur-sm border border-white/10">
+                            <div className="text-center">
+                                <p className="text-[10px] uppercase font-bold text-indigo-200">External Temp</p>
+                                <p className="text-2xl font-black">{externalWeather.temp}°C</p>
+                            </div>
+                            <div className="w-px h-10 bg-white/20"></div>
+                            <div className="text-center">
+                                <p className="text-[10px] uppercase font-bold text-indigo-200">External Humid</p>
+                                <p className="text-2xl font-black">{externalWeather.humidity}%</p>
+                            </div>
+                            <div className="w-px h-10 bg-white/20"></div>
+                            <div className="text-center">
+                                <p className="text-[10px] uppercase font-bold text-indigo-200">Conditions</p>
+                                <p className="text-sm font-bold whitespace-nowrap">{externalWeather.condition}</p>
+                            </div>
+                        </div>
+                    ) : (
+                        <p className="text-sm italic text-indigo-200">Awaiting location access...</p>
+                    )}
                 </div>
-            )}
+            </div>
 
-            {/* 2. Current Readings (Global) */}
+            {/* Existing internal sensors */}
             <div className="grid grid-cols-1 gap-5 sm:grid-cols-3">
                 <div className={`bg-white overflow-hidden shadow rounded-lg border-l-4 ${latest.temperature > 28 ? 'border-red-500' : 'border-green-500'}`}>
                     <div className="px-4 py-5 sm:p-6">
-                        <dt className="text-xs font-medium text-gray-500 uppercase truncate">Temperature</dt>
+                        <dt className="text-xs font-medium text-gray-500 uppercase truncate">Internal Temperature</dt>
                         <dd className="mt-1 text-3xl font-semibold text-gray-900 flex items-baseline">
                             {latest.temperature}°C
                             {latest.temperature > 28 && <span className="ml-2 text-[10px] font-bold bg-red-100 text-red-600 px-2 py-0.5 rounded-full animate-pulse">HOT</span>}
                         </dd>
+                        {externalWeather && (
+                            <p className="text-[10px] mt-1 text-gray-400">
+                                {latest.temperature > externalWeather.temp ? 'Inside is warmer' : 'Inside is cooler'} than outside
+                            </p>
+                        )}
                     </div>
                 </div>
                 <div className={`bg-white overflow-hidden shadow rounded-lg border-l-4 ${latest.humidity < 75 ? 'border-orange-500' : 'border-blue-500'}`}>
                     <div className="px-4 py-5 sm:p-6">
-                        <dt className="text-xs font-medium text-gray-500 uppercase truncate">Humidity</dt>
+                        <dt className="text-xs font-medium text-gray-500 uppercase truncate">Internal Humidity</dt>
                         <dd className="mt-1 text-3xl font-semibold text-gray-900 flex items-baseline">
                             {latest.humidity}%
                             {latest.humidity < 75 && <span className="ml-2 text-[10px] font-bold bg-orange-100 text-orange-600 px-2 py-0.5 rounded-full">DRY</span>}
                         </dd>
+                        {externalWeather && (
+                            <p className="text-[10px] mt-1 text-gray-400">
+                                Outside humidity is {externalWeather.humidity}%
+                            </p>
+                        )}
                     </div>
                 </div>
                 <div className="bg-white overflow-hidden shadow rounded-lg border-l-4 border-gray-400">
@@ -331,7 +380,6 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userE
                         <h3 className="text-lg font-bold text-gray-900">Active Batch Harvest Forecast</h3>
                         <p className="text-xs text-gray-500">Real-time predictions based on species & environment ({villageId})</p>
                     </div>
-                    {/* Legend */}
                     <div className="hidden sm:flex gap-2 text-[10px] font-medium uppercase text-gray-400">
                         <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-green-500"></span> On Track</span>
                         <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-red-500"></span> Delayed</span>
@@ -341,7 +389,6 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userE
                 {predictions.length === 0 ? (
                     <div className="p-10 text-center text-gray-400">
                         <p>No active batches or sensor data available for {villageId}.</p>
-                        {/* Corrected UI message for consistency */}
                         <p className="text-xs mt-2">Ensure "Substrate Prep" has been logged in Farming tab and sensors are active.</p>
                     </div>
                 ) : (
@@ -351,7 +398,6 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userE
                             const isReady = p.status === 'Harvest Ready';
                             const isTargetMet = p.status === 'Target Met';
                             
-                            // Visual Styles based on status
                             let cardBorder = "border-gray-200";
                             let statusBadge = "bg-gray-100 text-gray-600";
                             
@@ -378,7 +424,6 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userE
                             return (
                                 <div key={p.batchId} className={`bg-white rounded-lg shadow-sm border p-4 relative ${cardBorder} transition-all duration-300 hover:shadow-md flex flex-col justify-between`}>
                                     <div>
-                                        {/* Header */}
                                         <div className="flex justify-between items-start mb-2 pr-6">
                                             <div>
                                                 <h4 className="font-bold text-gray-900 flex items-center gap-2">
@@ -394,7 +439,6 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userE
                                             </span>
                                         </div>
 
-                                        {/* Countdown */}
                                         <div className="my-4 text-center">
                                             {isReady ? (
                                                 <div className="text-green-600 font-bold text-xl animate-bounce">
@@ -417,7 +461,6 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userE
                                             </div>
                                         </div>
 
-                                        {/* Environment Check for this Batch */}
                                         <div className="border-t border-gray-100 pt-3 flex justify-between items-center text-xs">
                                             <div className="flex items-center gap-2">
                                                 <span className={`flex items-center gap-1 ${p.isTemperatureBad ? 'text-red-500 font-bold' : 'text-green-600'}`}>
@@ -438,7 +481,6 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userE
                                         </div>
                                     </div>
                                     
-                                    {/* Action Buttons */}
                                     <div className="mt-4 flex gap-2 border-t border-gray-100 pt-3">
                                         <button 
                                             onClick={() => handleStopMonitoring(p.id, p.villageId)}
@@ -460,10 +502,8 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userE
                 )}
             </div>
 
-            {/* 4. Charts & Input Section */}
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
                 
-                {/* Data Entry Form */}
                 <div className="bg-white rounded-xl shadow-sm border border-gray-200 h-full">
                     <div className="px-6 py-4 border-b border-gray-200 bg-gray-50">
                          <h3 className="text-lg font-bold text-gray-900">Log Sensor Readings</h3>
@@ -506,7 +546,6 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userE
                     </form>
                 </div>
 
-                {/* Charts Section */}
                 <div className="lg:col-span-2 bg-white rounded-xl shadow-sm border border-gray-200 p-6 flex flex-col justify-between">
                     <h3 className="text-lg font-bold text-gray-900 mb-6">Historical Trends</h3>
                     
@@ -516,14 +555,12 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userE
                         <div className="h-64 flex items-center justify-center text-gray-400">No data available. Add a reading to start.</div>
                     ) : (
                         <div className="space-y-8 flex-1">
-                            {/* Temperature Chart */}
                             <div>
                                 <div className="flex justify-between text-xs text-gray-500 mb-2">
                                     <span>Temperature Trend (°C)</span>
                                     <span>Target: 20-26°C</span>
                                 </div>
                                 <div className="h-32 w-full bg-gray-50 rounded-lg border border-gray-100 flex items-end px-2 pt-4 pb-0 space-x-1 sm:space-x-2 relative">
-                                    {/* Safe Zone Indicator */}
                                     <div className="absolute left-0 right-0 bottom-[50%] h-[15%] bg-green-500/10 pointer-events-none border-y border-green-500/20 z-0"></div>
 
                                     {chartData.map((d, i) => (
@@ -541,7 +578,6 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userE
                                 </div>
                             </div>
 
-                            {/* Humidity Chart */}
                             <div>
                                 <div className="flex justify-between text-xs text-gray-500 mb-2">
                                     <span>Humidity Trend (%)</span>
