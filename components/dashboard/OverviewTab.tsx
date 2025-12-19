@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect } from 'react';
 import { collection, query, getDocs, orderBy, limit } from 'firebase/firestore';
 import { db } from '../../services/firebase';
@@ -31,6 +32,13 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
     const village = VILLAGES[villageId];
     const [harvestReadyCount, setHarvestReadyCount] = useState(0);
 
+    const isOverdue = (date: string) => {
+        const recordDate = new Date(date);
+        const diffTime = Math.abs(new Date().getTime() - recordDate.getTime());
+        const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+        return diffDays > 7;
+    };
+
     // Fetch harvest ready status for Users
     useEffect(() => {
         const checkHarvestReadiness = async () => {
@@ -49,7 +57,8 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
 
                 snapshot.forEach(doc => {
                     const data = doc.data() as ActivityLog;
-                    if (data.type === 'BED_PREP' && data.batchStatus !== 'COMPLETED') {
+                    // Correcting 'BED_PREP' to 'SUBSTRATE_PREP' to match type definition
+                    if (data.type === 'SUBSTRATE_PREP' && data.batchStatus !== 'COMPLETED') {
                         const planted = new Date(data.timestamp).getTime();
                         const daysElapsed = (now - planted) / (1000 * 60 * 60 * 24);
                         const cycle = SPECIES_CYCLES[data.mushroomStrain || 'Unknown'] || 30;
@@ -228,28 +237,36 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
                                      {financeOverviewData.receivables.length === 0 ? (
                                          <tr><td colSpan={4} className="px-6 py-8 text-center text-sm text-gray-400">No pending receivables.</td></tr>
                                      ) : (
-                                        financeOverviewData.receivables.map((rec: FinancialRecord) => (
-                                             <tr key={rec.id} className="hover:bg-gray-50">
-                                                 <td className="px-6 py-4 whitespace-nowrap text-xs text-gray-500">{new Date(rec.date).toLocaleDateString()}</td>
-                                                 <td className="px-6 py-4 text-xs font-medium text-gray-900">
-                                                     {rec.orderNumber ? (
-                                                         <span className="bg-gray-100 text-gray-700 px-1.5 py-0.5 rounded border border-gray-200">{rec.orderNumber}</span>
-                                                     ) : (
-                                                         <span className="text-gray-400 italic">--</span>
-                                                     )}
-                                                     <div className="text-[10px] text-gray-400 mt-0.5 truncate">{rec.category}</div>
-                                                 </td>
-                                                 <td className="px-6 py-4 whitespace-nowrap text-xs font-bold text-orange-600 text-right">RM{rec.amount.toFixed(2)}</td>
-                                                 <td className="px-6 py-4 text-center">
-                                                     <button 
-                                                        onClick={() => { setActiveTab('financial'); openEditTransModal(rec); }}
-                                                        className="text-indigo-600 hover:text-indigo-900 text-xs underline"
-                                                     >
-                                                         Review
-                                                     </button>
-                                                 </td>
-                                             </tr>
-                                         ))
+                                        financeOverviewData.receivables.map((rec: FinancialRecord) => {
+                                             const delayed = isOverdue(rec.date);
+                                             return (
+                                                 <tr key={rec.id} className={`hover:bg-gray-50 ${delayed ? 'bg-orange-50/50' : ''}`}>
+                                                     <td className="px-6 py-4 whitespace-nowrap text-xs text-gray-500">{new Date(rec.date).toLocaleDateString()}</td>
+                                                     <td className="px-6 py-4 text-xs font-medium text-gray-900">
+                                                         <div className="flex items-center gap-2">
+                                                            {rec.orderNumber ? (
+                                                                <span className="bg-gray-100 text-gray-700 px-1.5 py-0.5 rounded border border-gray-200">{rec.orderNumber}</span>
+                                                            ) : (
+                                                                <span className="text-gray-400 italic">--</span>
+                                                            )}
+                                                            {delayed && (
+                                                                <span className="bg-red-100 text-red-600 text-[9px] font-bold px-1.5 py-0.5 rounded animate-pulse">7D+ Delayed</span>
+                                                            )}
+                                                         </div>
+                                                         <div className="text-[10px] text-gray-400 mt-0.5 truncate">{rec.category}</div>
+                                                     </td>
+                                                     <td className="px-6 py-4 whitespace-nowrap text-xs font-bold text-orange-600 text-right">RM{rec.amount.toFixed(2)}</td>
+                                                     <td className="px-6 py-4 text-center">
+                                                         <button 
+                                                            onClick={() => { setActiveTab('financial'); openEditTransModal(rec); }}
+                                                            className="text-indigo-600 hover:text-indigo-900 text-xs underline"
+                                                         >
+                                                             Review
+                                                         </button>
+                                                     </td>
+                                                 </tr>
+                                             );
+                                         })
                                      )}
                                  </tbody>
                              </table>
@@ -276,28 +293,36 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
                                      {financeOverviewData.payables.length === 0 ? (
                                          <tr><td colSpan={4} className="px-6 py-8 text-center text-sm text-gray-400">No pending payables.</td></tr>
                                      ) : (
-                                        financeOverviewData.payables.map((rec: FinancialRecord) => (
-                                             <tr key={rec.id} className="hover:bg-gray-50">
-                                                 <td className="px-6 py-4 whitespace-nowrap text-xs text-gray-500">{new Date(rec.date).toLocaleDateString()}</td>
-                                                 <td className="px-6 py-4 text-xs font-medium text-gray-900">
-                                                     {rec.orderNumber ? (
-                                                         <span className="bg-gray-100 text-gray-700 px-1.5 py-0.5 rounded border border-gray-200">{rec.orderNumber}</span>
-                                                     ) : (
-                                                         <span className="text-gray-400 italic">--</span>
-                                                     )}
-                                                     <div className="text-[10px] text-gray-400 mt-0.5 truncate">{rec.category}</div>
-                                                 </td>
-                                                 <td className="px-6 py-4 whitespace-nowrap text-xs font-bold text-red-600 text-right">RM{rec.amount.toFixed(2)}</td>
-                                                 <td className="px-6 py-4 text-center">
-                                                     <button 
-                                                        onClick={() => { setActiveTab('financial'); openEditTransModal(rec); }}
-                                                        className="text-indigo-600 hover:text-indigo-900 text-xs underline"
-                                                     >
-                                                         Review
-                                                     </button>
-                                                 </td>
-                                             </tr>
-                                         ))
+                                        financeOverviewData.payables.map((rec: FinancialRecord) => {
+                                             const delayed = isOverdue(rec.date);
+                                             return (
+                                                 <tr key={rec.id} className={`hover:bg-gray-50 ${delayed ? 'bg-red-50/50' : ''}`}>
+                                                     <td className="px-6 py-4 whitespace-nowrap text-xs text-gray-500">{new Date(rec.date).toLocaleDateString()}</td>
+                                                     <td className="px-6 py-4 text-xs font-medium text-gray-900">
+                                                         <div className="flex items-center gap-2">
+                                                            {rec.orderNumber ? (
+                                                                <span className="bg-gray-100 text-gray-700 px-1.5 py-0.5 rounded border border-gray-200">{rec.orderNumber}</span>
+                                                            ) : (
+                                                                <span className="text-gray-400 italic">--</span>
+                                                            )}
+                                                            {delayed && (
+                                                                <span className="bg-red-100 text-red-600 text-[9px] font-bold px-1.5 py-0.5 rounded animate-pulse">7D+ Delayed</span>
+                                                            )}
+                                                         </div>
+                                                         <div className="text-[10px] text-gray-400 mt-0.5 truncate">{rec.category}</div>
+                                                     </td>
+                                                     <td className="px-6 py-4 whitespace-nowrap text-xs font-bold text-red-600 text-right">RM{rec.amount.toFixed(2)}</td>
+                                                     <td className="px-6 py-4 text-center">
+                                                         <button 
+                                                            onClick={() => { setActiveTab('financial'); openEditTransModal(rec); }}
+                                                            className="text-indigo-600 hover:text-indigo-900 text-xs underline"
+                                                         >
+                                                             Review
+                                                         </button>
+                                                     </td>
+                                                 </tr>
+                                             );
+                                         })
                                      )}
                                  </tbody>
                              </table>

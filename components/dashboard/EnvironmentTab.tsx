@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useMemo } from 'react';
 import { collection, query, orderBy, limit, onSnapshot, addDoc, where, getDocs, doc, updateDoc } from 'firebase/firestore';
 import { db } from '../../services/firebase';
@@ -91,7 +92,8 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userE
             
             snap.forEach(doc => {
                 const data = doc.data() as ActivityLog;
-                if (data.type === 'BED_PREP') {
+                // Correcting 'BED_PREP' to 'SUBSTRATE_PREP' to match type definition
+                if (data.type === 'SUBSTRATE_PREP') {
                     batches.push({ id: doc.id, ...data });
                 }
             });
@@ -339,7 +341,8 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userE
                 {predictions.length === 0 ? (
                     <div className="p-10 text-center text-gray-400">
                         <p>No active batches or sensor data available for {villageId}.</p>
-                        <p className="text-xs mt-2">Ensure "Bed Prep" has been logged in Farming tab and sensors are active.</p>
+                        {/* Corrected UI message for consistency */}
+                        <p className="text-xs mt-2">Ensure "Substrate Prep" has been logged in Farming tab and sensors are active.</p>
                     </div>
                 ) : (
                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 p-6 bg-gray-50/50">

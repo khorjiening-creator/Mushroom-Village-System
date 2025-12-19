@@ -1,13 +1,14 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { collection, onSnapshot, doc, updateDoc, addDoc, setDoc, query, where, getDocs, increment, Timestamp, orderBy, limit } from 'firebase/firestore';
 import { db } from '../../services/firebase';
-import { VillageType, HarvestLog } from '../../types';
+import { VillageType, HarvestLog, FinancialRecord } from '../../types';
 
 interface ResourcesTabProps {
     villageId: VillageType;
     userEmail: string;
     theme?: any;
     onSuccess?: (msg: string) => void;
+    financialRecords: FinancialRecord[]; // Received from Dashboard to calculate remaining stock
 }
 
 interface FirestoreResource {
@@ -31,17 +32,16 @@ interface InventoryItem {
     updatedAt: any;
 }
 
-export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail, theme, onSuccess }) => {
+export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail, theme, onSuccess, financialRecords }) => {
     // --- State ---
     const [resources, setResources] = useState<FirestoreResource[]>([]);
     const [inventory, setInventory] = useState<InventoryItem[]>([]);
-    const [harvestLogs, setHarvestLogs] = useState<HarvestLog[]>([]); // New state for detailed table
+    const [harvestLogs, setHarvestLogs] = useState<HarvestLog[]>([]); 
     const [loading, setLoading] = useState(true);
     
     // KPIs
     const [todayProduction, setTodayProduction] = useState(0);
-    const [totalFreshHarvest, setTotalFreshHarvest] = useState(0); 
-    const [inventoryOutCount, setInventoryOutCount] = useState(0); // Renamed from harvestReadyBatches
+    const [inventoryOutCount, setInventoryOutCount] = useState(0); 
 
     // Stock Transaction Modal State (Row Actions: Add/Minus)
     const [isTransModalOpen, setIsTransModalOpen] = useState(false);
@@ -50,7 +50,7 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
     const [transQty, setTransQty] = useState('');
     const [transReason, setTransReason] = useState('');
 
-    // Add New Material Modal State (Replaces Receive Stock)
+    // Add New Material Modal State
     const [isAddMatModalOpen, setIsAddMatModalOpen] = useState(false);
     const [newMatName, setNewMatName] = useState('');
     const [newMatCategory, setNewMatCategory] = useState('Input');
@@ -60,7 +60,7 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
 
     // Purchase Request Modal State
     const [isPurchaseModalOpen, setIsPurchaseModalOpen] = useState(false);
-    const [purchaseItemId, setPurchaseItemId] = useState(''); // ID for selection
+    const [purchaseItemId, setPurchaseItemId] = useState(''); 
     const [purchaseQty, setPurchaseQty] = useState('');
     const [purchaseCost, setPurchaseCost] = useState('');
     const [purchaseNotes, setPurchaseNotes] = useState('');
@@ -80,44 +80,81 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
         return "financialRecords"; 
     };
 
+    // --- Core Logic: Inventory Calculation ---
+    // Merge Harvest logs with Sales to show remaining weight per batch
+    const processedOutputInventory = useMemo(() => {
+        // 1. Group all harvests by Batch ID
+        const harvestTotals: Record<string, { batchId: string, strain: string, totalHarvest: number, lastTimestamp: string }> = {};
+        
+        harvestLogs.forEach(log => {
+            const batchId = log.batchId;
+            const weight = log.weightKg || log.totalYield || 0;
+            if (!harvestTotals[batchId]) {
+                harvestTotals[batchId] = { 
+                    batchId, 
+                    strain: log.strain, 
+                    totalHarvest: 0, 
+                    lastTimestamp: log.timestamp 
+                };
+            }
+            harvestTotals[batchId].totalHarvest += weight;
+            // Keep the most recent timestamp for sorting
+            if (new Date(log.timestamp) > new Date(harvestTotals[batchId].lastTimestamp)) {
+                harvestTotals[batchId].lastTimestamp = log.timestamp;
+            }
+        });
+
+        // 2. Sum up all sales from Financial Records for these batches
+        const salesTotals: Record<string, number> = {};
+        financialRecords.forEach(rec => {
+            if (rec.category === 'Sales' && rec.batchId && rec.weightKg && rec.type === 'INCOME') {
+                salesTotals[rec.batchId] = (salesTotals[rec.batchId] || 0) + rec.weightKg;
+            }
+        });
+
+        // 3. Subtract sales from harvest to get "Current Stock"
+        return Object.values(harvestTotals).map(item => {
+            const sold = salesTotals[item.batchId] || 0;
+            const remaining = Math.max(0, item.totalHarvest - sold);
+            return {
+                ...item,
+                soldWeight: sold,
+                remainingWeight: remaining
+            };
+        }).sort((a, b) => new Date(b.lastTimestamp).getTime() - new Date(a.lastTimestamp).getTime());
+    }, [harvestLogs, financialRecords]);
+
+    const totalCurrentStock = useMemo(() => {
+        return processedOutputInventory.reduce((acc, curr) => acc + curr.remainingWeight, 0);
+    }, [processedOutputInventory]);
+
     // --- Data Fetching ---
     useEffect(() => {
         const resCol = collection(db, getResourceColName(villageId));
         const invCol = collection(db, getInventoryColName(villageId));
         const harvCol = collection(db, getHarvestColName(villageId));
 
-        // Real-time Resources
         const unsubRes = onSnapshot(resCol, (snapshot) => {
             const list: FirestoreResource[] = [];
             snapshot.forEach(doc => list.push({ id: doc.id, ...doc.data() } as FirestoreResource));
-            
-            // Auto-seed if empty (Demo helper)
             if (list.length === 0) seedDefaultResources();
             else setResources(list);
-            
             setLoading(false);
         });
 
-        // Real-time Inventory (Available Stock for C - Manual)
         const unsubInv = onSnapshot(invCol, (snapshot) => {
              const list: InventoryItem[] = [];
              snapshot.forEach(doc => list.push({ id: doc.id, ...doc.data() } as InventoryItem));
              setInventory(list);
         });
 
-        // Real-time Harvest Logs (For Output Table)
-        const qHarvest = query(harvCol, orderBy('timestamp', 'desc'), limit(50));
+        const qHarvest = query(harvCol, orderBy('timestamp', 'desc'), limit(150));
         const unsubHarvest = onSnapshot(qHarvest, (snapshot) => {
             const list: HarvestLog[] = [];
             snapshot.forEach(doc => list.push({ id: doc.id, ...doc.data() } as HarvestLog));
             setHarvestLogs(list);
-            
-            // Calc Total Fresh Harvest
-            const total = list.reduce((acc, curr) => acc + (curr.weightKg || curr.totalYield || 0), 0);
-            setTotalFreshHarvest(total);
         });
 
-        // Fetch KPIs
         fetchKPIs();
 
         return () => {
@@ -131,8 +168,6 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
         try {
             const harvestColName = getHarvestColName(villageId);
             const harvestCol = collection(db, harvestColName);
-
-            // 1. Latest Production Output (Today's Harvest)
             const startOfDay = new Date();
             startOfDay.setHours(0,0,0,0);
             const qToday = query(harvestCol, where('timestamp', '>=', startOfDay.toISOString()));
@@ -141,14 +176,11 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
             snapToday.forEach(doc => todayTotal += (doc.data().totalYield || doc.data().weightKg || 0));
             setTodayProduction(todayTotal);
 
-            // 2. Inventory Out (Sales / Shipments)
-            // Proxy: Count Income transactions with Category 'Sales'
             const finColName = getFinancialCollectionName(villageId);
             const finCol = collection(db, finColName);
             const qSales = query(finCol, where('villageId', '==', villageId), where('type', '==', 'INCOME'), where('category', '==', 'Sales'));
             const snapSales = await getDocs(qSales);
             setInventoryOutCount(snapSales.size);
-
         } catch (e) {
             console.error("Error fetching KPIs", e);
         }
@@ -156,53 +188,42 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
 
     const seedDefaultResources = async () => {
         const defaults = [
-            { name: "Straw", quantity: 5.0, unit: "kg", category: "Input", lowStockThreshold: 1.5, materialId: "MAT-1001" },
-            { name: "Spawn", quantity: 500, unit: "g", category: "Input", lowStockThreshold: 120, materialId: "MAT-1002" },
-            { name: "Bran", quantity: 500, unit: "g", category: "Nutrient", lowStockThreshold: 100, materialId: "MAT-1003" },
-            { name: "Gypsum", quantity: 100, unit: "g", category: "Nutrient", lowStockThreshold: 20, materialId: "MAT-1004" },
+            { name: "Straw (Substrate)", quantity: 1000, unit: "kg", category: "Input", lowStockThreshold: 200, materialId: "MAT-1001" },
+            { name: "Spawn (Inoculum)", quantity: 100, unit: "kg", category: "Input", lowStockThreshold: 20, materialId: "MAT-1002" },
+            { name: "Rice Bran (Supplement)", quantity: 200, unit: "kg", category: "Nutrient", lowStockThreshold: 50, materialId: "MAT-1003" },
+            { name: "Gypsum (Conditioner)", quantity: 50, unit: "kg", category: "Nutrient", lowStockThreshold: 10, materialId: "MAT-1004" },
+            { name: "Water Supply Tank", quantity: 5000, unit: "L", category: "Utility", lowStockThreshold: 1000, materialId: "MAT-1005" },
         ];
         const col = collection(db, getResourceColName(villageId));
         for (const item of defaults) {
-            // Using setDoc to ensure ID control as requested
             await setDoc(doc(col, item.materialId), { ...item, updatedAt: new Date().toISOString() });
         }
     };
 
-    // --- Actions ---
     const handleTransaction = async (e: React.FormEvent) => {
         e.preventDefault();
         if (!selectedItem || !transQty) return;
-
         const qty = parseFloat(transQty);
         if (isNaN(qty) || qty <= 0) return;
-
         const collectionName = getResourceColName(villageId);
         const itemRef = doc(db, collectionName, selectedItem.id);
         const adjustment = transType === 'IN' ? qty : -qty;
-        
-        // Optimistic UI check
         if (transType === 'OUT' && (selectedItem.quantity - qty) < 0) {
             alert("Insufficient stock!");
             return;
         }
-
         try {
-            // 1. Update Main Document
             await updateDoc(itemRef, {
                 quantity: increment(adjustment),
                 updatedAt: new Date().toISOString()
             });
-
-            // 2. Add to History Subcollection
-            // Saves to: resourcesX/{itemID}/stock_history/{logID}
             await addDoc(collection(db, collectionName, selectedItem.id, "stock_history"), {
-                type: transType, // 'IN' or 'OUT'
+                type: transType, 
                 quantity: qty,
                 reason: transReason || (transType === 'IN' ? 'Restock' : 'Usage'),
                 user: userEmail,
                 timestamp: new Date().toISOString()
             });
-
             setIsTransModalOpen(false);
             setTransQty('');
             setTransReason('');
@@ -217,17 +238,11 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
     const handleAddMaterial = async (e: React.FormEvent) => {
         e.preventDefault();
         if (!newMatName || !newMatQty) return;
-        
         try {
             const collectionName = getResourceColName(villageId);
             const initialQty = parseFloat(newMatQty) || 0;
             const threshold = parseFloat(newMatThreshold) || 0;
-            
-            // Generate Autogenerated ID (MAT-timestampSuffix-random)
             const materialId = "MAT-" + Date.now().toString().slice(-6) + Math.floor(100 + Math.random() * 900);
-
-            // CRITICAL REQUEST: Save using materialId as the Document ID (setDoc instead of addDoc)
-            // This ensures "firestore save the materials by the front end generated id"
             await setDoc(doc(db, collectionName, materialId), {
                 materialId,
                 name: newMatName,
@@ -237,26 +252,14 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
                 lowStockThreshold: threshold,
                 updatedAt: new Date().toISOString()
             });
-
-            // Log Initial Stock in History
             if (initialQty > 0) {
                 await addDoc(collection(db, collectionName, materialId, "stock_history"), {
-                    type: 'IN',
-                    quantity: initialQty,
-                    reason: 'Initial Stock',
-                    user: userEmail,
-                    timestamp: new Date().toISOString()
+                    type: 'IN', quantity: initialQty, reason: 'Initial Stock', user: userEmail, timestamp: new Date().toISOString()
                 });
             }
-            
             if (onSuccess) onSuccess(`Added ${newMatName} (ID: ${materialId})`);
-            
             setIsAddMatModalOpen(false);
-            setNewMatName('');
-            setNewMatCategory('Input');
-            setNewMatUnit('kg');
-            setNewMatQty('');
-            setNewMatThreshold('');
+            setNewMatName(''); setNewMatCategory('Input'); setNewMatUnit('kg'); setNewMatQty(''); setNewMatThreshold('');
         } catch (e) {
             console.error("Add Material failed", e);
             alert("Failed to add material.");
@@ -267,15 +270,13 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
         e.preventDefault();
         const selectedResource = resources.find(r => r.id === purchaseItemId);
         if (!selectedResource) return;
-
         try {
             const finColName = getFinancialCollectionName(villageId);
             const transactionId = "TXN-" + Date.now().toString().slice(-6) + Math.floor(100 + Math.random() * 900);
-            
             await setDoc(doc(db, finColName, transactionId), {
                 type: 'EXPENSE',
                 status: 'PENDING',
-                category: 'Supplies', // Matches resource category concept
+                category: 'Supplies', 
                 amount: parseFloat(purchaseCost) || 0,
                 date: new Date().toISOString().split('T')[0],
                 description: `Purchase Request: ${purchaseQty} ${selectedResource.unit} of ${selectedResource.name} (${selectedResource.materialId || 'No ID'}). Notes: ${purchaseNotes}`,
@@ -284,18 +285,12 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
                 transactionId,
                 createdAt: new Date().toISOString()
             });
-
-            // Show persistent pop-out notification
             setActiveNotification({
                 title: "Purchase Request Sent",
                 message: `Request for ${selectedResource.name} (Ref: ${transactionId}) has been sent to Finance.`
             });
-            
             setIsPurchaseModalOpen(false);
-            setPurchaseItemId('');
-            setPurchaseQty('');
-            setPurchaseCost('');
-            setPurchaseNotes('');
+            setPurchaseItemId(''); setPurchaseQty(''); setPurchaseCost(''); setPurchaseNotes('');
         } catch (e) {
             console.error("Purchase request failed", e);
             alert("Failed to send request.");
@@ -303,15 +298,12 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
     };
 
     const totalProcessedStock = inventory.reduce((acc, item) => acc + (item.quantity || 0), 0);
-    const totalAvailableStock = totalProcessedStock + totalFreshHarvest;
-    
-    // Dynamic theme classes
+    const totalAvailableStock = totalProcessedStock + totalCurrentStock;
     const ringClass = theme?.ring || "focus:ring-indigo-500";
 
     return (
         <div className="space-y-6 animate-fade-in-up relative">
             
-            {/* --- Persistent Notification Pop-out --- */}
             {activeNotification && (
                 <div className="fixed bottom-6 right-6 z-[60] max-w-sm w-full bg-white border-l-4 border-indigo-600 shadow-2xl rounded-r-lg pointer-events-auto transform transition-all duration-300 ease-in-out translate-y-0 opacity-100">
                     <div className="p-4">
@@ -325,13 +317,7 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
                                 <p className="text-sm font-bold text-gray-900">{activeNotification.title}</p>
                                 <p className="mt-1 text-sm text-gray-500">{activeNotification.message}</p>
                                 <div className="mt-4 flex">
-                                    <button 
-                                        type="button"
-                                        onClick={() => setActiveNotification(null)}
-                                        className="inline-flex items-center px-3 py-1.5 border border-transparent text-xs font-medium rounded-md text-indigo-700 bg-indigo-100 hover:bg-indigo-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
-                                    >
-                                        Mark as Read
-                                    </button>
+                                    <button onClick={() => setActiveNotification(null)} className="inline-flex items-center px-3 py-1.5 border border-transparent text-xs font-medium rounded-md text-indigo-700 bg-indigo-100 hover:bg-indigo-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">Mark as Read</button>
                                 </div>
                             </div>
                         </div>
@@ -339,9 +325,7 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
                 </div>
             )}
 
-            {/* --- Dashboard KPI Section --- */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                {/* KPI 1: Latest Production */}
                 <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm relative overflow-hidden">
                     <div className="relative z-10">
                         <h3 className="text-sm font-bold text-gray-500 uppercase tracking-wider mb-2">Today's Output</h3>
@@ -351,12 +335,8 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
                         </div>
                         <p className="text-xs text-gray-400 mt-2">Fresh harvest logged today</p>
                     </div>
-                    <div className="absolute right-0 bottom-0 opacity-10 transform translate-y-1/4 translate-x-1/4">
-                        <svg className="w-24 h-24 text-green-600" fill="currentColor" viewBox="0 0 20 20"><path d="M2 10a8 8 0 018-8v8h8a8 8 0 11-16 0z"/><path d="M12 2.252A8.014 8.014 0 0117.748 8H12V2.252z"/></svg>
-                    </div>
                 </div>
 
-                {/* KPI 2: Inventory Out */}
                 <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm relative overflow-hidden">
                     <div className="relative z-10">
                         <h3 className="text-sm font-bold text-gray-500 uppercase tracking-wider mb-2">Inventory Out</h3>
@@ -366,12 +346,8 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
                         </div>
                         <p className="text-xs text-gray-400 mt-2">Sales/Shipments processed</p>
                     </div>
-                    <div className="absolute right-0 bottom-0 opacity-10 transform translate-y-1/4 translate-x-1/4">
-                        <svg className="w-24 h-24 text-indigo-600" fill="currentColor" viewBox="0 0 24 24"><path d="M5 12h14M12 5l7 7-7 7" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>
-                    </div>
                 </div>
 
-                {/* KPI 3: Available Stock for C */}
                 <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm relative overflow-hidden">
                     <div className="relative z-10">
                         <h3 className="text-sm font-bold text-gray-500 uppercase tracking-wider mb-2">Total Supply for C</h3>
@@ -379,18 +355,11 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
                             <span className="text-3xl font-extrabold text-blue-600">{totalAvailableStock.toFixed(1)}</span>
                             <span className="ml-1 text-sm text-gray-500 font-medium">kg</span>
                         </div>
-                        <p className="text-xs text-gray-400 mt-2">Raw Harvest + Processed Stock</p>
-                    </div>
-                    <div className="absolute top-4 right-4">
-                        <span className="flex h-3 w-3">
-                          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75"></span>
-                          <span className="relative inline-flex rounded-full h-3 w-3 bg-blue-500"></span>
-                        </span>
+                        <p className="text-xs text-gray-400 mt-2">Available for processing</p>
                     </div>
                 </div>
             </div>
 
-            {/* --- Resource Management Table --- */}
             <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
                 <div className="px-6 py-4 border-b border-gray-200 bg-gray-50 flex flex-col sm:flex-row justify-between items-start sm:items-center">
                     <div>
@@ -398,17 +367,11 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
                         <p className="text-xs text-gray-500">Track Straw, Spawn, Bran, and Gypsum.</p>
                     </div>
                     <div className="mt-2 sm:mt-0 flex gap-2">
-                        <button 
-                            onClick={() => { setIsAddMatModalOpen(true); }}
-                            className="px-3 py-2 bg-white text-gray-700 border border-gray-300 text-sm font-bold rounded shadow-sm hover:bg-gray-50 transition-colors flex items-center gap-2"
-                        >
+                        <button onClick={() => { setIsAddMatModalOpen(true); }} className="px-3 py-2 bg-white text-gray-700 border border-gray-300 text-sm font-bold rounded shadow-sm hover:bg-gray-50 transition-colors flex items-center gap-2">
                              <svg className="w-4 h-4 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" /></svg>
                              Add New Material
                         </button>
-                        <button 
-                            onClick={() => { setPurchaseItemId(''); setIsPurchaseModalOpen(true); }}
-                            className="px-3 py-2 bg-indigo-600 text-white hover:bg-indigo-700 text-sm font-bold rounded shadow transition-colors flex items-center gap-2"
-                        >
+                        <button onClick={() => { setPurchaseItemId(''); setIsPurchaseModalOpen(true); }} className="px-3 py-2 bg-indigo-600 text-white hover:bg-indigo-700 text-sm font-bold rounded shadow transition-colors flex items-center gap-2">
                             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 3h2l.4 2M7 13h10l4-8H5.4M7 13L5.4 5M7 13l-2.293 2.293c-.63.63-.184 1.707.707 1.707H17m0 0a2 2 0 100 4 2 2 0 000-4zm-8 2a2 2 0 11-4 0 2 2 0 014 0z" /></svg>
                             Purchase Supplies
                         </button>
@@ -436,7 +399,6 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
                                     const quantity = item.quantity || 0;
                                     const isLow = quantity <= item.lowStockThreshold;
                                     const isCritical = quantity <= (item.lowStockThreshold * 0.2);
-                                    
                                     return (
                                         <tr key={item.id} className="hover:bg-gray-50">
                                             <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
@@ -459,18 +421,10 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
                                                 )}
                                             </td>
                                             <td className="px-6 py-4 whitespace-nowrap text-center">
-                                                <button 
-                                                    onClick={() => { setSelectedItem(item); setTransType('IN'); setIsTransModalOpen(true); }}
-                                                    className="p-1 text-gray-500 hover:bg-gray-100 rounded border border-gray-200 transition-colors mx-1"
-                                                    title="Add Stock (+)"
-                                                >
+                                                <button onClick={() => { setSelectedItem(item); setTransType('IN'); setIsTransModalOpen(true); }} className="p-1 text-gray-500 hover:bg-gray-100 rounded border border-gray-200 transition-colors mx-1" title="Add Stock (+)">
                                                     <svg className="w-4 h-4 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" /></svg>
                                                 </button>
-                                                <button 
-                                                    onClick={() => { setSelectedItem(item); setTransType('OUT'); setIsTransModalOpen(true); }}
-                                                    className="p-1 text-gray-500 hover:bg-gray-100 rounded border border-gray-200 transition-colors mx-1"
-                                                    title="Use/Reduce Stock (-)"
-                                                >
+                                                <button onClick={() => { setSelectedItem(item); setTransType('OUT'); setIsTransModalOpen(true); }} className="p-1 text-gray-500 hover:bg-gray-100 rounded border border-gray-200 transition-colors mx-1" title="Use/Reduce Stock (-)">
                                                     <svg className="w-4 h-4 text-red-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 12H4" /></svg>
                                                 </button>
                                             </td>
@@ -487,10 +441,10 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
             <div className="bg-indigo-50 rounded-xl shadow-sm border border-indigo-100 overflow-hidden">
                 <div className="px-6 py-4 border-b border-indigo-100 flex justify-between items-center">
                     <div>
-                        <h2 className="text-lg font-bold text-indigo-900">Output Inventory</h2>
-                        <p className="text-xs text-indigo-500">Live feed from Farming Harvests</p>
+                        <h2 className="text-lg font-bold text-indigo-900">Output Inventory (Mushroom Stock)</h2>
+                        <p className="text-xs text-indigo-500">Batch current weights visible to Village C (Sales Deducted)</p>
                     </div>
-                    <span className="text-xs font-medium text-indigo-600 bg-indigo-100 px-2 py-1 rounded">Visible to Village C</span>
+                    <span className="text-[10px] font-bold text-indigo-600 bg-indigo-100 px-2 py-1 rounded uppercase tracking-wider">Sync with Sales</span>
                 </div>
                 
                 <div className="overflow-x-auto">
@@ -498,26 +452,36 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
                         <thead className="bg-indigo-100/50">
                             <tr>
                                 <th className="px-6 py-3 text-left text-xs font-medium text-indigo-800 uppercase">Batch ID</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-indigo-800 uppercase">Harvest Time</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-indigo-800 uppercase">Raw Mushroom Type</th>
-                                <th className="px-6 py-3 text-right text-xs font-medium text-indigo-800 uppercase">Weight (kg)</th>
+                                <th className="px-6 py-3 text-left text-xs font-medium text-indigo-800 uppercase">Strain</th>
+                                <th className="px-6 py-3 text-right text-xs font-medium text-indigo-800 uppercase">Harvested (Total)</th>
+                                <th className="px-6 py-3 text-right text-xs font-medium text-indigo-800 uppercase">Sold (To Date)</th>
+                                <th className="px-6 py-3 text-right text-xs font-medium text-indigo-800 uppercase">Current Stock (kg)</th>
+                                <th className="px-6 py-3 text-center text-xs font-medium text-indigo-800 uppercase">Status</th>
                             </tr>
                         </thead>
                         <tbody className="bg-white/50 divide-y divide-indigo-100">
-                            {harvestLogs.length === 0 ? (
-                                <tr><td colSpan={4} className="px-6 py-8 text-center text-sm text-indigo-400">No recent harvest data.</td></tr>
+                            {processedOutputInventory.length === 0 ? (
+                                <tr><td colSpan={6} className="px-6 py-8 text-center text-sm text-indigo-400">No harvest data or stock available.</td></tr>
                             ) : (
-                                harvestLogs.map((log) => (
-                                    <tr key={log.id} className="hover:bg-indigo-50 transition-colors">
-                                        <td className="px-6 py-3 text-sm font-bold text-indigo-900">{log.batchId}</td>
-                                        <td className="px-6 py-3 text-sm text-indigo-700">{new Date(log.timestamp).toLocaleString()}</td>
+                                processedOutputInventory.map((item) => (
+                                    <tr key={item.batchId} className="hover:bg-indigo-50 transition-colors">
+                                        <td className="px-6 py-3 text-sm font-bold text-indigo-900">{item.batchId}</td>
                                         <td className="px-6 py-3 text-sm text-indigo-800">
                                             <span className="bg-indigo-100 text-indigo-800 px-2 py-0.5 rounded text-xs font-bold border border-indigo-200">
-                                                {log.strain}
+                                                {item.strain}
                                             </span>
                                         </td>
-                                        <td className="px-6 py-3 text-sm font-bold text-right text-indigo-700">
-                                            {log.weightKg ? log.weightKg.toFixed(1) : (log.totalYield || 0).toFixed(1)}
+                                        <td className="px-6 py-3 text-sm text-right text-gray-500">{item.totalHarvest.toFixed(1)}</td>
+                                        <td className="px-6 py-3 text-sm text-right text-red-500">-{item.soldWeight.toFixed(1)}</td>
+                                        <td className="px-6 py-3 text-sm font-extrabold text-right text-indigo-700">
+                                            {item.remainingWeight.toFixed(1)}
+                                        </td>
+                                        <td className="px-6 py-3 text-center">
+                                            {item.remainingWeight > 0 ? (
+                                                <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-green-100 text-green-700 border border-green-200">AVAILABLE</span>
+                                            ) : (
+                                                <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-gray-100 text-gray-400 border border-gray-200">OUT OF STOCK</span>
+                                            )}
                                         </td>
                                     </tr>
                                 ))
@@ -525,9 +489,15 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
                         </tbody>
                     </table>
                 </div>
+                {processedOutputInventory.length > 0 && (
+                    <div className="bg-indigo-100/30 px-6 py-3 flex justify-end items-baseline gap-2">
+                        <span className="text-xs font-bold text-indigo-600 uppercase">Total System Stock:</span>
+                        <span className="text-lg font-black text-indigo-900">{totalCurrentStock.toFixed(1)} kg</span>
+                    </div>
+                )}
             </div>
 
-            {/* --- Transaction Modal (Stock In/Out) --- */}
+            {/* --- Stock Transaction Modal --- */}
             {isTransModalOpen && selectedItem && (
                 <div className="fixed inset-0 z-50 overflow-y-auto">
                     <div className="flex items-end justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:block sm:p-0">
@@ -579,92 +549,31 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
                                      <svg className="w-6 h-6 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v3m0 0v3m0-3h3m-3 0H9m12 0a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
                                 </div>
                                 <div className="mt-3 text-center sm:mt-5">
-                                    <h3 className="text-lg leading-6 font-medium text-gray-900">
-                                        Add New Material
-                                    </h3>
-                                    <p className="text-sm text-gray-500 mt-1 mb-4">
-                                        Define a new resource to track in inventory.
-                                    </p>
+                                    <h3 className="text-lg leading-6 font-medium text-gray-900">Add New Material</h3>
                                     <form onSubmit={handleAddMaterial} className="mt-4 text-left space-y-3">
-                                        <div>
-                                            <label className="block text-sm font-medium text-gray-700">Name</label>
-                                            <input 
-                                                type="text" 
-                                                required
-                                                value={newMatName}
-                                                onChange={(e) => setNewMatName(e.target.value)}
-                                                className={`mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-2 ${ringClass} sm:text-sm`}
-                                                placeholder="e.g. Lime Powder"
-                                            />
+                                        <input type="text" required value={newMatName} onChange={(e) => setNewMatName(e.target.value)} className={`mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-2 ${ringClass} sm:text-sm`} placeholder="e.g. Lime Powder" />
+                                        <div className="grid grid-cols-2 gap-4">
+                                            <select value={newMatCategory} onChange={(e) => setNewMatCategory(e.target.value)} className={`mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-2 ${ringClass} sm:text-sm bg-white`}>
+                                                <option value="Input">Input</option>
+                                                <option value="Utility">Utility</option>
+                                                <option value="Nutrient">Nutrient</option>
+                                                <option value="Others">Others</option>
+                                            </select>
+                                            <select value={newMatUnit} onChange={(e) => setNewMatUnit(e.target.value)} className={`mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-2 ${ringClass} sm:text-sm bg-white`}>
+                                                <option value="kg">kg</option>
+                                                <option value="g">g</option>
+                                                <option value="L">L</option>
+                                                <option value="units">units</option>
+                                                <option value="pack">pack</option>
+                                            </select>
                                         </div>
                                         <div className="grid grid-cols-2 gap-4">
-                                            <div>
-                                                <label className="block text-sm font-medium text-gray-700">Category</label>
-                                                <select 
-                                                    value={newMatCategory}
-                                                    onChange={(e) => setNewMatCategory(e.target.value)}
-                                                    className={`mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-2 ${ringClass} sm:text-sm bg-white`}
-                                                >
-                                                    <option value="Input">Input</option>
-                                                    <option value="Utility">Utility</option>
-                                                    <option value="Nutrient">Nutrient</option>
-                                                    <option value="Others">Others</option>
-                                                </select>
-                                            </div>
-                                            <div>
-                                                <label className="block text-sm font-medium text-gray-700">Unit</label>
-                                                <select 
-                                                    value={newMatUnit}
-                                                    onChange={(e) => setNewMatUnit(e.target.value)}
-                                                    className={`mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-2 ${ringClass} sm:text-sm bg-white`}
-                                                >
-                                                    <option value="kg">kg</option>
-                                                    <option value="g">g</option>
-                                                    <option value="L">L</option>
-                                                    <option value="units">units</option>
-                                                    <option value="pack">pack</option>
-                                                </select>
-                                            </div>
+                                            <input type="number" step="any" min="0" value={newMatQty} onChange={(e) => setNewMatQty(e.target.value)} className={`mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-2 ${ringClass} sm:text-sm`} placeholder="Qty" />
+                                            <input type="number" step="any" min="0" value={newMatThreshold} onChange={(e) => setNewMatThreshold(e.target.value)} className={`mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-2 ${ringClass} sm:text-sm`} placeholder="Low Threshold" />
                                         </div>
-                                        <div className="grid grid-cols-2 gap-4">
-                                            <div>
-                                                <label className="block text-sm font-medium text-gray-700">Initial Qty</label>
-                                                <input 
-                                                    type="number" 
-                                                    step="any"
-                                                    min="0"
-                                                    value={newMatQty}
-                                                    onChange={(e) => setNewMatQty(e.target.value)}
-                                                    className={`mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-2 ${ringClass} sm:text-sm`}
-                                                />
-                                            </div>
-                                            <div>
-                                                <label className="block text-sm font-medium text-gray-700">Low Threshold</label>
-                                                <input 
-                                                    type="number" 
-                                                    step="any"
-                                                    min="0"
-                                                    value={newMatThreshold}
-                                                    onChange={(e) => setNewMatThreshold(e.target.value)}
-                                                    className={`mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-2 ${ringClass} sm:text-sm`}
-                                                />
-                                            </div>
-                                        </div>
-                                        
                                         <div className="mt-5 sm:mt-6 flex gap-3">
-                                            <button 
-                                                type="button" 
-                                                onClick={() => setIsAddMatModalOpen(false)}
-                                                className="w-full inline-flex justify-center rounded-md border border-gray-300 shadow-sm px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-none sm:text-sm"
-                                            >
-                                                Cancel
-                                            </button>
-                                            <button 
-                                                type="submit" 
-                                                className="w-full inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-green-600 text-base font-medium text-white hover:bg-green-700 focus:outline-none sm:text-sm"
-                                            >
-                                                Add Material
-                                            </button>
+                                            <button type="button" onClick={() => setIsAddMatModalOpen(false)} className="w-full inline-flex justify-center rounded-md border border-gray-300 shadow-sm px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-none sm:text-sm">Cancel</button>
+                                            <button type="submit" className="w-full inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-green-600 text-base font-medium text-white hover:bg-green-700 focus:outline-none sm:text-sm">Add Material</button>
                                         </div>
                                     </form>
                                 </div>
@@ -674,7 +583,7 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
                 </div>
             )}
 
-            {/* --- Purchase Request Modal --- */}
+            {/* --- Purchase Supplies Modal --- */}
             {isPurchaseModalOpen && (
                 <div className="fixed inset-0 z-50 overflow-y-auto">
                      <div className="flex items-end justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:block sm:p-0">
@@ -686,77 +595,20 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
                                     <svg className="h-6 w-6 text-indigo-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 3h2l.4 2M7 13h10l4-8H5.4M7 13L5.4 5M7 13l-2.293 2.293c-.63.63-.184 1.707.707 1.707H17m0 0a2 2 0 100 4 2 2 0 000-4zm-8 2a2 2 0 11-4 0 2 2 0 014 0z" /></svg>
                                 </div>
                                 <div className="mt-3 text-center sm:mt-5">
-                                    <h3 className="text-lg leading-6 font-medium text-gray-900">
-                                        Purchase Supplies
-                                    </h3>
-                                    <p className="text-sm text-gray-500 mt-1 mb-4">
-                                        Select item to buy (Spawn, Straw, Fertilizer)
-                                    </p>
+                                    <h3 className="text-lg leading-6 font-medium text-gray-900">Purchase Supplies</h3>
                                     <form onSubmit={handlePurchaseRequest} className="mt-4 text-left space-y-3">
-                                        <div>
-                                            <label className="block text-sm font-medium text-gray-700">Item</label>
-                                            <select 
-                                                value={purchaseItemId}
-                                                onChange={(e) => setPurchaseItemId(e.target.value)}
-                                                required
-                                                className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-2 focus:ring-indigo-500 sm:text-sm bg-white"
-                                            >
-                                                <option value="">-- Select Resource --</option>
-                                                {resources.map(r => (
-                                                    <option key={r.id} value={r.id}>{r.name} (Current: {r.quantity})</option>
-                                                ))}
-                                            </select>
-                                        </div>
-                                        <div>
-                                            <label className="block text-sm font-medium text-gray-700">Quantity</label>
-                                            <input 
-                                                type="number" 
-                                                step="any" 
-                                                required
-                                                min="1"
-                                                value={purchaseQty}
-                                                onChange={(e) => setPurchaseQty(e.target.value)}
-                                                className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-2 focus:ring-indigo-500 sm:text-sm"
-                                                placeholder="Amount to buy"
-                                            />
-                                        </div>
-                                        <div>
-                                            <label className="block text-sm font-medium text-gray-700">Estimated Cost (RM)</label>
-                                            <input 
-                                                type="number" 
-                                                step="0.01" 
-                                                required
-                                                min="0.01"
-                                                value={purchaseCost}
-                                                onChange={(e) => setPurchaseCost(e.target.value)}
-                                                className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-2 focus:ring-indigo-500 sm:text-sm"
-                                                placeholder="0.00"
-                                            />
-                                        </div>
-                                        <div>
-                                            <label className="block text-sm font-medium text-gray-700">Notes for Finance</label>
-                                            <textarea 
-                                                value={purchaseNotes}
-                                                onChange={(e) => setPurchaseNotes(e.target.value)}
-                                                className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-2 focus:ring-indigo-500 sm:text-sm"
-                                                placeholder="e.g. Urgent, Supplier X"
-                                                rows={2}
-                                            />
-                                        </div>
+                                        <select value={purchaseItemId} onChange={(e) => setPurchaseItemId(e.target.value)} required className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-2 focus:ring-indigo-500 sm:text-sm bg-white">
+                                            <option value="">-- Select Resource --</option>
+                                            {resources.map(r => (
+                                                <option key={r.id} value={r.id}>{r.name} (Current: {r.quantity})</option>
+                                            ))}
+                                        </select>
+                                        <input type="number" step="any" required min="1" value={purchaseQty} onChange={(e) => setPurchaseQty(e.target.value)} className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-2 focus:ring-indigo-500 sm:text-sm" placeholder="Amount to buy" />
+                                        <input type="number" step="0.01" required min="0.01" value={purchaseCost} onChange={(e) => setPurchaseCost(e.target.value)} className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-2 focus:ring-indigo-500 sm:text-sm" placeholder="Estimated Cost (RM)" />
+                                        <textarea value={purchaseNotes} onChange={(e) => setPurchaseNotes(e.target.value)} className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-2 focus:ring-indigo-500 sm:text-sm" placeholder="e.g. Urgent, Supplier X" rows={2} />
                                         <div className="mt-5 sm:mt-6 flex gap-3">
-                                            <button 
-                                                type="button" 
-                                                onClick={() => setIsPurchaseModalOpen(false)}
-                                                className="w-full inline-flex justify-center rounded-md border border-gray-300 shadow-sm px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-none sm:text-sm"
-                                            >
-                                                Cancel
-                                            </button>
-                                            <button 
-                                                type="submit" 
-                                                className="w-full inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-indigo-600 text-base font-medium text-white hover:bg-indigo-700 focus:outline-none sm:text-sm"
-                                            >
-                                                Send Request
-                                            </button>
+                                            <button type="button" onClick={() => setIsPurchaseModalOpen(false)} className="w-full inline-flex justify-center rounded-md border border-gray-300 shadow-sm px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-none sm:text-sm">Cancel</button>
+                                            <button type="submit" className="w-full inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-indigo-600 text-base font-medium text-white hover:bg-indigo-700 focus:outline-none sm:text-sm">Send Request</button>
                                         </div>
                                     </form>
                                 </div>

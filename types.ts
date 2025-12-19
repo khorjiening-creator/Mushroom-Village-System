@@ -1,4 +1,3 @@
-
 export enum VillageType {
   A = 'Village A',
   B = 'Village B',
@@ -44,7 +43,9 @@ export interface FinancialRecord {
   type: 'INCOME' | 'EXPENSE';
   category: string;
   amount: number;
+  weightKg?: number | null; // Weight for sales
   date: string;
+  settledDate?: string | null; // Date when payment was received/made
   description?: string;
   batchId?: string | null;
   orderNumber?: string | null;
@@ -52,13 +53,15 @@ export interface FinancialRecord {
   villageId: VillageType;
   paymentMethod?: string;
   status?: 'COMPLETED' | 'PENDING';
+  attachmentUrl?: string | null;
+  attachmentName?: string | null;
   createdAt?: string;
   updatedAt?: string;
 }
 
 export interface ActivityLog {
   id?: string;
-  type: 'BED_PREP' | 'WATERING' | 'INSPECTION' | 'HARVEST' | 'OTHER';
+  type: 'SUBSTRATE_PREP' | 'SUBSTRATE_MIXING' | 'SPAWNING' | 'HUMIDITY_CONTROL' | 'FLUSH_REHYDRATION' | 'INSPECTION' | 'HARVEST' | 'OTHER';
   details: string;
   userEmail: string;
   timestamp: string;
