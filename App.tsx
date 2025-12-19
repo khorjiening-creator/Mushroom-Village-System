@@ -1,5 +1,8 @@
+
 import React, { useState, useEffect } from 'react';
-import { signInWithEmailAndPassword, onAuthStateChanged, User, signOut } from 'firebase/auth';
+// Fix: Named exports for auth and importing User as type
+import { signInWithEmailAndPassword, onAuthStateChanged, signOut } from 'firebase/auth';
+import type { User } from 'firebase/auth';
 import { doc, getDoc, setDoc } from 'firebase/firestore';
 import { auth, db } from './services/firebase';
 import { VillageType, UserProfile } from './types';

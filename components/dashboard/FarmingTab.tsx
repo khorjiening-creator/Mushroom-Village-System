@@ -97,6 +97,10 @@ export const FarmingTab: React.FC<FarmingTabProps> = ({
     return d.toISOString().split('T')[0];
   });
   const [filterEndDate, setFilterEndDate] = useState(() => new Date().toISOString().split('T')[0]);
+  
+  // New Filter States
+  const [filterStrain, setFilterStrain] = useState('All');
+  const [filterStatus, setFilterStatus] = useState('All');
 
   // --- State for Batch Details ---
   const [selectedBatch, setSelectedBatch] = useState<ExtendedActivityLog | null>(null);
@@ -198,6 +202,31 @@ export const FarmingTab: React.FC<FarmingTabProps> = ({
         setIsLoadingBatches(false);
     }
   };
+
+  // --- Filtering Logic for Registry ---
+  const filteredRegistryList = useMemo(() => {
+    return batchList.filter(batch => {
+        // Strain Filter
+        if (filterStrain !== 'All' && batch.mushroomStrain !== filterStrain) return false;
+        
+        // Status Filter
+        if (filterStatus !== 'All') {
+            const predicted = batch.predictedYield || 0;
+            const actual = batch.totalYield || 0;
+            const wastage = batch.totalWastage || 0;
+            const totalOutput = actual + wastage;
+            
+            let status = 'In Progress';
+            if (predicted > 0 && totalOutput >= predicted) {
+                status = 'Completed';
+            }
+            
+            if (filterStatus !== status) return false;
+        }
+        
+        return true;
+    });
+  }, [batchList, filterStrain, filterStatus]);
 
   const fetchRecordedWastage = async () => {
       try {
@@ -836,8 +865,36 @@ export const FarmingTab: React.FC<FarmingTabProps> = ({
 
                 {/* Batch Registry Table */}
                 <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden mt-6">
-                    <div className="px-6 py-4 border-b border-gray-200 bg-gray-50 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                        <h3 className="text-lg font-bold text-gray-900">Batch Registry</h3>
+                    <div className="px-6 py-4 border-b border-gray-200 bg-gray-50 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+                        <div className="flex flex-col sm:flex-row sm:items-center gap-4">
+                            <h3 className="text-lg font-bold text-gray-900">Batch Registry</h3>
+                            
+                            {/* Registry Filters */}
+                            <div className="flex flex-wrap items-center gap-2">
+                                <select 
+                                    value={filterStrain} 
+                                    onChange={(e) => setFilterStrain(e.target.value)}
+                                    className="text-xs border border-gray-300 rounded-md py-1.5 pl-2 pr-8 focus:ring-indigo-500 focus:border-indigo-500 bg-white text-gray-600"
+                                >
+                                    <option value="All">All Strains</option>
+                                    <option value="Oyster">Oyster</option>
+                                    <option value="Shiitake">Shiitake</option>
+                                    <option value="Button">Button</option>
+                                    <option value="Lion's Mane">Lion's Mane</option>
+                                </select>
+                                
+                                <select 
+                                    value={filterStatus} 
+                                    onChange={(e) => setFilterStatus(e.target.value)}
+                                    className="text-xs border border-gray-300 rounded-md py-1.5 pl-2 pr-8 focus:ring-indigo-500 focus:border-indigo-500 bg-white text-gray-600"
+                                >
+                                    <option value="All">All Status</option>
+                                    <option value="In Progress">In Progress</option>
+                                    <option value="Completed">Completed</option>
+                                </select>
+                            </div>
+                        </div>
+
                         <div className="flex items-center gap-2">
                             <div className="flex items-center bg-white border border-gray-300 rounded-md shadow-sm">
                                 <input type="date" value={filterStartDate} onChange={(e) => setFilterStartDate(e.target.value)} className="text-xs border-none focus:ring-0 rounded-l-md py-1.5 pl-2 text-gray-600" />
@@ -856,30 +913,51 @@ export const FarmingTab: React.FC<FarmingTabProps> = ({
                                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Date Created</th>
                                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Batch ID</th>
                                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Strain</th>
+                                    <th className="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase">Status</th>
                                     <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Yield</th>
                                     <th className="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase">Actions</th>
                                 </tr>
                             </thead>
                             <tbody className="bg-white divide-y divide-gray-200">
                                 {isLoadingBatches ? (
-                                    <tr><td colSpan={5} className="px-6 py-10 text-center text-sm text-gray-500">Loading...</td></tr>
-                                ) : batchList.length === 0 ? (
-                                    <tr><td colSpan={5} className="px-6 py-10 text-center text-sm text-gray-500">No batches found.</td></tr>
+                                    <tr><td colSpan={6} className="px-6 py-10 text-center text-sm text-gray-500">Loading...</td></tr>
+                                ) : filteredRegistryList.length === 0 ? (
+                                    <tr><td colSpan={6} className="px-6 py-10 text-center text-sm text-gray-500">No batches matching criteria.</td></tr>
                                 ) : (
-                                    batchList.map((log) => (
-                                        <tr key={log.id} className="hover:bg-gray-50 transition-colors">
-                                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{new Date(log.timestamp).toLocaleDateString()}</td>
-                                            <td className="px-6 py-4 whitespace-nowrap text-sm font-bold text-gray-900">{log.batchId || log.id}</td>
-                                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{log.mushroomStrain || '-'}</td>
-                                            <td className="px-6 py-4 whitespace-nowrap text-sm font-bold text-green-700 text-right">{log.totalYield ? `${log.totalYield.toFixed(1)} kg` : '-'}</td>
-                                            <td className="px-6 py-4 whitespace-nowrap text-center">
-                                                <div className="flex justify-center space-x-2">
-                                                    <button onClick={() => fetchBatchDetails(log)} className="text-indigo-600 hover:text-indigo-900 text-xs font-medium border border-indigo-200 px-2 py-1 rounded">View</button>
-                                                    <button onClick={() => openEditModal(log)} className="text-gray-500 hover:text-gray-800 text-xs font-medium border border-gray-200 px-2 py-1 rounded">Edit</button>
-                                                </div>
-                                            </td>
-                                        </tr>
-                                    ))
+                                    filteredRegistryList.map((log) => {
+                                        const predicted = log.predictedYield || 0;
+                                        const actual = log.totalYield || 0;
+                                        const wastage = log.totalWastage || 0;
+                                        const totalOutput = actual + wastage;
+                                        
+                                        let statusText = 'In Progress';
+                                        let statusColor = 'bg-yellow-100 text-yellow-800';
+                                        
+                                        if (predicted > 0 && totalOutput >= predicted) {
+                                            statusText = 'Completed';
+                                            statusColor = 'bg-green-100 text-green-800';
+                                        }
+
+                                        return (
+                                            <tr key={log.id} className="hover:bg-gray-50 transition-colors">
+                                                <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{new Date(log.timestamp).toLocaleDateString()}</td>
+                                                <td className="px-6 py-4 whitespace-nowrap text-sm font-bold text-gray-900">{log.batchId || log.id}</td>
+                                                <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{log.mushroomStrain || '-'}</td>
+                                                <td className="px-6 py-4 whitespace-nowrap text-center">
+                                                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${statusColor}`}>
+                                                        {statusText}
+                                                    </span>
+                                                </td>
+                                                <td className="px-6 py-4 whitespace-nowrap text-sm font-bold text-green-700 text-right">{log.totalYield ? `${log.totalYield.toFixed(1)} kg` : '-'}</td>
+                                                <td className="px-6 py-4 whitespace-nowrap text-center">
+                                                    <div className="flex justify-center space-x-2">
+                                                        <button onClick={() => fetchBatchDetails(log)} className="text-indigo-600 hover:text-indigo-900 text-xs font-medium border border-indigo-200 px-2 py-1 rounded">View</button>
+                                                        <button onClick={() => openEditModal(log)} className="text-gray-500 hover:text-gray-800 text-xs font-medium border border-gray-200 px-2 py-1 rounded">Edit</button>
+                                                    </div>
+                                                </td>
+                                            </tr>
+                                        );
+                                    })
                                 )}
                             </tbody>
                         </table>

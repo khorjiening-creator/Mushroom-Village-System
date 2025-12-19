@@ -1,6 +1,9 @@
+
 import React, { useState, useEffect } from 'react';
 import { collection, getDocs, doc, updateDoc, setDoc, query, orderBy, limit, addDoc } from 'firebase/firestore';
-import { initializeApp, deleteApp, FirebaseApp } from 'firebase/app';
+// Fix: Use named exports and separate types
+import { initializeApp, deleteApp } from 'firebase/app';
+import type { FirebaseApp } from 'firebase/app';
 import { getAuth, createUserWithEmailAndPassword, signOut } from 'firebase/auth';
 import { db, firebaseConfig } from '../../services/firebase';
 import { UserProfile, UserRole, VillageType, SystemLog } from '../../types';

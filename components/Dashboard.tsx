@@ -1,5 +1,7 @@
+
 import React, { useState, useEffect, useMemo } from 'react';
 import { collection, getDocs, doc, updateDoc, addDoc, setDoc, deleteDoc, query, orderBy, limit, where } from 'firebase/firestore';
+// Fix: Import signOut as a named export
 import { signOut } from 'firebase/auth';
 import { VillageType, UserRole, FinancialRecord, ActivityLog, HarvestLog, ResourceItem } from '../types';
 import { VILLAGES, COLOR_THEMES } from '../constants';
