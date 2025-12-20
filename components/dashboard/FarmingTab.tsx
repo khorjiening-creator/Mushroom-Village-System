@@ -1,7 +1,12 @@
+
 import React, { useState, useEffect, useMemo } from 'react';
 import { addDoc, collection, query, orderBy, limit, getDocs, where, setDoc, doc, updateDoc, increment, getDoc, deleteDoc } from 'firebase/firestore';
 import { db } from '../../services/firebase';
 import { ActivityLog, VillageType } from '../../types';
+
+interface ExtendedActivityLog extends ActivityLog {
+    totalWastage?: number;
+}
 
 interface FarmingTabProps {
   villageId: VillageType;
@@ -13,31 +18,31 @@ interface FarmingTabProps {
   onError: (msg: string) => void;
 }
 
-// Extend ActivityLog type locally
-interface ExtendedActivityLog extends ActivityLog {
-    totalWastage?: number;
-}
-
 /**
- * REFINED AUTOMATED DEDUCTION RECIPES
+ * AUTOMATED DEDUCTION RECIPES BASED ON ITEM CODES
+ * Straw: MAT-573260995
+ * Spawn: MAT-282015830
+ * Bran: MAT-406637503
+ * Gypsum: MAT-446059102
+ * Water: MAT-545594408 (Quantity stored in L, price per 10L)
  */
 const ACTIVITY_RECIPES: Record<string, { id: string, name: string, amount: number }[]> = {
     'SUBSTRATE_PREP': [
-        { id: "MAT-1001", name: "Straw", amount: 20 },
-        { id: "MAT-1005", name: "Water", amount: 50 },
+        { id: "MAT-573260995", name: "Straw", amount: 20 },
+        { id: "MAT-545594408", name: "Water", amount: 50 }, // 50 Liters
     ],
     'SUBSTRATE_MIXING': [
-        { id: "MAT-1003", name: "Bran", amount: 0.5 },
-        { id: "MAT-1004", name: "Gypsum", amount: 0.2 },
+        { id: "MAT-406637503", name: "Bran", amount: 0.5 },
+        { id: "MAT-446059102", name: "Gypsum", amount: 0.2 },
     ],
     'SPAWNING': [
-        { id: "MAT-1002", name: "Spawn", amount: 1 },
+        { id: "MAT-282015830", name: "Spawn", amount: 1 },
     ],
     'HUMIDITY_CONTROL': [
-        { id: "MAT-1005", name: "Water", amount: 5 },
+        { id: "MAT-545594408", name: "Water", amount: 5 }, // 5 Liters
     ],
     'FLUSH_REHYDRATION': [
-        { id: "MAT-1005", name: "Water", amount: 20 },
+        { id: "MAT-545594408", name: "Water", amount: 20 }, // 20 Liters
     ]
 };
 
@@ -324,7 +329,7 @@ export const FarmingTab: React.FC<FarmingTabProps> = ({
               if (!finalBatchId) throw new Error("Batch ID is required for Substrate Prep");
               await setDoc(doc(db, collectionName, finalBatchId), newLog);
               
-              // Automated Material Deduction
+              // Automated Material Deduction based on item codes
               const recipe = ACTIVITY_RECIPES[activityType] || [];
               for (const item of recipe) {
                   await performAutoDeduction(item.id, item.amount, "Substrate Prep", finalBatchId);
@@ -338,7 +343,7 @@ export const FarmingTab: React.FC<FarmingTabProps> = ({
               }
               await addDoc(collection(db, collectionName, finalBatchId, "activity_logs"), newLog);
               
-              // Automated Material Deduction for incremental steps
+              // Automated Material Deduction for incremental steps (Mixing, Spawning, etc)
               const recipe = ACTIVITY_RECIPES[activityType] || [];
               if (recipe.length > 0) {
                   for (const item of recipe) {
@@ -435,7 +440,7 @@ export const FarmingTab: React.FC<FarmingTabProps> = ({
   const handleEditWastage = (log: any) => {
       setEditingWastageId(log.id);
       setWastageBatchId(log.batchId);
-      setWastageWeight(log.weightKg.toString());
+      setWastageWeight((log.weightKg ?? 0).toString());
       setWastageReason(log.reason);
       setOriginalWastageWeight(log.weightKg);
   };
@@ -459,7 +464,7 @@ export const FarmingTab: React.FC<FarmingTabProps> = ({
         <td style="padding: 8px; border-bottom: 1px solid #eee;">${new Date(log.timestamp).toLocaleDateString()}</td>
         <td style="padding: 8px; border-bottom: 1px solid #eee; font-weight: bold;">${log.batchId}</td>
         <td style="padding: 8px; border-bottom: 1px solid #eee;">${log.reason}</td>
-        <td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right;">${log.weightKg.toFixed(2)} kg</td>
+        <td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right;">${(log.weightKg || 0).toFixed(2)} kg</td>
         <td style="padding: 8px; border-bottom: 1px solid #eee; font-size: 10px;">${log.recordedBy}</td>
       </tr>
     `).join('');
@@ -560,7 +565,7 @@ export const FarmingTab: React.FC<FarmingTabProps> = ({
       setSelectedBatch(batch);
       setEditBatchStrain(batch.mushroomStrain || 'Oyster');
       setEditBatchDetails(batch.details || '');
-      setEditBatchYield(batch.totalYield ? batch.totalYield.toString() : '0');
+      setEditBatchYield((batch.totalYield ?? 0).toString());
       setIsEditingBatch(true);
   };
 
@@ -671,7 +676,7 @@ export const FarmingTab: React.FC<FarmingTabProps> = ({
                     {/* Activity Form */}
                     <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200 flex flex-col h-full">
                         <h2 className="text-lg font-bold text-gray-900 mb-4 flex items-center gap-2">
-                            <svg className={`w-5 h-5 ${theme.textIcon}`} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" /></svg>
+                            <svg className={`w-5 h-5 ${theme.textIcon}`} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" /></svg>
                             Daily Farming Log ({villageId === VillageType.A ? 'A' : villageId === VillageType.B ? 'B' : 'Gen'})
                         </h2>
                         <form onSubmit={handleLogActivity} className="space-y-4 flex-1">
@@ -851,7 +856,7 @@ export const FarmingTab: React.FC<FarmingTabProps> = ({
                                   {log.reason}
                                 </span>
                               </td>
-                              <td className="px-6 py-4 whitespace-nowrap text-sm font-bold text-red-700 text-right">{log.weightKg.toFixed(2)} kg</td>
+                              <td className="px-6 py-4 whitespace-nowrap text-sm font-bold text-red-700 text-right">{(log.weightKg || 0).toFixed(2)} kg</td>
                               <td className="px-6 py-4 whitespace-nowrap text-center">
                                 <button onClick={() => handleEditWastage(log)} className="text-indigo-600 hover:text-indigo-900 text-xs font-medium border border-indigo-200 px-2 py-1 rounded">Edit</button>
                               </td>
@@ -1032,15 +1037,15 @@ export const FarmingTab: React.FC<FarmingTabProps> = ({
                         {reportType === 'BATCH' ? (
                             <table className="min-w-full divide-y divide-gray-200">
                                 <thead className="bg-gray-50"><tr><th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Batch</th><th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Strain</th><th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Actual</th><th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Predicted</th><th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Wastage (Rec)</th><th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Harvest Yet Done</th><th className="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase">Yield Eff. %</th><th className="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase">Status</th></tr></thead>
-                                <tbody className="bg-white divide-y divide-gray-200">{batchList.map((batch) => { const predicted = batch.predictedYield || 0; const actual = batch.totalYield || 0; const wastage = batch.totalWastage || 0; const remaining = Math.max(0, predicted - (actual + wastage)); const totalOutput = actual + wastage; const efficiencyVal = predicted > 0 ? (actual / predicted) * 100 : 0; let statusColor = "bg-gray-100 text-gray-800"; let statusText = "N/A"; if (predicted > 0) { if (totalOutput >= predicted) { statusColor = "bg-green-100 text-green-800"; statusText = "Completed"; } else { statusColor = "bg-yellow-100 text-yellow-800"; statusText = "In Progress"; } } return (<tr key={batch.id} className="hover:bg-gray-50"><td className="px-6 py-4 text-sm font-bold text-gray-900">{batch.batchId || batch.id}</td><td className="px-6 py-4 text-sm text-gray-500">{batch.mushroomStrain}</td><td className="px-6 py-4 text-sm font-bold text-right text-gray-900">{actual.toFixed(1)}</td><td className="px-6 py-4 text-sm text-right text-gray-500">{predicted > 0 ? predicted.toFixed(1) : '-'}</td><td className="px-6 py-4 text-sm text-right text-red-500">{wastage > 0 ? wastage.toFixed(1) : '-'}</td><td className="px-6 py-4 text-sm text-right font-medium text-indigo-600">{remaining > 0 ? remaining.toFixed(1) : '-'}</td><td className="px-6 py-4 text-center"><span className="text-xs font-bold">{efficiencyVal.toFixed(0)}%</span></td><td className="px-6 py-4 text-center"><span className={`px-2 py-1 text-xs font-bold rounded-full ${statusColor}`}>{statusText}</span></td></tr>); })}</tbody>
+                                <tbody className="bg-white divide-y divide-gray-200">{batchList.map((batch) => { const predicted = batch.predictedYield || 0; const actual = batch.totalYield || 0; const wastage = batch.totalWastage || 0; const remaining = Math.max(0, predicted - (actual + wastage)); const totalOutput = actual + wastage; const efficiencyVal = predicted > 0 ? (actual / predicted) * 100 : 0; let statusColor = "bg-gray-100 text-gray-800"; let statusText = "N/A"; if (predicted > 0) { if (totalOutput >= predicted) { statusColor = "bg-green-100 text-green-800"; statusText = "Completed"; } else { statusColor = "bg-yellow-100 text-yellow-800"; statusText = "In Progress"; } } return (<tr key={batch.id} className="hover:bg-gray-50"><td className="px-6 py-4 text-sm font-bold text-gray-900">{batch.batchId || batch.id}</td><td className="px-6 py-4 text-sm text-gray-500">{batch.mushroomStrain}</td><td className="px-6 py-4 text-sm font-bold text-right text-gray-900">{(actual || 0).toFixed(1)}</td><td className="px-6 py-4 text-sm text-right text-gray-500">{predicted > 0 ? predicted.toFixed(1) : '-'}</td><td className="px-6 py-4 text-sm text-right text-red-500">{wastage > 0 ? wastage.toFixed(1) : '-'}</td><td className="px-6 py-4 text-sm text-right font-medium text-indigo-600">{remaining > 0 ? remaining.toFixed(1) : '-'}</td><td className="px-6 py-4 text-center"><span className="text-xs font-bold">{efficiencyVal.toFixed(0)}%</span></td><td className="px-6 py-4 text-center"><span className={`px-2 py-1 text-xs font-bold rounded-full ${statusColor}`}>{statusText}</span></td></tr>); })}</tbody>
                             </table>
                         ) : reportType === 'PREDICTION' ? (
                             <>
                                 <div className="p-4 bg-indigo-50 border-b border-indigo-100 flex justify-between items-center"><div><h3 className="text-sm font-bold text-indigo-900">Production Forecast</h3><p className="text-xs text-indigo-700 mt-1">Estimated remaining supply based on active batch predictions.</p></div><button onClick={handleSendToVillageC} className="px-4 py-2 bg-indigo-600 text-white text-xs font-bold rounded shadow-sm hover:bg-indigo-700 flex items-center gap-2"><svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" /></svg>Send to Village C (Sales)</button></div>
-                                <table className="min-w-full divide-y divide-gray-200"><thead className="bg-gray-50"><tr><th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Strain</th><th className="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase">Active Batches</th><th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Predicted Total</th><th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Harvested So Far</th><th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Recorded Wastage</th><th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Remaining Forecast</th></tr></thead><tbody className="bg-white divide-y divide-gray-200">{predictionStats.map((stat, idx) => { const remaining = Math.max(0, stat.predicted - stat.actual - stat.recordedWastage); return (<tr key={idx} className="hover:bg-gray-50"><td className="px-6 py-4 text-sm font-bold text-gray-900">{stat.strain}</td><td className="px-6 py-4 text-sm text-center text-gray-500">{stat.activeBatches}</td><td className="px-6 py-4 text-sm text-right text-gray-500">{stat.predicted.toFixed(2)} kg</td><td className="px-6 py-4 text-sm text-right text-gray-500">{stat.actual.toFixed(2)} kg</td><td className="px-6 py-4 text-sm text-right text-red-500">{stat.recordedWastage.toFixed(2)} kg</td><td className="px-6 py-4 text-sm font-bold text-right text-indigo-600">{remaining.toFixed(2)} kg</td></tr>); })}</tbody></table>
+                                <table className="min-w-full divide-y divide-gray-200"><thead className="bg-gray-50"><tr><th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Strain</th><th className="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase">Active Batches</th><th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Predicted Total</th><th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Harvested So Far</th><th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Recorded Wastage</th><th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Remaining Forecast</th></tr></thead><tbody className="bg-white divide-y divide-gray-200">{predictionStats.map((stat, idx) => { const remaining = Math.max(0, stat.predicted - stat.actual - stat.recordedWastage); return (<tr key={idx} className="hover:bg-gray-50"><td className="px-6 py-4 text-sm font-bold text-gray-900">{stat.strain}</td><td className="px-6 py-4 text-sm text-center text-gray-500">{stat.activeBatches}</td><td className="px-6 py-4 text-sm text-right text-gray-500">{(stat.predicted || 0).toFixed(2)} kg</td><td className="px-6 py-4 text-sm text-right text-gray-500">{(stat.actual || 0).toFixed(2)} kg</td><td className="px-6 py-4 text-sm text-right text-red-500">{(stat.recordedWastage || 0).toFixed(2)} kg</td><td className="px-6 py-4 text-sm font-bold text-right text-indigo-600">{remaining.toFixed(2)} kg</td></tr>); })}</tbody></table>
                             </>
                         ) : (
-                            <table className="min-w-full divide-y divide-gray-200"><thead className="bg-gray-50"><tr><th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Month</th><th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Total Yield (kg)</th><th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Avg Daily (kg)</th><th className="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase">Trend</th></tr></thead><tbody className="bg-white divide-y divide-gray-200">{monthlyStats.map((m, idx) => { const prev = monthlyStats[idx + 1]; const trend = prev ? (m.total - prev.total) : 0; return (<tr key={m.month} className="hover:bg-gray-50"><td className="px-6 py-4 text-sm font-bold text-gray-900">{m.month}</td><td className="px-6 py-4 text-sm font-bold text-right text-green-700">{m.total.toFixed(2)}</td><td className="px-6 py-4 text-sm text-right text-gray-500">{(m.total / 30).toFixed(1)}</td><td className="px-6 py-4 text-center">{prev ? (<span className={`text-xs font-bold ${trend >= 0 ? 'text-green-600' : 'text-red-600'}`}>{trend >= 0 ? '+' : ''}{trend.toFixed(1)} kg</span>) : <span className="text-xs text-gray-400">-</span>}</td></tr>); })}</tbody></table>
+                            <table className="min-w-full divide-y divide-gray-200"><thead className="bg-gray-50"><tr><th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Month</th><th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Total Yield (kg)</th><th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Avg Daily (kg)</th><th className="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase">Trend</th></tr></thead><tbody className="bg-white divide-y divide-gray-200">{monthlyStats.map((m, idx) => { const prev = monthlyStats[idx + 1]; const trend = prev ? (m.total - prev.total) : 0; return (<tr key={m.month} className="hover:bg-gray-50"><td className="px-6 py-4 text-sm font-bold text-gray-900">{m.month}</td><td className="px-6 py-4 text-sm font-bold text-right text-green-700">{(m.total || 0).toFixed(2)}</td><td className="px-6 py-4 text-sm text-right text-gray-500">{(m.total / 30).toFixed(1)}</td><td className="px-6 py-4 text-center">{prev ? (<span className={`text-xs font-bold ${trend >= 0 ? 'text-green-600' : 'text-red-600'}`}>{trend >= 0 ? '+' : ''}{trend.toFixed(1)} kg</span>) : <span className="text-xs text-gray-400">-</span>}</td></tr>); })}</tbody></table>
                         )}
                     </div>
                 </div>

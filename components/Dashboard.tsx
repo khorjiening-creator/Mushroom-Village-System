@@ -1,9 +1,9 @@
 
 import React, { useState, useEffect, useMemo } from 'react';
 import { collection, getDocs, doc, updateDoc, addDoc, setDoc, deleteDoc, query, orderBy, limit, where } from 'firebase/firestore';
-// Fix: Import signOut as a named export
+// Fix: Correct named export import for modular signOut function
 import { signOut } from 'firebase/auth';
-import { VillageType, UserRole, FinancialRecord, ActivityLog, HarvestLog, ResourceItem } from '../types';
+import { VillageType, UserRole, FinancialRecord, ActivityLog, HarvestLog, ResourceItem, VillageRole } from '../types';
 import { VILLAGES, COLOR_THEMES } from '../constants';
 import { auth, db } from '../services/firebase';
 
@@ -29,7 +29,7 @@ const Toast = ({ message, type, onClose }: { message: string, type: 'success' | 
             )}
         </div>
         <div className="ml-3 text-sm font-medium">{message}</div>
-        <button type="button" onClick={onClose} className={`ml-auto -mx-1.5 -my-1.5 rounded-lg focus:ring-2 p-1.5 inline-flex h-8 w-8 ${type === 'success' ? 'bg-green-100 text-green-500 hover:bg-green-200' : 'bg-red-100 text-red-500 hover:bg-red-200'}`}>
+        <button type="button" onClick={onClose} className={`ml-auto -mx-1.5 -my-1.5 rounded-lg focus:ring-2 p-1.5 inline-flex h-8 w-8 ${type === 'success' ? 'bg-green-100 text-green-500 hover:bg-green-200' : 'bg-red-100 text-red-800 border border-red-200'}`}>
             <span className="sr-only">Close</span>
             <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd"></path></svg>
         </button>
@@ -297,7 +297,6 @@ export const Dashboard: React.FC<DashboardProps> = ({ villageId, userEmail, user
 
       const isIncome = record.type === 'INCOME';
       const title = isIncome ? 'Official Receipt' : 'Payment Voucher';
-      const fromToLabel = isIncome ? 'Received From' : 'Paid To';
       
       printWindow.document.write(`
         <html>
@@ -426,6 +425,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ villageId, userEmail, user
                 <span className="text-sm font-semibold text-gray-900">{userName || 'Unknown User'}</span>
                 <span className="text-xs text-gray-500">{userEmail}</span>
             </div>
+            {/* Fix: Pass the auth instance to the signOut function imported from modular SDK */}
             <button onClick={() => signOut(auth)} className="text-xs sm:text-sm font-medium text-red-600 hover:text-red-700 hover:bg-red-50 px-2 sm:px-3 py-1.5 sm:py-2 rounded-md transition-colors">Sign Out</button>
           </div>
         </div>
@@ -439,8 +439,10 @@ export const Dashboard: React.FC<DashboardProps> = ({ villageId, userEmail, user
                     <>
                         <button onClick={() => setActiveTab('farming')} className={`${activeTab === 'farming' ? `border-${village.color}-500 text-${village.color}-600` : 'border-transparent text-gray-500 hover:text-gray-700'} whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm transition-colors`}>Farming</button>
                         <button onClick={() => setActiveTab('environment')} className={`${activeTab === 'environment' ? `border-${village.color}-500 text-${village.color}-600` : 'border-transparent text-gray-500 hover:text-gray-700'} whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm transition-colors`}>Environment</button>
-                        <button onClick={() => setActiveTab('resources')} className={`${activeTab === 'resources' ? `border-${village.color}-500 text-${village.color}-600` : 'border-transparent text-gray-500 hover:text-gray-700'} whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm transition-colors`}>Resources</button>
                     </>
+                )}
+                {(village.role === 'FARMING' || villageId === VillageType.C) && (isUser || isAdmin) && (
+                    <button onClick={() => setActiveTab('resources')} className={`${activeTab === 'resources' ? `border-${village.color}-500 text-${village.color}-600` : 'border-transparent text-gray-500 hover:text-gray-700'} whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm transition-colors`}>Resources</button>
                 )}
                 {(isFinance || isAdmin) && (
                     <button onClick={() => setActiveTab('financial')} className={`${activeTab === 'financial' ? `border-${village.color}-500 text-${village.color}-600` : 'border-transparent text-gray-500 hover:text-gray-700'} whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm transition-colors`}>Financials</button>

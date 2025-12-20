@@ -1,6 +1,7 @@
 
 // Fix: Use modular imports from firebase sub-packages
 import { initializeApp } from 'firebase/app';
+// Fix: Explicitly import modular auth members to resolve potentially ambiguous module resolution
 import { getAuth } from 'firebase/auth';
 import { getFirestore } from 'firebase/firestore';
 
@@ -17,5 +18,6 @@ export const firebaseConfig = {
 
 // Initialize Firebase
 const app = initializeApp(firebaseConfig);
+// Fix: Correct usage of modular getAuth
 export const auth = getAuth(app);
 export const db = getFirestore(app);

@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useRef } from 'react';
 import { FinancialRecord, VillageType } from '../types';
 
@@ -39,8 +40,9 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
     setError(null);
     if (initialData) {
       setTransType(initialData.type);
-      setTransAmount(initialData.amount.toString());
-      setTransWeight(initialData.weightKg ? initialData.weightKg.toString() : '');
+      // Fixed: Use null-coalescing and fallback to avoid .toString() crash
+      setTransAmount((initialData.amount ?? 0).toString());
+      setTransWeight(initialData.weightKg ? (initialData.weightKg ?? 0).toString() : '');
       setTransCategory(initialData.category);
       setTransDate(initialData.date);
       setTransBatchId(initialData.batchId || '');
@@ -259,7 +261,6 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
                              </label>
                          </div>
 
-                         {/* Attachment Row moved to the bottom part */}
                          <div className="pt-4 border-t border-gray-100">
                             <label className="block text-sm font-bold text-gray-800 mb-2 flex items-center gap-2">
                                 <svg className="w-4 h-4 text-indigo-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">

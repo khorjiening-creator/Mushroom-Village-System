@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect } from 'react';
 import { FinancialRecord } from '../types';
 
@@ -19,7 +20,8 @@ export const SettleModal: React.FC<SettleModalProps> = ({
 
   useEffect(() => {
     if (record) {
-      setAmount(record.amount.toString());
+      // Fixed: Use null-coalescing and fallback to avoid .toString() crash
+      setAmount((record.amount ?? 0).toString());
       setDate(new Date().toISOString().split('T')[0]);
       setMethod('Cash');
       setNotes('');

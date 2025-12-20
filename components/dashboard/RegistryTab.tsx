@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { collection, getDocs, doc, updateDoc, setDoc, query, orderBy, limit, addDoc } from 'firebase/firestore';
-// Fix: Use named exports and separate types
+// Fix: Use separate type imports and named modular exports for auth functions
 import { initializeApp, deleteApp } from 'firebase/app';
 import type { FirebaseApp } from 'firebase/app';
 import { getAuth, createUserWithEmailAndPassword, signOut } from 'firebase/auth';
@@ -103,9 +103,12 @@ export const RegistryTab: React.FC<RegistryTabProps> = ({ adminEmail }) => {
     let secondaryApp: FirebaseApp | undefined;
     try {
       secondaryApp = initializeApp(firebaseConfig, `SecondaryApp-${Date.now()}`);
+      // Fix: modular getAuth call with app instance
       const secondaryAuth = getAuth(secondaryApp);
+      // Fix: modular createUserWithEmailAndPassword call with auth instance
       const userCredential = await createUserWithEmailAndPassword(secondaryAuth, newUserEmail, newUserPassword);
       const newUid = userCredential.user.uid;
+      // Fix: Correct modular signOut call with auth instance
       await signOut(secondaryAuth);
       
       const newUser: UserProfile = {

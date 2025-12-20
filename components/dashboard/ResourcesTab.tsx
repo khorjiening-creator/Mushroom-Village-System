@@ -1,15 +1,8 @@
+
 import React, { useState, useEffect, useMemo } from 'react';
 import { collection, onSnapshot, doc, updateDoc, addDoc, setDoc, query, where, getDocs, increment, Timestamp, orderBy, limit } from 'firebase/firestore';
 import { db } from '../../services/firebase';
 import { VillageType, HarvestLog, FinancialRecord } from '../../types';
-
-interface ResourcesTabProps {
-    villageId: VillageType;
-    userEmail: string;
-    theme?: any;
-    onSuccess?: (msg: string) => void;
-    financialRecords: FinancialRecord[]; // Received from Dashboard to calculate remaining stock
-}
 
 interface FirestoreResource {
     id: string;
@@ -19,6 +12,7 @@ interface FirestoreResource {
     unit: string;
     category: string;
     lowStockThreshold: number;
+    unitCost: number; // Cost per 1 unit (RM), except for 'L' which is per 10 units
     updatedAt: any;
 }
 
@@ -32,6 +26,14 @@ interface InventoryItem {
     updatedAt: any;
 }
 
+interface ResourcesTabProps {
+    villageId: VillageType;
+    userEmail: string;
+    theme?: any;
+    onSuccess?: (msg: string) => void;
+    financialRecords: FinancialRecord[]; 
+}
+
 export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail, theme, onSuccess, financialRecords }) => {
     // --- State ---
     const [resources, setResources] = useState<FirestoreResource[]>([]);
@@ -39,11 +41,17 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
     const [harvestLogs, setHarvestLogs] = useState<HarvestLog[]>([]); 
     const [loading, setLoading] = useState(true);
     
+    // Aggregation states for Village C
+    const [harvestLogsA, setHarvestLogsA] = useState<HarvestLog[]>([]);
+    const [harvestLogsB, setHarvestLogsB] = useState<HarvestLog[]>([]);
+    const [finRecordsA, setFinRecordsA] = useState<FinancialRecord[]>([]);
+    const [finRecordsB, setFinRecordsB] = useState<FinancialRecord[]>([]);
+
     // KPIs
     const [todayProduction, setTodayProduction] = useState(0);
     const [inventoryOutCount, setInventoryOutCount] = useState(0); 
 
-    // Stock Transaction Modal State (Row Actions: Add/Minus)
+    // Stock Transaction Modal State
     const [isTransModalOpen, setIsTransModalOpen] = useState(false);
     const [transType, setTransType] = useState<'IN' | 'OUT'>('IN');
     const [selectedItem, setSelectedItem] = useState<FirestoreResource | null>(null);
@@ -57,6 +65,16 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
     const [newMatUnit, setNewMatUnit] = useState('kg');
     const [newMatQty, setNewMatQty] = useState('');
     const [newMatThreshold, setNewMatThreshold] = useState('');
+    const [newMatUnitCost, setNewMatUnitCost] = useState('');
+
+    // Edit Material Modal State
+    const [isEditMatModalOpen, setIsEditMatModalOpen] = useState(false);
+    const [editItemId, setEditItemId] = useState('');
+    const [editItemName, setEditItemName] = useState('');
+    const [editItemUnitCost, setEditItemUnitCost] = useState('');
+    const [editItemCategory, setEditItemCategory] = useState('Input');
+    const [editItemUnit, setEditItemUnit] = useState('kg');
+    const [isUpdatingDetails, setIsUpdatingDetails] = useState(false);
 
     // Purchase Request Modal State
     const [isPurchaseModalOpen, setIsPurchaseModalOpen] = useState(false);
@@ -69,8 +87,8 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
     const [activeNotification, setActiveNotification] = useState<{title: string, message: string} | null>(null);
 
     // --- Helpers ---
-    const getResourceColName = (vid: VillageType) => vid === VillageType.A ? 'resourcesA' : vid === VillageType.B ? 'resourcesB' : 'resourcesA';
-    const getInventoryColName = (vid: VillageType) => vid === VillageType.A ? 'inventoryA' : vid === VillageType.B ? 'inventoryB' : 'inventoryA';
+    const getResourceColName = (vid: VillageType) => vid === VillageType.A ? 'resourcesA' : vid === VillageType.B ? 'resourcesB' : 'resourcesC';
+    const getInventoryColName = (vid: VillageType) => vid === VillageType.A ? 'inventoryA' : vid === VillageType.B ? 'inventoryB' : 'inventoryC';
     const getHarvestColName = (vid: VillageType) => vid === VillageType.A ? 'harvestYield_A' : vid === VillageType.B ? 'harvestYield_B' : 'harvestYield_A';
     
     const getFinancialCollectionName = (vid: VillageType) => {
@@ -80,13 +98,43 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
         return "financialRecords"; 
     };
 
+    // --- Purchase Calculation Logic ---
+    useEffect(() => {
+        if (purchaseItemId && purchaseQty) {
+            const selectedResource = resources.find(r => r.id === purchaseItemId);
+            if (selectedResource) {
+                const qty = parseFloat(purchaseQty);
+                if (!isNaN(qty) && qty > 0) {
+                    const factor = selectedResource.unit === 'L' ? 10 : 1;
+                    const estimatedTotal = ((qty / factor) * (selectedResource.unitCost || 0)).toFixed(2);
+                    setPurchaseCost(estimatedTotal);
+                } else if (purchaseQty === '') {
+                    setPurchaseCost('');
+                }
+            }
+        }
+    }, [purchaseItemId, purchaseQty, resources]);
+
+    // --- Aggregation Logic: Unified Supply Chain View for Village C ---
+    const activeHarvestSource = useMemo(() => {
+        if (villageId === VillageType.C) {
+            return [...harvestLogsA, ...harvestLogsB];
+        }
+        return harvestLogs;
+    }, [villageId, harvestLogs, harvestLogsA, harvestLogsB]);
+
+    const activeFinSource = useMemo(() => {
+        if (villageId === VillageType.C) {
+            return [...financialRecords, ...finRecordsA, ...finRecordsB];
+        }
+        return financialRecords;
+    }, [villageId, financialRecords, finRecordsA, finRecordsB]);
+
     // --- Core Logic: Inventory Calculation ---
-    // Merge Harvest logs with Sales to show remaining weight per batch
     const processedOutputInventory = useMemo(() => {
-        // 1. Group all harvests by Batch ID
         const harvestTotals: Record<string, { batchId: string, strain: string, totalHarvest: number, lastTimestamp: string }> = {};
         
-        harvestLogs.forEach(log => {
+        activeHarvestSource.forEach(log => {
             const batchId = log.batchId;
             const weight = log.weightKg || log.totalYield || 0;
             if (!harvestTotals[batchId]) {
@@ -98,21 +146,18 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
                 };
             }
             harvestTotals[batchId].totalHarvest += weight;
-            // Keep the most recent timestamp for sorting
             if (new Date(log.timestamp) > new Date(harvestTotals[batchId].lastTimestamp)) {
                 harvestTotals[batchId].lastTimestamp = log.timestamp;
             }
         });
 
-        // 2. Sum up all sales from Financial Records for these batches
         const salesTotals: Record<string, number> = {};
-        financialRecords.forEach(rec => {
+        activeFinSource.forEach(rec => {
             if (rec.category === 'Sales' && rec.batchId && rec.weightKg && rec.type === 'INCOME') {
                 salesTotals[rec.batchId] = (salesTotals[rec.batchId] || 0) + rec.weightKg;
             }
         });
 
-        // 3. Subtract sales from harvest to get "Current Stock"
         return Object.values(harvestTotals).map(item => {
             const sold = salesTotals[item.batchId] || 0;
             const remaining = Math.max(0, item.totalHarvest - sold);
@@ -122,22 +167,28 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
                 remainingWeight: remaining
             };
         }).sort((a, b) => new Date(b.lastTimestamp).getTime() - new Date(a.lastTimestamp).getTime());
-    }, [harvestLogs, financialRecords]);
+    }, [activeHarvestSource, activeFinSource]);
 
     const totalCurrentStock = useMemo(() => {
         return processedOutputInventory.reduce((acc, curr) => acc + curr.remainingWeight, 0);
     }, [processedOutputInventory]);
 
+    const totalResourceValue = useMemo(() => {
+        return resources.reduce((acc, curr) => {
+            const factor = curr.unit === 'L' ? 10 : 1;
+            return acc + ((curr.quantity || 0) / factor * (curr.unitCost || 0));
+        }, 0);
+    }, [resources]);
+
     // --- Data Fetching ---
     useEffect(() => {
         const resCol = collection(db, getResourceColName(villageId));
         const invCol = collection(db, getInventoryColName(villageId));
-        const harvCol = collection(db, getHarvestColName(villageId));
 
         const unsubRes = onSnapshot(resCol, (snapshot) => {
             const list: FirestoreResource[] = [];
             snapshot.forEach(doc => list.push({ id: doc.id, ...doc.data() } as FirestoreResource));
-            if (list.length === 0) seedDefaultResources();
+            if (list.length === 0 && villageId !== VillageType.C) seedDefaultResources();
             else setResources(list);
             setLoading(false);
         });
@@ -148,24 +199,46 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
              setInventory(list);
         });
 
-        const qHarvest = query(harvCol, orderBy('timestamp', 'desc'), limit(150));
-        const unsubHarvest = onSnapshot(qHarvest, (snapshot) => {
-            const list: HarvestLog[] = [];
-            snapshot.forEach(doc => list.push({ id: doc.id, ...doc.data() } as HarvestLog));
-            setHarvestLogs(list);
-        });
+        // Harvest logic based on village
+        if (villageId === VillageType.C) {
+            // Aggregated view for C
+            const unsubA = onSnapshot(query(collection(db, 'harvestYield_A'), orderBy('timestamp', 'desc'), limit(150)), (snap) => {
+                setHarvestLogsA(snap.docs.map(d => ({id: d.id, ...d.data()} as HarvestLog)));
+            });
+            const unsubB = onSnapshot(query(collection(db, 'harvestYield_B'), orderBy('timestamp', 'desc'), limit(150)), (snap) => {
+                setHarvestLogsB(snap.docs.map(d => ({id: d.id, ...d.data()} as HarvestLog)));
+            });
+            const unsubFinA = onSnapshot(query(collection(db, 'financialRecords_A'), where('category', '==', 'Sales')), (snap) => {
+                setFinRecordsA(snap.docs.map(d => ({id: d.id, ...d.data()} as FinancialRecord)));
+            });
+            const unsubFinB = onSnapshot(query(collection(db, 'financialRecords_B'), where('category', '==', 'Sales')), (snap) => {
+                setFinRecordsB(snap.docs.map(d => ({id: d.id, ...d.data()} as FinancialRecord)));
+            });
 
+            return () => { unsubRes(); unsubInv(); unsubA(); unsubB(); unsubFinA(); unsubFinB(); };
+        } else {
+            const harvCol = collection(db, getHarvestColName(villageId));
+            const qHarvest = query(harvCol, orderBy('timestamp', 'desc'), limit(150));
+            const unsubHarvest = onSnapshot(qHarvest, (snapshot) => {
+                const list: HarvestLog[] = [];
+                snapshot.forEach(doc => list.push({ id: doc.id, ...doc.data() } as HarvestLog));
+                setHarvestLogs(list);
+            });
+            return () => { unsubRes(); unsubInv(); unsubHarvest(); };
+        }
+    }, [villageId]);
+
+    useEffect(() => {
         fetchKPIs();
-
-        return () => {
-            unsubRes();
-            unsubInv();
-            unsubHarvest();
-        };
     }, [villageId]);
 
     const fetchKPIs = async () => {
         try {
+            if (villageId === VillageType.C) {
+                setTodayProduction(0); 
+                setInventoryOutCount(0);
+                return;
+            }
             const harvestColName = getHarvestColName(villageId);
             const harvestCol = collection(db, harvestColName);
             const startOfDay = new Date();
@@ -188,11 +261,11 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
 
     const seedDefaultResources = async () => {
         const defaults = [
-            { name: "Straw (Substrate)", quantity: 1000, unit: "kg", category: "Input", lowStockThreshold: 200, materialId: "MAT-1001" },
-            { name: "Spawn (Inoculum)", quantity: 100, unit: "kg", category: "Input", lowStockThreshold: 20, materialId: "MAT-1002" },
-            { name: "Rice Bran (Supplement)", quantity: 200, unit: "kg", category: "Nutrient", lowStockThreshold: 50, materialId: "MAT-1003" },
-            { name: "Gypsum (Conditioner)", quantity: 50, unit: "kg", category: "Nutrient", lowStockThreshold: 10, materialId: "MAT-1004" },
-            { name: "Water Supply Tank", quantity: 5000, unit: "L", category: "Utility", lowStockThreshold: 1000, materialId: "MAT-1005" },
+            { name: "Straw (Substrate)", quantity: 1000, unit: "kg", category: "Input", lowStockThreshold: 200, unitCost: 1.50, materialId: "MAT-573260995" },
+            { name: "Spawn (Inoculum)", quantity: 100, unit: "kg", category: "Input", lowStockThreshold: 20, unitCost: 12.00, materialId: "MAT-282015830" },
+            { name: "Bran", quantity: 400, unit: "kg", category: "Nutrient", lowStockThreshold: 100, unitCost: 3.50, materialId: "MAT-406637503" },
+            { name: "Gypsum (Conditioner)", quantity: 50, unit: "kg", category: "Nutrient", lowStockThreshold: 10, unitCost: 2.00, materialId: "MAT-446059102" },
+            { name: "Water Supply Tank", quantity: 5000, unit: "L", category: "Utility", lowStockThreshold: 1000, unitCost: 0.50, materialId: "MAT-545594408" },
         ];
         const col = collection(db, getResourceColName(villageId));
         for (const item of defaults) {
@@ -242,6 +315,7 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
             const collectionName = getResourceColName(villageId);
             const initialQty = parseFloat(newMatQty) || 0;
             const threshold = parseFloat(newMatThreshold) || 0;
+            const unitCost = parseFloat(newMatUnitCost) || 0;
             const materialId = "MAT-" + Date.now().toString().slice(-6) + Math.floor(100 + Math.random() * 900);
             await setDoc(doc(db, collectionName, materialId), {
                 materialId,
@@ -250,6 +324,7 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
                 unit: newMatUnit,
                 quantity: initialQty,
                 lowStockThreshold: threshold,
+                unitCost: unitCost,
                 updatedAt: new Date().toISOString()
             });
             if (initialQty > 0) {
@@ -259,10 +334,33 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
             }
             if (onSuccess) onSuccess(`Added ${newMatName} (ID: ${materialId})`);
             setIsAddMatModalOpen(false);
-            setNewMatName(''); setNewMatCategory('Input'); setNewMatUnit('kg'); setNewMatQty(''); setNewMatThreshold('');
+            setNewMatName(''); setNewMatCategory('Input'); setNewMatUnit('kg'); setNewMatQty(''); setNewMatThreshold(''); setNewMatUnitCost('');
         } catch (e) {
             console.error("Add Material failed", e);
             alert("Failed to add material.");
+        }
+    };
+
+    const handleUpdateDetails = async (e: React.FormEvent) => {
+        e.preventDefault();
+        if (!editItemId || !editItemUnitCost) return;
+        setIsUpdatingDetails(true);
+        try {
+            const collectionName = getResourceColName(villageId);
+            const itemRef = doc(db, collectionName, editItemId);
+            await updateDoc(itemRef, {
+                unitCost: parseFloat(editItemUnitCost),
+                category: editItemCategory,
+                unit: editItemUnit,
+                updatedAt: new Date().toISOString()
+            });
+            onSuccess(`Updated ${editItemName} details.`);
+            setIsEditMatModalOpen(false);
+        } catch (e) {
+            console.error("Update details failed", e);
+            alert("Failed to update details.");
+        } finally {
+            setIsUpdatingDetails(false);
         }
     };
 
@@ -273,13 +371,18 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
         try {
             const finColName = getFinancialCollectionName(villageId);
             const transactionId = "TXN-" + Date.now().toString().slice(-6) + Math.floor(100 + Math.random() * 900);
+            const totalCost = parseFloat(purchaseCost) || 0;
+            const qty = parseFloat(purchaseQty) || 1;
+            const factor = selectedResource.unit === 'L' ? 10 : 1;
+            const calcUnitCost = totalCost / (qty / factor);
+
             await setDoc(doc(db, finColName, transactionId), {
                 type: 'EXPENSE',
                 status: 'PENDING',
                 category: 'Supplies', 
-                amount: parseFloat(purchaseCost) || 0,
+                amount: totalCost,
                 date: new Date().toISOString().split('T')[0],
-                description: `Purchase Request: ${purchaseQty} ${selectedResource.unit} of ${selectedResource.name} (${selectedResource.materialId || 'No ID'}). Notes: ${purchaseNotes}`,
+                description: `Purchase Request: ${purchaseQty} ${selectedResource.unit} of ${selectedResource.name} (${selectedResource.materialId || 'No ID'}). Est Unit Cost: RM${calcUnitCost.toFixed(2)} per ${selectedResource.unit === 'L' ? '10L' : selectedResource.unit}. Notes: ${purchaseNotes}`,
                 recordedBy: userEmail,
                 villageId: villageId,
                 transactionId,
@@ -325,162 +428,195 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
                 </div>
             )}
 
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div className={`grid grid-cols-1 ${villageId === VillageType.C ? 'md:grid-cols-3' : 'md:grid-cols-4'} gap-4`}>
                 <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm relative overflow-hidden">
                     <div className="relative z-10">
-                        <h3 className="text-sm font-bold text-gray-500 uppercase tracking-wider mb-2">Today's Output</h3>
+                        <h3 className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1">Total Yield (Aggregate)</h3>
                         <div className="flex items-baseline">
-                            <span className="text-3xl font-extrabold text-green-600">{todayProduction.toFixed(1)}</span>
-                            <span className="ml-1 text-sm text-gray-500 font-medium">kg</span>
+                            <span className="text-3xl font-black text-green-600">{(processedOutputInventory.reduce((a,c)=>a+c.totalHarvest, 0)).toFixed(1)}</span>
+                            <span className="ml-1 text-sm text-gray-400 font-bold">kg</span>
                         </div>
-                        <p className="text-xs text-gray-400 mt-2">Fresh harvest logged today</p>
                     </div>
                 </div>
 
                 <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm relative overflow-hidden">
                     <div className="relative z-10">
-                        <h3 className="text-sm font-bold text-gray-500 uppercase tracking-wider mb-2">Inventory Out</h3>
+                        <h3 className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1">Total Sold (Aggregate)</h3>
                         <div className="flex items-baseline">
-                            <span className="text-3xl font-extrabold text-indigo-600">{inventoryOutCount}</span>
-                            <span className="ml-1 text-sm text-gray-500 font-medium">Orders</span>
+                            <span className="text-3xl font-black text-indigo-600">{(processedOutputInventory.reduce((a,c)=>a+c.soldWeight, 0)).toFixed(1)}</span>
+                            <span className="ml-1 text-sm text-gray-400 font-bold">kg</span>
                         </div>
-                        <p className="text-xs text-gray-400 mt-2">Sales/Shipments processed</p>
                     </div>
                 </div>
 
                 <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm relative overflow-hidden">
                     <div className="relative z-10">
-                        <h3 className="text-sm font-bold text-gray-500 uppercase tracking-wider mb-2">Total Supply for C</h3>
+                        <h3 className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1">Available Hub Supply</h3>
                         <div className="flex items-baseline">
-                            <span className="text-3xl font-extrabold text-blue-600">{totalAvailableStock.toFixed(1)}</span>
-                            <span className="ml-1 text-sm text-gray-500 font-medium">kg</span>
+                            <span className="text-3xl font-black text-blue-600">{(totalAvailableStock || 0).toFixed(1)}</span>
+                            <span className="ml-1 text-sm text-gray-400 font-bold">kg</span>
                         </div>
-                        <p className="text-xs text-gray-400 mt-2">Available for processing</p>
                     </div>
                 </div>
+
+                {villageId !== VillageType.C && (
+                    <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm relative overflow-hidden border-l-4 border-l-indigo-500">
+                        <div className="relative z-10">
+                            <h3 className="text-[10px] font-black text-indigo-500 uppercase tracking-widest mb-1">Inventory Assets</h3>
+                            <div className="flex items-baseline">
+                                <span className="text-sm font-bold text-gray-400 mr-1">RM</span>
+                                <span className="text-3xl font-black text-indigo-700">{(totalResourceValue || 0).toLocaleString(undefined, {minimumFractionDigits: 2})}</span>
+                            </div>
+                        </div>
+                    </div>
+                )}
             </div>
 
-            <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-                <div className="px-6 py-4 border-b border-gray-200 bg-gray-50 flex flex-col sm:flex-row justify-between items-start sm:items-center">
-                    <div>
-                        <h2 className="text-lg font-bold text-gray-900">Material Availability (Inputs)</h2>
-                        <p className="text-xs text-gray-500">Track Straw, Spawn, Bran, and Gypsum.</p>
+            {/* --- Input Material Section (HIDDEN FOR VILLAGE C) --- */}
+            {villageId !== VillageType.C && (
+                <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+                    <div className="px-6 py-4 border-b border-gray-200 bg-gray-50 flex flex-col sm:flex-row justify-between items-start sm:items-center">
+                        <div>
+                            <h2 className="text-lg font-black text-gray-900 tracking-tight">Material Availability (Inputs)</h2>
+                            <p className="text-xs text-gray-400 font-medium">Costing and quantity control for raw supplies.</p>
+                        </div>
+                        <div className="mt-2 sm:mt-0 flex gap-2">
+                            <button onClick={() => { setIsAddMatModalOpen(true); }} className="px-4 py-2.5 bg-white text-gray-700 border border-gray-200 text-xs font-black uppercase rounded-xl shadow-sm hover:bg-gray-50 transition-all flex items-center gap-2">
+                                <svg className="w-4 h-4 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" /></svg>
+                                New Material
+                            </button>
+                            <button onClick={() => { setPurchaseItemId(''); setIsPurchaseModalOpen(true); }} className="px-4 py-2.5 bg-indigo-600 text-white hover:bg-indigo-700 text-xs font-black uppercase rounded-xl shadow-lg transition-all flex items-center gap-2">
+                                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 3h2l.4 2M7 13h10l4-8H5.4M7 13L5.4 5M7 13l-2.293 2.293c-.63.63-.184 1.707.707 1.707H17m0 0a2 2 0 100 4 2 2 0 000-4zm-8 2a2 2 0 11-4 0 2 2 0 014 0z" /></svg>
+                                Purchase
+                            </button>
+                        </div>
                     </div>
-                    <div className="mt-2 sm:mt-0 flex gap-2">
-                        <button onClick={() => { setIsAddMatModalOpen(true); }} className="px-3 py-2 bg-white text-gray-700 border border-gray-300 text-sm font-bold rounded shadow-sm hover:bg-gray-50 transition-colors flex items-center gap-2">
-                             <svg className="w-4 h-4 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" /></svg>
-                             Add New Material
-                        </button>
-                        <button onClick={() => { setPurchaseItemId(''); setIsPurchaseModalOpen(true); }} className="px-3 py-2 bg-indigo-600 text-white hover:bg-indigo-700 text-sm font-bold rounded shadow transition-colors flex items-center gap-2">
-                            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 3h2l.4 2M7 13h10l4-8H5.4M7 13L5.4 5M7 13l-2.293 2.293c-.63.63-.184 1.707.707 1.707H17m0 0a2 2 0 100 4 2 2 0 000-4zm-8 2a2 2 0 11-4 0 2 2 0 014 0z" /></svg>
-                            Purchase Supplies
-                        </button>
-                    </div>
-                </div>
 
-                <div className="overflow-x-auto">
-                    <table className="min-w-full divide-y divide-gray-200">
-                        <thead className="bg-gray-50">
-                            <tr>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Item Name</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Category</th>
-                                <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Quantity</th>
-                                <th className="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase">Availability</th>
-                                <th className="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase">Actions</th>
-                            </tr>
-                        </thead>
-                        <tbody className="bg-white divide-y divide-gray-200">
-                            {loading ? (
-                                <tr><td colSpan={5} className="px-6 py-8 text-center text-sm text-gray-500">Loading resources...</td></tr>
-                            ) : resources.length === 0 ? (
-                                <tr><td colSpan={5} className="px-6 py-8 text-center text-sm text-gray-500">No resources tracked yet.</td></tr>
-                            ) : (
-                                resources.map((item) => {
-                                    const quantity = item.quantity || 0;
-                                    const isLow = quantity <= item.lowStockThreshold;
-                                    const isCritical = quantity <= (item.lowStockThreshold * 0.2);
-                                    return (
-                                        <tr key={item.id} className="hover:bg-gray-50">
-                                            <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
-                                                {item.name}
-                                                <span className="block text-xs text-gray-400 font-mono font-normal tracking-tight">{item.materialId || item.id}</span>
-                                            </td>
-                                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                                                <span className="px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-600 border border-gray-200">{item.category}</span>
-                                            </td>
-                                            <td className="px-6 py-4 whitespace-nowrap text-sm font-bold text-right text-gray-900">
-                                                {quantity.toLocaleString()} <span className="text-gray-400 font-normal text-xs ml-0.5">{item.unit}</span>
-                                            </td>
-                                            <td className="px-6 py-4 whitespace-nowrap text-center">
-                                                {isCritical ? (
-                                                    <span className="px-2 py-1 text-xs font-bold leading-5 rounded-full bg-red-100 text-red-800 border border-red-200 animate-pulse">CRITICAL</span>
-                                                ) : isLow ? (
-                                                    <span className="px-2 py-1 text-xs font-bold leading-5 rounded-full bg-yellow-100 text-yellow-800 border border-yellow-200">LOW STOCK</span>
-                                                ) : (
-                                                    <span className="px-2 py-1 text-xs font-bold leading-5 rounded-full bg-green-100 text-green-800 border border-green-200">OK</span>
-                                                )}
-                                            </td>
-                                            <td className="px-6 py-4 whitespace-nowrap text-center">
-                                                <button onClick={() => { setSelectedItem(item); setTransType('IN'); setIsTransModalOpen(true); }} className="p-1 text-gray-500 hover:bg-gray-100 rounded border border-gray-200 transition-colors mx-1" title="Add Stock (+)">
-                                                    <svg className="w-4 h-4 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" /></svg>
-                                                </button>
-                                                <button onClick={() => { setSelectedItem(item); setTransType('OUT'); setIsTransModalOpen(true); }} className="p-1 text-gray-500 hover:bg-gray-100 rounded border border-gray-200 transition-colors mx-1" title="Use/Reduce Stock (-)">
-                                                    <svg className="w-4 h-4 text-red-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 12H4" /></svg>
-                                                </button>
-                                            </td>
-                                        </tr>
-                                    );
-                                })
-                            )}
-                        </tbody>
-                    </table>
+                    <div className="overflow-x-auto">
+                        <table className="min-w-full divide-y divide-gray-100">
+                            <thead className="bg-gray-50/50">
+                                <tr className="text-[10px] font-black text-gray-400 uppercase tracking-widest">
+                                    <th className="px-6 py-4 text-left">Item Details</th>
+                                    <th className="px-6 py-4 text-left">Category</th>
+                                    <th className="px-6 py-4 text-right">Quantity</th>
+                                    <th className="px-6 py-4 text-right">Unit Cost (RM)</th>
+                                    <th className="px-6 py-4 text-center">Availability</th>
+                                    <th className="px-6 py-4 text-center">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody className="bg-white divide-y divide-gray-100">
+                                {loading ? (
+                                    <tr><td colSpan={6} className="px-6 py-12 text-center text-sm text-gray-400 italic">Loading resources...</td></tr>
+                                ) : resources.length === 0 ? (
+                                    <tr><td colSpan={6} className="px-6 py-12 text-center text-sm text-gray-400 italic">No resources tracked for {villageId} yet.</td></tr>
+                                ) : (
+                                    resources.map((item) => {
+                                        const quantity = item.quantity || 0;
+                                        const unitCost = item.unitCost || 0;
+                                        const isLow = quantity <= item.lowStockThreshold;
+                                        const isCritical = quantity <= (item.lowStockThreshold * 0.2);
+                                        return (
+                                            <tr key={item.id} className="hover:bg-gray-50 transition-colors">
+                                                <td className="px-6 py-5 whitespace-nowrap">
+                                                    <div className="text-sm font-black text-gray-900">{item.name}</div>
+                                                    <div className="text-[10px] text-gray-400 font-bold uppercase tracking-tight">{item.materialId || item.id}</div>
+                                                </td>
+                                                <td className="px-6 py-5 whitespace-nowrap">
+                                                    <span className="px-2.5 py-1 rounded-lg text-[10px] font-black uppercase bg-gray-100 text-gray-500 border border-gray-200">{item.category}</span>
+                                                </td>
+                                                <td className="px-6 py-5 whitespace-nowrap text-sm font-black text-right text-gray-900">
+                                                    {quantity.toLocaleString()} <span className="text-gray-400 font-bold text-[10px] ml-0.5">{item.unit}</span>
+                                                </td>
+                                                <td className="px-6 py-5 whitespace-nowrap text-sm font-bold text-right text-gray-500">
+                                                    {unitCost.toFixed(2)} <span className="text-[9px] text-gray-400">/ {item.unit === 'L' ? '10L' : item.unit}</span>
+                                                </td>
+                                                <td className="px-6 py-5 whitespace-nowrap text-center">
+                                                    {isCritical ? (
+                                                        <span className="px-3 py-1 text-[10px] font-black uppercase rounded-full bg-red-100 text-red-700 border border-red-200 animate-pulse">Critical</span>
+                                                    ) : isLow ? (
+                                                        <span className="px-3 py-1 text-[10px] font-black uppercase rounded-full bg-yellow-100 text-yellow-800 border border-yellow-200">Low Stock</span>
+                                                    ) : (
+                                                        <span className="px-3 py-1 text-[10px] font-black uppercase rounded-full bg-green-100 text-green-800 border border-green-200">OK</span>
+                                                    )}
+                                                </td>
+                                                <td className="px-6 py-5 whitespace-nowrap text-center">
+                                                    <div className="flex justify-center gap-1.5">
+                                                        <button onClick={() => { 
+                                                            setEditItemId(item.id); 
+                                                            setEditItemName(item.name); 
+                                                            setEditItemUnitCost((item.unitCost ?? 0).toString()); 
+                                                            setEditItemCategory(item.category || 'Input');
+                                                            setEditItemUnit(item.unit || 'kg');
+                                                            setIsEditMatModalOpen(true); 
+                                                        }} className="p-1.5 text-blue-600 hover:bg-blue-50 rounded-lg border border-blue-100 transition-all shadow-sm" title="Edit Material Details">
+                                                            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" /></svg>
+                                                        </button>
+                                                        <button onClick={() => { setSelectedItem(item); setTransType('IN'); setIsTransModalOpen(true); }} className="p-1.5 text-green-600 hover:bg-green-50 rounded-lg border border-green-100 transition-all shadow-sm" title="Add Stock (+)">
+                                                            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" /></svg>
+                                                        </button>
+                                                        <button onClick={() => { setSelectedItem(item); setTransType('OUT'); setIsTransModalOpen(true); }} className="p-1.5 text-red-600 hover:bg-red-50 rounded-lg border border-red-100 transition-all shadow-sm" title="Use/Reduce Stock (-)">
+                                                            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 12H4" /></svg>
+                                                        </button>
+                                                    </div>
+                                                </td>
+                                            </tr>
+                                        );
+                                    })
+                                )}
+                            </tbody>
+                        </table>
+                    </div>
                 </div>
-            </div>
+            )}
 
             {/* --- Output Inventory Table --- */}
-            <div className="bg-indigo-50 rounded-xl shadow-sm border border-indigo-100 overflow-hidden">
-                <div className="px-6 py-4 border-b border-indigo-100 flex justify-between items-center">
+            <div className="bg-indigo-50 rounded-3xl shadow-sm border border-indigo-100 overflow-hidden">
+                <div className="px-8 py-6 border-b border-indigo-100 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
                     <div>
-                        <h2 className="text-lg font-bold text-indigo-900">Output Inventory (Mushroom Stock)</h2>
-                        <p className="text-xs text-indigo-500">Batch current weights visible to Village C (Sales Deducted)</p>
+                        <h2 className="text-xl font-black text-indigo-900 tracking-tight">Available Mushroom Inventory</h2>
+                        <p className="text-xs text-indigo-500 font-bold uppercase tracking-widest mt-1">
+                            {villageId === VillageType.C ? 'Aggregated Hub View (All Production Villages)' : 'Synced with Sales & Harvest Registry'}
+                        </p>
                     </div>
-                    <span className="text-[10px] font-bold text-indigo-600 bg-indigo-100 px-2 py-1 rounded uppercase tracking-wider">Sync with Sales</span>
+                    <div className="flex bg-white/50 p-1 rounded-xl border border-indigo-100">
+                        <span className="px-4 py-1 text-[10px] font-black text-indigo-700 uppercase">Valuation: Actual weight x Mkt Price</span>
+                    </div>
                 </div>
                 
                 <div className="overflow-x-auto">
                     <table className="min-w-full divide-y divide-indigo-100">
-                        <thead className="bg-indigo-100/50">
-                            <tr>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-indigo-800 uppercase">Batch ID</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-indigo-800 uppercase">Strain</th>
-                                <th className="px-6 py-3 text-right text-xs font-medium text-indigo-800 uppercase">Harvested (Total)</th>
-                                <th className="px-6 py-3 text-right text-xs font-medium text-indigo-800 uppercase">Sold (To Date)</th>
-                                <th className="px-6 py-3 text-right text-xs font-medium text-indigo-800 uppercase">Current Stock (kg)</th>
-                                <th className="px-6 py-3 text-center text-xs font-medium text-indigo-800 uppercase">Status</th>
+                        <thead className="bg-indigo-100/30">
+                            <tr className="text-[10px] font-black text-indigo-600 uppercase tracking-widest">
+                                <th className="px-8 py-5 text-left">Batch Details</th>
+                                <th className="px-8 py-5 text-left">Strain</th>
+                                <th className="px-8 py-5 text-right">Harvested</th>
+                                <th className="px-8 py-5 text-right">Sold</th>
+                                <th className="px-8 py-5 text-right">Current Stock (kg)</th>
+                                <th className="px-8 py-5 text-center">Status</th>
                             </tr>
                         </thead>
-                        <tbody className="bg-white/50 divide-y divide-indigo-100">
+                        <tbody className="bg-white/40 divide-y divide-indigo-100">
                             {processedOutputInventory.length === 0 ? (
-                                <tr><td colSpan={6} className="px-6 py-8 text-center text-sm text-indigo-400">No harvest data or stock available.</td></tr>
+                                <tr><td colSpan={6} className="px-8 py-20 text-center text-sm text-indigo-300 italic font-bold tracking-tight uppercase">No Harvestable Assets Found</td></tr>
                             ) : (
                                 processedOutputInventory.map((item) => (
-                                    <tr key={item.batchId} className="hover:bg-indigo-50 transition-colors">
-                                        <td className="px-6 py-3 text-sm font-bold text-indigo-900">{item.batchId}</td>
-                                        <td className="px-6 py-3 text-sm text-indigo-800">
-                                            <span className="bg-indigo-100 text-indigo-800 px-2 py-0.5 rounded text-xs font-bold border border-indigo-200">
+                                    <tr key={item.batchId} className="hover:bg-indigo-50/50 transition-colors">
+                                        <td className="px-8 py-5 whitespace-nowrap text-sm font-black text-indigo-900">{item.batchId}</td>
+                                        <td className="px-8 py-5 whitespace-nowrap">
+                                            <span className="bg-indigo-100 text-indigo-800 px-3 py-1 rounded-full text-[10px] font-black uppercase border border-indigo-200">
                                                 {item.strain}
                                             </span>
                                         </td>
-                                        <td className="px-6 py-3 text-sm text-right text-gray-500">{item.totalHarvest.toFixed(1)}</td>
-                                        <td className="px-6 py-3 text-sm text-right text-red-500">-{item.soldWeight.toFixed(1)}</td>
-                                        <td className="px-6 py-3 text-sm font-extrabold text-right text-indigo-700">
-                                            {item.remainingWeight.toFixed(1)}
+                                        <td className="px-8 py-5 text-sm text-right font-bold text-gray-400">{(item.totalHarvest || 0).toFixed(1)}</td>
+                                        <td className="px-8 py-5 text-sm text-right font-black text-rose-500">-{(item.soldWeight || 0).toFixed(1)}</td>
+                                        <td className="px-8 py-5 text-sm font-black text-right text-indigo-900">
+                                            {(item.remainingWeight || 0).toFixed(1)} kg
                                         </td>
-                                        <td className="px-6 py-3 text-center">
+                                        <td className="px-8 py-5 text-center">
                                             {item.remainingWeight > 0 ? (
-                                                <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-green-100 text-green-700 border border-green-200">AVAILABLE</span>
+                                                <span className="px-3 py-1 rounded-full text-[10px] font-black uppercase bg-emerald-100 text-emerald-700 border border-emerald-200">Available</span>
                                             ) : (
-                                                <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-gray-100 text-gray-400 border border-gray-200">OUT OF STOCK</span>
+                                                <span className="px-3 py-1 rounded-full text-[10px] font-black uppercase bg-gray-100 text-gray-400 border border-gray-200">Depleted</span>
                                             )}
                                         </td>
                                     </tr>
@@ -490,44 +626,46 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
                     </table>
                 </div>
                 {processedOutputInventory.length > 0 && (
-                    <div className="bg-indigo-100/30 px-6 py-3 flex justify-end items-baseline gap-2">
-                        <span className="text-xs font-bold text-indigo-600 uppercase">Total System Stock:</span>
-                        <span className="text-lg font-black text-indigo-900">{totalCurrentStock.toFixed(1)} kg</span>
+                    <div className="bg-indigo-100/50 px-8 py-6 flex justify-end items-center gap-4">
+                        <span className="text-xs font-black text-indigo-600 uppercase tracking-widest">Total Facility Supply:</span>
+                        <span className="text-3xl font-black text-indigo-900 tracking-tighter">{(totalCurrentStock || 0).toFixed(1)} <span className="text-sm">kg</span></span>
                     </div>
                 )}
             </div>
 
             {/* --- Stock Transaction Modal --- */}
             {isTransModalOpen && selectedItem && (
-                <div className="fixed inset-0 z-50 overflow-y-auto">
+                <div className="fixed inset-0 z-50 overflow-y-auto" role="dialog">
                     <div className="flex items-end justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:block sm:p-0">
-                        <div className="fixed inset-0 bg-gray-500 bg-opacity-75" onClick={() => setIsTransModalOpen(false)}></div>
+                        <div className="fixed inset-0 bg-gray-900/60 backdrop-blur-sm transition-opacity" onClick={() => setIsTransModalOpen(false)}></div>
                         <span className="hidden sm:inline-block sm:align-middle sm:h-screen">&#8203;</span>
-                        <div className="inline-block align-bottom bg-white rounded-lg px-4 pt-5 pb-4 text-left overflow-hidden shadow-xl transform transition-all sm:my-8 sm:align-middle sm:max-w-sm sm:w-full sm:p-6">
+                        <div className="inline-block align-bottom bg-white rounded-3xl px-8 pt-6 pb-8 text-left overflow-hidden shadow-2xl transform transition-all sm:my-8 sm:align-middle sm:max-w-md sm:w-full animate-fade-in-up border border-gray-100">
                             <div>
-                                <div className={`mx-auto flex items-center justify-center h-12 w-12 rounded-full ${transType === 'IN' ? 'bg-green-100' : 'bg-red-100'}`}>
+                                <div className={`mx-auto flex items-center justify-center h-16 w-16 rounded-2xl shadow-inner ${transType === 'IN' ? 'bg-green-50' : 'bg-red-50'}`}>
                                     {transType === 'IN' ? (
-                                        <svg className="h-6 w-6 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6m0 0v6m0-6h6m-6 0H6" /></svg>
+                                        <svg className="h-8 w-8 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 6v6m0 0v6m0-6h6m-6 0H6" /></svg>
                                     ) : (
-                                        <svg className="h-6 w-6 text-red-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 12H4" /></svg>
+                                        <svg className="h-8 w-8 text-red-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M20 12H4" /></svg>
                                     )}
                                 </div>
-                                <div className="mt-3 text-center sm:mt-5">
-                                    <h3 className="text-lg leading-6 font-medium text-gray-900">
-                                        {transType === 'IN' ? 'Add Stock' : 'Reduce Stock'}: {selectedItem.name}
+                                <div className="mt-5 text-center">
+                                    <h3 className="text-xl font-black text-gray-900 tracking-tight">
+                                        {transType === 'IN' ? 'Restock Item' : 'Deduct Usage'}
                                     </h3>
-                                    <form onSubmit={handleTransaction} className="mt-4 text-left space-y-3">
+                                    <p className="text-xs font-bold text-gray-400 uppercase tracking-widest mt-1">{selectedItem.name}</p>
+                                    
+                                    <form onSubmit={handleTransaction} className="mt-8 text-left space-y-5">
                                         <div>
-                                            <label className="block text-sm font-medium text-gray-700">Quantity ({selectedItem.unit})</label>
-                                            <input type="number" step="any" required min="0.01" value={transQty} onChange={(e) => setTransQty(e.target.value)} className={`mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 sm:text-sm focus:outline-none focus:ring-2 ${ringClass}`} />
+                                            <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1.5">Adjustment Qty ({selectedItem.unit})</label>
+                                            <input type="number" step="any" required min="0.01" value={transQty} onChange={(e) => setTransQty(e.target.value)} className={`block w-full border-gray-200 bg-gray-50 rounded-xl px-4 py-3 text-sm font-black focus:ring-2 ${ringClass} focus:bg-white transition-all`} placeholder="0.00" />
                                         </div>
                                         <div>
-                                            <label className="block text-sm font-medium text-gray-700">Reason</label>
-                                            <input type="text" value={transReason} onChange={(e) => setTransReason(e.target.value)} placeholder={transType === 'IN' ? "Restock" : "Production Use"} className={`mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 sm:text-sm focus:outline-none focus:ring-2 ${ringClass}`} />
+                                            <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1.5">Note / Reason</label>
+                                            <input type="text" value={transReason} onChange={(e) => setTransReason(e.target.value)} placeholder={transType === 'IN' ? "Standard Restock" : "Production Run #123"} className={`block w-full border-gray-200 bg-gray-50 rounded-xl px-4 py-3 text-sm font-bold focus:ring-2 ${ringClass} focus:bg-white transition-all`} />
                                         </div>
                                         <div className="flex gap-3 mt-4">
-                                            <button type="button" onClick={() => setIsTransModalOpen(false)} className="flex-1 bg-white border border-gray-300 py-2 rounded-md">Cancel</button>
-                                            <button type="submit" className={`flex-1 py-2 rounded-md text-white ${transType === 'IN' ? 'bg-green-600' : 'bg-red-600'}`}>Confirm</button>
+                                            <button type="button" onClick={() => setIsTransModalOpen(false)} className="flex-1 bg-white border border-gray-200 text-xs font-black uppercase py-3.5 rounded-xl hover:bg-gray-50 transition-all">Cancel</button>
+                                            <button type="submit" className={`flex-1 py-3.5 rounded-xl text-xs font-black uppercase text-white shadow-lg transition-all ${transType === 'IN' ? 'bg-green-600 hover:bg-green-700' : 'bg-red-600 hover:bg-red-700'}`}>Confirm Update</button>
                                         </div>
                                     </form>
                                 </div>
@@ -539,41 +677,123 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
             
             {/* --- Add New Material Modal --- */}
             {isAddMatModalOpen && (
-                <div className="fixed inset-0 z-50 overflow-y-auto">
+                <div className="fixed inset-0 z-50 overflow-y-auto" role="dialog">
                      <div className="flex items-end justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:block sm:p-0">
-                        <div className="fixed inset-0 bg-gray-500 bg-opacity-75" onClick={() => setIsAddMatModalOpen(false)}></div>
+                        <div className="fixed inset-0 bg-gray-900/60 backdrop-blur-sm" onClick={() => setIsAddMatModalOpen(false)}></div>
                         <span className="hidden sm:inline-block sm:align-middle sm:h-screen">&#8203;</span>
-                        <div className="inline-block align-bottom bg-white rounded-lg px-4 pt-5 pb-4 text-left overflow-hidden shadow-xl transform transition-all sm:my-8 sm:align-middle sm:max-w-md sm:w-full sm:p-6 animate-fade-in-up">
+                        <div className="inline-block align-bottom bg-white rounded-3xl px-8 pt-6 pb-8 text-left overflow-hidden shadow-2xl transform transition-all sm:my-8 sm:align-middle sm:max-w-md sm:w-full border border-gray-100 animate-fade-in-up">
                             <div>
-                                <div className="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-green-100">
-                                     <svg className="w-6 h-6 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v3m0 0v3m0-3h3m-3 0H9m12 0a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                                <div className="mx-auto flex items-center justify-center h-16 w-16 rounded-2xl bg-indigo-50 shadow-inner">
+                                     <svg className="w-8 h-8 text-indigo-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 9v3m0 0v3m0-3h3m-3 0H9m12 0a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
                                 </div>
-                                <div className="mt-3 text-center sm:mt-5">
-                                    <h3 className="text-lg leading-6 font-medium text-gray-900">Add New Material</h3>
-                                    <form onSubmit={handleAddMaterial} className="mt-4 text-left space-y-3">
-                                        <input type="text" required value={newMatName} onChange={(e) => setNewMatName(e.target.value)} className={`mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-2 ${ringClass} sm:text-sm`} placeholder="e.g. Lime Powder" />
-                                        <div className="grid grid-cols-2 gap-4">
-                                            <select value={newMatCategory} onChange={(e) => setNewMatCategory(e.target.value)} className={`mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-2 ${ringClass} sm:text-sm bg-white`}>
-                                                <option value="Input">Input</option>
-                                                <option value="Utility">Utility</option>
-                                                <option value="Nutrient">Nutrient</option>
-                                                <option value="Others">Others</option>
-                                            </select>
-                                            <select value={newMatUnit} onChange={(e) => setNewMatUnit(e.target.value)} className={`mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-2 ${ringClass} sm:text-sm bg-white`}>
-                                                <option value="kg">kg</option>
-                                                <option value="g">g</option>
-                                                <option value="L">L</option>
-                                                <option value="units">units</option>
-                                                <option value="pack">pack</option>
-                                            </select>
+                                <div className="mt-5 text-center">
+                                    <h3 className="text-xl font-black text-gray-900 tracking-tight">Catalog New Material</h3>
+                                    <p className="text-xs font-bold text-gray-400 uppercase tracking-widest mt-1">Resource Costing & Inventory Registry</p>
+                                    
+                                    <form onSubmit={handleAddMaterial} className="mt-8 text-left space-y-4">
+                                        <div>
+                                            <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1.5">Display Name</label>
+                                            <input type="text" required value={newMatName} onChange={(e) => setNewMatName(e.target.value)} className="block w-full border-gray-200 bg-gray-50 rounded-xl px-4 py-3 text-sm font-black focus:ring-2 focus:ring-indigo-500 focus:bg-white transition-all" placeholder="e.g. Lime Powder" />
                                         </div>
+                                        
                                         <div className="grid grid-cols-2 gap-4">
-                                            <input type="number" step="any" min="0" value={newMatQty} onChange={(e) => setNewMatQty(e.target.value)} className={`mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-2 ${ringClass} sm:text-sm`} placeholder="Qty" />
-                                            <input type="number" step="any" min="0" value={newMatThreshold} onChange={(e) => setNewMatThreshold(e.target.value)} className={`mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-2 ${ringClass} sm:text-sm`} placeholder="Low Threshold" />
+                                            <div>
+                                                <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1.5">Category</label>
+                                                <select value={newMatCategory} onChange={(e) => setNewMatCategory(e.target.value)} className="block w-full border-gray-200 bg-gray-50 rounded-xl px-4 py-3 text-sm font-black focus:ring-2 focus:ring-indigo-500 bg-white transition-all">
+                                                    <option value="Input">Input</option>
+                                                    <option value="Utility">Utility</option>
+                                                    <option value="Nutrient">Nutrient</option>
+                                                    <option value="Others">Others</option>
+                                                </select>
+                                            </div>
+                                            <div>
+                                                <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1.5">Base Unit</label>
+                                                <select value={newMatUnit} onChange={(e) => setNewMatUnit(e.target.value)} className="block w-full border-gray-200 bg-gray-50 rounded-xl px-4 py-3 text-sm font-black focus:ring-2 focus:ring-indigo-500 bg-white transition-all">
+                                                    <option value="kg">kg</option>
+                                                    <option value="L">L</option>
+                                                    <option value="units">units</option>
+                                                    <option value="pack">pack</option>
+                                                </select>
+                                            </div>
                                         </div>
-                                        <div className="mt-5 sm:mt-6 flex gap-3">
-                                            <button type="button" onClick={() => setIsAddMatModalOpen(false)} className="w-full inline-flex justify-center rounded-md border border-gray-300 shadow-sm px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-none sm:text-sm">Cancel</button>
-                                            <button type="submit" className="w-full inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-green-600 text-base font-medium text-white hover:bg-green-700 focus:outline-none sm:text-sm">Add Material</button>
+                                        
+                                        <div className="grid grid-cols-3 gap-3">
+                                            <div className="col-span-1">
+                                                <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1.5">
+                                                    Unit Cost (RM {newMatUnit === 'L' ? 'per 10L' : `per ${newMatUnit}`})
+                                                </label>
+                                                <input type="number" step="any" min="0" value={newMatUnitCost} onChange={(e) => setNewMatUnitCost(e.target.value)} className="block w-full border-gray-200 bg-gray-50 rounded-xl px-4 py-3 text-sm font-black focus:ring-2 focus:ring-indigo-500 transition-all" placeholder="0.00" />
+                                            </div>
+                                            <div className="col-span-1">
+                                                <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1.5">Initial Qty</label>
+                                                <input type="number" step="any" min="0" value={newMatQty} onChange={(e) => setNewMatQty(e.target.value)} className="block w-full border-gray-200 bg-gray-50 rounded-xl px-4 py-3 text-sm font-black focus:ring-2 focus:ring-indigo-500 transition-all" placeholder="0" />
+                                            </div>
+                                            <div className="col-span-1">
+                                                <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1.5">Low Level</label>
+                                                <input type="number" step="any" min="0" value={newMatThreshold} onChange={(e) => setNewMatThreshold(e.target.value)} className="block w-full border-gray-200 bg-gray-50 rounded-xl px-4 py-3 text-sm font-black focus:ring-2 focus:ring-indigo-500 transition-all" placeholder="20" />
+                                            </div>
+                                        </div>
+                                        
+                                        <div className="mt-6 flex gap-3">
+                                            <button type="button" onClick={() => setIsAddMatModalOpen(false)} className="flex-1 bg-white border border-gray-200 text-xs font-black uppercase py-4 rounded-xl hover:bg-gray-50 transition-all">Cancel</button>
+                                            <button type="submit" className="flex-1 bg-indigo-600 text-white hover:bg-indigo-700 text-xs font-black uppercase py-4 rounded-xl shadow-lg transition-all">Create Item</button>
+                                        </div>
+                                    </form>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* --- Edit Material Modal --- */}
+            {isEditMatModalOpen && (
+                <div className="fixed inset-0 z-50 overflow-y-auto" role="dialog">
+                     <div className="flex items-end justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:block sm:p-0">
+                        <div className="fixed inset-0 bg-gray-900/60 backdrop-blur-sm" onClick={() => setIsEditMatModalOpen(false)}></div>
+                        <span className="hidden sm:inline-block sm:align-middle sm:h-screen">&#8203;</span>
+                        <div className="inline-block align-bottom bg-white rounded-3xl px-8 pt-6 pb-8 text-left overflow-hidden shadow-2xl transform transition-all sm:my-8 sm:align-middle sm:max-w-md sm:w-full border border-gray-100 animate-fade-in-up">
+                            <div>
+                                <div className="mx-auto flex items-center justify-center h-16 w-16 rounded-2xl bg-blue-50 shadow-inner">
+                                     <svg className="w-8 h-8 text-blue-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" /></svg>
+                                </div>
+                                <div className="mt-5 text-center">
+                                    <h3 className="text-xl font-black text-gray-900 tracking-tight">Edit Material Details</h3>
+                                    <p className="text-xs font-bold text-gray-400 uppercase tracking-widest mt-1">{editItemName}</p>
+                                    
+                                    <form onSubmit={handleUpdateDetails} className="mt-8 text-left space-y-4">
+                                        <div className="grid grid-cols-2 gap-4">
+                                            <div>
+                                                <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1.5">Category</label>
+                                                <select value={editItemCategory} onChange={(e) => setEditItemCategory(e.target.value)} className="block w-full border-gray-200 bg-gray-50 rounded-xl px-4 py-3 text-sm font-black focus:ring-2 focus:ring-blue-500 bg-white transition-all">
+                                                    <option value="Input">Input</option>
+                                                    <option value="Utility">Utility</option>
+                                                    <option value="Nutrient">Nutrient</option>
+                                                    <option value="Others">Others</option>
+                                                </select>
+                                            </div>
+                                            <div>
+                                                <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1.5">Base Unit</label>
+                                                <select value={editItemUnit} onChange={(e) => setEditItemUnit(e.target.value)} className="block w-full border-gray-200 bg-gray-50 rounded-xl px-4 py-3 text-sm font-black focus:ring-2 focus:ring-blue-500 bg-white transition-all">
+                                                    <option value="kg">kg</option>
+                                                    <option value="L">L</option>
+                                                    <option value="units">units</option>
+                                                    <option value="pack">pack</option>
+                                                </select>
+                                            </div>
+                                        </div>
+                                        <div>
+                                            <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1.5">
+                                                Unit Cost (RM {editItemUnit === 'L' ? 'per 10L' : `per ${editItemUnit}`})
+                                            </label>
+                                            <input type="number" step="any" min="0" required value={editItemUnitCost} onChange={(e) => setEditItemUnitCost(e.target.value)} className="block w-full border-gray-200 bg-gray-50 rounded-xl px-4 py-3 text-sm font-black focus:ring-2 focus:ring-blue-500 focus:bg-white transition-all" placeholder="0.00" />
+                                        </div>
+                                        
+                                        <div className="mt-6 flex gap-3">
+                                            <button type="button" onClick={() => setIsEditMatModalOpen(false)} className="flex-1 bg-white border border-gray-200 text-xs font-black uppercase py-4 rounded-xl hover:bg-gray-50 transition-all">Cancel</button>
+                                            <button type="submit" disabled={isUpdatingDetails} className="flex-1 bg-blue-600 text-white hover:bg-blue-700 text-xs font-black uppercase py-4 rounded-xl shadow-lg transition-all">
+                                                {isUpdatingDetails ? 'Updating...' : 'Save Changes'}
+                                            </button>
                                         </div>
                                     </form>
                                 </div>
@@ -585,30 +805,46 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
 
             {/* --- Purchase Supplies Modal --- */}
             {isPurchaseModalOpen && (
-                <div className="fixed inset-0 z-50 overflow-y-auto">
+                <div className="fixed inset-0 z-50 overflow-y-auto" role="dialog">
                      <div className="flex items-end justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:block sm:p-0">
-                        <div className="fixed inset-0 bg-gray-500 bg-opacity-75" onClick={() => setIsPurchaseModalOpen(false)}></div>
+                        <div className="fixed inset-0 bg-gray-900/60 backdrop-blur-sm" onClick={() => setIsPurchaseModalOpen(false)}></div>
                         <span className="hidden sm:inline-block sm:align-middle sm:h-screen">&#8203;</span>
-                        <div className="inline-block align-bottom bg-white rounded-lg px-4 pt-5 pb-4 text-left overflow-hidden shadow-xl transform transition-all sm:my-8 sm:align-middle sm:max-w-sm sm:w-full sm:p-6 animate-fade-in-up">
+                        <div className="inline-block align-bottom bg-white rounded-3xl px-8 pt-6 pb-8 text-left overflow-hidden shadow-2xl transform transition-all sm:my-8 sm:align-middle sm:max-w-sm sm:w-full border border-gray-100 animate-fade-in-up">
                             <div>
-                                <div className="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-indigo-100">
-                                    <svg className="h-6 w-6 text-indigo-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 3h2l.4 2M7 13h10l4-8H5.4M7 13L5.4 5M7 13l-2.293 2.293c-.63.63-.184 1.707.707 1.707H17m0 0a2 2 0 100 4 2 2 0 000-4zm-8 2a2 2 0 11-4 0 2 2 0 014 0z" /></svg>
+                                <div className="mx-auto flex items-center justify-center h-16 w-16 rounded-2xl bg-indigo-50 shadow-inner">
+                                    <svg className="h-8 w-8 text-indigo-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M3 3h2l.4 2M7 13h10l4-8H5.4M7 13L5.4 5M7 13l-2.293 2.293c-.63.63-.184 1.707.707 1.707H17m0 0a2 2 0 100 4 2 2 0 000-4zm-8 2a2 2 0 11-4 0 2 2 0 014 0z" /></svg>
                                 </div>
-                                <div className="mt-3 text-center sm:mt-5">
-                                    <h3 className="text-lg leading-6 font-medium text-gray-900">Purchase Supplies</h3>
-                                    <form onSubmit={handlePurchaseRequest} className="mt-4 text-left space-y-3">
-                                        <select value={purchaseItemId} onChange={(e) => setPurchaseItemId(e.target.value)} required className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-2 focus:ring-indigo-500 sm:text-sm bg-white">
-                                            <option value="">-- Select Resource --</option>
-                                            {resources.map(r => (
-                                                <option key={r.id} value={r.id}>{r.name} (Current: {r.quantity})</option>
-                                            ))}
-                                        </select>
-                                        <input type="number" step="any" required min="1" value={purchaseQty} onChange={(e) => setPurchaseQty(e.target.value)} className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-2 focus:ring-indigo-500 sm:text-sm" placeholder="Amount to buy" />
-                                        <input type="number" step="0.01" required min="0.01" value={purchaseCost} onChange={(e) => setPurchaseCost(e.target.value)} className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-2 focus:ring-indigo-500 sm:text-sm" placeholder="Estimated Cost (RM)" />
-                                        <textarea value={purchaseNotes} onChange={(e) => setPurchaseNotes(e.target.value)} className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-2 focus:ring-indigo-500 sm:text-sm" placeholder="e.g. Urgent, Supplier X" rows={2} />
-                                        <div className="mt-5 sm:mt-6 flex gap-3">
-                                            <button type="button" onClick={() => setIsPurchaseModalOpen(false)} className="w-full inline-flex justify-center rounded-md border border-gray-300 shadow-sm px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-none sm:text-sm">Cancel</button>
-                                            <button type="submit" className="w-full inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-indigo-600 text-base font-medium text-white hover:bg-indigo-700 focus:outline-none sm:text-sm">Send Request</button>
+                                <div className="mt-5 text-center">
+                                    <h3 className="text-xl font-black text-gray-900 tracking-tight">Initiate Purchase</h3>
+                                    <p className="text-xs font-bold text-gray-400 uppercase tracking-widest mt-1">Submit Order to Finance Dept</p>
+                                    
+                                    <form onSubmit={handlePurchaseRequest} className="mt-8 text-left space-y-4">
+                                        <div>
+                                            <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1.5">Material to Restock</label>
+                                            <select value={purchaseItemId} onChange={(e) => setPurchaseItemId(e.target.value)} required className="block w-full border-gray-200 bg-gray-50 rounded-xl px-4 py-3 text-sm font-black focus:ring-2 focus:ring-indigo-500 bg-white transition-all">
+                                                <option value="">-- Select Resource --</option>
+                                                {resources.map(r => (
+                                                    <option key={r.id} value={r.id}>{r.name} (Unit Cost: RM{r.unitCost.toFixed(2)} per {r.unit === 'L' ? '10L' : r.unit})</option>
+                                                ))}
+                                            </select>
+                                        </div>
+                                        <div className="grid grid-cols-2 gap-4">
+                                            <div>
+                                                <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1.5">Quantity to Buy</label>
+                                                <input type="number" step="any" required min="1" value={purchaseQty} onChange={(e) => setPurchaseQty(e.target.value)} className="block w-full border-gray-200 bg-gray-50 rounded-xl px-4 py-3 text-sm font-black focus:ring-2 focus:ring-indigo-500 transition-all" placeholder="0.00" />
+                                            </div>
+                                            <div>
+                                                <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1.5">Total Cost (RM)</label>
+                                                <input type="number" step="0.01" required min="0.01" value={purchaseCost} onChange={(e) => setPurchaseCost(e.target.value)} className="block w-full border-gray-200 bg-gray-50 rounded-xl px-4 py-3 text-sm font-black focus:ring-2 focus:ring-indigo-500 transition-all" placeholder="0.00" />
+                                            </div>
+                                        </div>
+                                        <div>
+                                            <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1.5">Suppliers / Notes</label>
+                                            <textarea value={purchaseNotes} onChange={(e) => setPurchaseNotes(e.target.value)} className="block w-full border-gray-200 bg-gray-50 rounded-xl px-4 py-3 text-sm font-bold focus:ring-2 focus:ring-indigo-500 transition-all" placeholder="e.g. Urgent, Main Supplier ABC" rows={2} />
+                                        </div>
+                                        <div className="mt-6 flex gap-3">
+                                            <button type="button" onClick={() => setIsPurchaseModalOpen(false)} className="flex-1 bg-white border border-gray-300 text-xs font-black uppercase py-4 rounded-xl hover:bg-gray-50 transition-all">Cancel</button>
+                                            <button type="submit" className="flex-1 bg-indigo-600 text-white hover:bg-indigo-700 text-xs font-black uppercase py-4 rounded-xl shadow-lg transition-all">Submit Order</button>
                                         </div>
                                     </form>
                                 </div>
