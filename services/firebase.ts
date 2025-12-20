@@ -1,6 +1,7 @@
 
 // Fix: Use modular imports from firebase sub-packages
-import { initializeApp } from 'firebase/app';
+// Use @firebase/app path to ensure type resolution of initializeApp
+import { initializeApp } from '@firebase/app';
 // Fix: Explicitly import modular auth members to resolve potentially ambiguous module resolution
 import { getAuth } from 'firebase/auth';
 import { getFirestore } from 'firebase/firestore';

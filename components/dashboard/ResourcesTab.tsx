@@ -83,6 +83,10 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
     const [purchaseCost, setPurchaseCost] = useState('');
     const [purchaseNotes, setPurchaseNotes] = useState('');
 
+    // Confirm Receipt Logic
+    const [isConfirmingReceipt, setIsConfirmingReceipt] = useState<string | null>(null);
+    const [receivedInputs, setReceivedInputs] = useState<Record<string, string>>({});
+
     // Notifications State
     const [activeNotification, setActiveNotification] = useState<{title: string, message: string} | null>(null);
 
@@ -129,6 +133,33 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
         }
         return financialRecords;
     }, [villageId, financialRecords, finRecordsA, finRecordsB]);
+
+    // Track pending deliveries from financial records
+    const pendingReceipts = useMemo(() => {
+        return activeFinSource.filter(rec => 
+            rec.category === 'Supplies' && 
+            rec.type === 'EXPENSE' && 
+            rec.status === 'COMPLETED' && 
+            rec.receivedInStock === false &&
+            rec.materialId // Must have a linked material
+        );
+    }, [activeFinSource]);
+
+    // Map pending weights to resource ID for the "Pending Received" column
+    const pendingWeightsByResource = useMemo(() => {
+        const mapping: Record<string, number> = {};
+        pendingReceipts.forEach(rec => {
+            if (rec.materialId) {
+                // Use orderQty if available, else extract from description
+                const qty = rec.orderQty || (() => {
+                    const match = rec.description?.match(/Purchase Request: ([\d.]+) /);
+                    return match ? parseFloat(match[1]) : 0;
+                })();
+                mapping[rec.materialId] = (mapping[rec.materialId] || 0) + qty;
+            }
+        });
+        return mapping;
+    }, [pendingReceipts]);
 
     // --- Core Logic: Inventory Calculation ---
     const processedOutputInventory = useMemo(() => {
@@ -177,6 +208,48 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
         return resources.reduce((acc, curr) => {
             const factor = curr.unit === 'L' ? 10 : 1;
             return acc + ((curr.quantity || 0) / factor * (curr.unitCost || 0));
+        }, 0);
+    }, [resources]);
+
+    // --- New Action-Oriented KPI Logic ---
+    const yieldStats = useMemo(() => {
+        const total = processedOutputInventory.reduce((a, c) => a + c.totalHarvest, 0);
+        if (processedOutputInventory.length < 2) return { total, change: 0 };
+        const latest = processedOutputInventory[0].totalHarvest;
+        const previous = processedOutputInventory[1].totalHarvest;
+        const change = previous > 0 ? ((latest - previous) / previous) * 100 : 0;
+        return { total, change };
+    }, [processedOutputInventory]);
+
+    const salesRevenue = useMemo(() => {
+        const totalWeight = processedOutputInventory.reduce((a, c) => a + c.soldWeight, 0);
+        const revenue = activeFinSource
+            .filter(rec => rec.category === 'Sales' && rec.type === 'INCOME' && rec.status === 'COMPLETED')
+            .reduce((acc, curr) => acc + curr.amount, 0);
+        return { totalWeight, revenue };
+    }, [processedOutputInventory, activeFinSource]);
+
+    const supplyDays = useMemo(() => {
+        const sevenDaysAgo = new Date();
+        sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+        const recentSales = activeFinSource.filter(rec => 
+            rec.category === 'Sales' && 
+            rec.type === 'INCOME' && 
+            new Date(rec.date) >= sevenDaysAgo
+        );
+        const weeklyWeight = recentSales.reduce((acc, curr) => acc + (curr.weightKg || 0), 0);
+        const dailyBurnRate = weeklyWeight / 7;
+        const days = dailyBurnRate > 0 ? totalCurrentStock / dailyBurnRate : 0;
+        return days;
+    }, [activeFinSource, totalCurrentStock]);
+
+    const resourceAtRisk = useMemo(() => {
+        return resources.reduce((acc, curr) => {
+            if (curr.quantity <= curr.lowStockThreshold) {
+                const factor = curr.unit === 'L' ? 10 : 1;
+                return acc + ((curr.quantity || 0) / factor * (curr.unitCost || 0));
+            }
+            return acc;
         }, 0);
     }, [resources]);
 
@@ -386,6 +459,9 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
                 recordedBy: userEmail,
                 villageId: villageId,
                 transactionId,
+                materialId: selectedResource.id, // Linked Material ID for tracking
+                orderQty: qty,
+                receivedInStock: false,
                 createdAt: new Date().toISOString()
             });
             setActiveNotification({
@@ -397,6 +473,65 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
         } catch (e) {
             console.error("Purchase request failed", e);
             alert("Failed to send request.");
+        }
+    };
+
+    const handleConfirmReceipt = async (rec: FinancialRecord) => {
+        if (!rec.materialId) return;
+        setIsConfirmingReceipt(rec.id);
+        
+        try {
+            // Use manual input if provided, otherwise fallback to original orderQty or parse description
+            const inputVal = receivedInputs[rec.id];
+            const orderQty = rec.orderQty || (() => {
+                const match = rec.description?.match(/Purchase Request: ([\d.]+) /);
+                return match ? parseFloat(match[1]) : 0;
+            })();
+            
+            const actualQty = inputVal ? parseFloat(inputVal) : orderQty;
+            
+            if (isNaN(actualQty) || actualQty < 0) throw new Error("Please enter a valid received quantity.");
+
+            const resColName = getResourceColName(villageId);
+            const itemRef = doc(db, resColName, rec.materialId);
+            const finColName = getFinancialCollectionName(villageId);
+            const finRef = doc(db, finColName, rec.id);
+
+            // Update resource stock with actual amount received
+            await updateDoc(itemRef, {
+                quantity: increment(actualQty),
+                updatedAt: new Date().toISOString()
+            });
+
+            // Log stock movement
+            await addDoc(collection(db, resColName, rec.materialId, "stock_history"), {
+                type: 'IN', 
+                quantity: actualQty,
+                reason: `Supply Delivery Confirmed (Ref: ${rec.transactionId}) ${actualQty !== orderQty ? `[DISCREPANCY: Ordered ${orderQty}]` : ''}`,
+                user: userEmail,
+                timestamp: new Date().toISOString()
+            });
+
+            // Mark transaction as received and store actual quantity for tracking
+            await updateDoc(finRef, {
+                receivedInStock: true,
+                orderQty: orderQty, // Ensure it's explicitly stored if it wasn't before
+                actualReceivedQty: actualQty,
+                updatedAt: new Date().toISOString()
+            });
+
+            if (onSuccess) onSuccess(`Stock updated: +${actualQty} received for supply ${rec.transactionId}`);
+            
+            // Clear local input state for this record
+            const newInputs = { ...receivedInputs };
+            delete newInputs[rec.id];
+            setReceivedInputs(newInputs);
+
+        } catch (e: any) {
+            console.error("Confirmation failed", e);
+            alert("Error confirming receipt: " + e.message);
+        } finally {
+            setIsConfirmingReceipt(null);
         }
     };
 
@@ -432,30 +567,40 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
                 <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm relative overflow-hidden">
                     <div className="relative z-10">
                         <h3 className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1">Total Yield (Aggregate)</h3>
-                        <div className="flex items-baseline">
-                            <span className="text-3xl font-black text-green-600">{(processedOutputInventory.reduce((a,c)=>a+c.totalHarvest, 0)).toFixed(1)}</span>
-                            <span className="ml-1 text-sm text-gray-400 font-bold">kg</span>
+                        <div className="flex items-baseline gap-2">
+                            <span className="text-3xl font-black text-green-600">{yieldStats.total.toFixed(1)}</span>
+                            <span className="text-sm text-gray-400 font-bold">kg</span>
+                            {yieldStats.change !== 0 && (
+                                <span className={`text-[10px] font-black px-1.5 py-0.5 rounded-lg flex items-center gap-0.5 ${yieldStats.change > 0 ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
+                                    {yieldStats.change > 0 ? '▲' : '▼'} {Math.abs(yieldStats.change).toFixed(1)}%
+                                </span>
+                            )}
                         </div>
+                        <p className="text-[9px] text-gray-400 font-bold uppercase mt-1">vs last batch cycle</p>
                     </div>
                 </div>
 
                 <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm relative overflow-hidden">
                     <div className="relative z-10">
                         <h3 className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1">Total Sold (Aggregate)</h3>
-                        <div className="flex items-baseline">
-                            <span className="text-3xl font-black text-indigo-600">{(processedOutputInventory.reduce((a,c)=>a+c.soldWeight, 0)).toFixed(1)}</span>
-                            <span className="ml-1 text-sm text-gray-400 font-bold">kg</span>
+                        <div className="flex items-baseline gap-1">
+                            <span className="text-3xl font-black text-indigo-600">{salesRevenue.totalWeight.toFixed(1)}</span>
+                            <span className="text-sm text-gray-400 font-bold">kg</span>
                         </div>
+                        <p className="text-[10px] text-indigo-500 font-black uppercase mt-1">Revenue: RM{salesRevenue.revenue.toLocaleString()}</p>
                     </div>
                 </div>
 
                 <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm relative overflow-hidden">
                     <div className="relative z-10">
                         <h3 className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1">Available Hub Supply</h3>
-                        <div className="flex items-baseline">
+                        <div className="flex items-baseline gap-1">
                             <span className="text-3xl font-black text-blue-600">{(totalAvailableStock || 0).toFixed(1)}</span>
-                            <span className="ml-1 text-sm text-gray-400 font-bold">kg</span>
+                            <span className="text-sm text-gray-400 font-bold">kg</span>
                         </div>
+                        <p className={`text-[10px] font-black uppercase mt-1 ${supplyDays < 5 ? 'text-red-600 animate-pulse' : 'text-blue-500'}`}>
+                            ≈ {supplyDays > 0 ? supplyDays.toFixed(0) : '--'} days of supply remaining
+                        </p>
                     </div>
                 </div>
 
@@ -463,10 +608,16 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
                     <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm relative overflow-hidden border-l-4 border-l-indigo-500">
                         <div className="relative z-10">
                             <h3 className="text-[10px] font-black text-indigo-500 uppercase tracking-widest mb-1">Inventory Assets</h3>
-                            <div className="flex items-baseline">
-                                <span className="text-sm font-bold text-gray-400 mr-1">RM</span>
+                            <div className="flex items-baseline gap-1">
+                                <span className="text-sm font-bold text-gray-400">RM</span>
                                 <span className="text-3xl font-black text-indigo-700">{(totalResourceValue || 0).toLocaleString(undefined, {minimumFractionDigits: 2})}</span>
                             </div>
+                            {resourceAtRisk > 0 && (
+                                <p className="text-[10px] text-red-600 font-black uppercase mt-1 flex items-center gap-1">
+                                    <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" /></svg>
+                                    RM{resourceAtRisk.toLocaleString()} at risk (low stock)
+                                </p>
+                            )}
                         </div>
                     </div>
                 )}
@@ -499,6 +650,7 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
                                     <th className="px-6 py-4 text-left">Item Details</th>
                                     <th className="px-6 py-4 text-left">Category</th>
                                     <th className="px-6 py-4 text-right">Quantity</th>
+                                    <th className="px-6 py-4 text-right">Pending Received</th>
                                     <th className="px-6 py-4 text-right">Unit Cost (RM)</th>
                                     <th className="px-6 py-4 text-center">Availability</th>
                                     <th className="px-6 py-4 text-center">Actions</th>
@@ -506,12 +658,13 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
                             </thead>
                             <tbody className="bg-white divide-y divide-gray-100">
                                 {loading ? (
-                                    <tr><td colSpan={6} className="px-6 py-12 text-center text-sm text-gray-400 italic">Loading resources...</td></tr>
+                                    <tr><td colSpan={7} className="px-6 py-12 text-center text-sm text-gray-400 italic">Loading resources...</td></tr>
                                 ) : resources.length === 0 ? (
-                                    <tr><td colSpan={6} className="px-6 py-12 text-center text-sm text-gray-400 italic">No resources tracked for {villageId} yet.</td></tr>
+                                    <tr><td colSpan={7} className="px-6 py-12 text-center text-sm text-gray-400 italic">No resources tracked for {villageId} yet.</td></tr>
                                 ) : (
                                     resources.map((item) => {
                                         const quantity = item.quantity || 0;
+                                        const pending = pendingWeightsByResource[item.id] || 0;
                                         const unitCost = item.unitCost || 0;
                                         const isLow = quantity <= item.lowStockThreshold;
                                         const isCritical = quantity <= (item.lowStockThreshold * 0.2);
@@ -526,6 +679,9 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
                                                 </td>
                                                 <td className="px-6 py-5 whitespace-nowrap text-sm font-black text-right text-gray-900">
                                                     {quantity.toLocaleString()} <span className="text-gray-400 font-bold text-[10px] ml-0.5">{item.unit}</span>
+                                                </td>
+                                                <td className="px-6 py-5 whitespace-nowrap text-sm font-black text-right text-orange-600">
+                                                    {pending > 0 ? `+${pending.toLocaleString()} ${item.unit}` : '-'}
                                                 </td>
                                                 <td className="px-6 py-5 whitespace-nowrap text-sm font-bold text-right text-gray-500">
                                                     {unitCost.toFixed(2)} <span className="text-[9px] text-gray-400">/ {item.unit === 'L' ? '10L' : item.unit}</span>
@@ -563,6 +719,94 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
                                         );
                                     })
                                 )}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            )}
+
+            {/* Pending Deliveries Confirmation Section */}
+            {villageId !== VillageType.C && pendingReceipts.length > 0 && (
+                <div className="bg-orange-50 rounded-xl border border-orange-100 overflow-hidden animate-fade-in">
+                    <div className="px-6 py-4 border-b border-orange-200 bg-orange-100/50">
+                        <h3 className="text-sm font-black text-orange-900 uppercase tracking-tight flex items-center gap-2">
+                            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4" /></svg>
+                            Confirm Supply Receipts & Track Discrepancies
+                        </h3>
+                        <p className="text-[10px] text-orange-700 font-bold uppercase mt-1">Paid supply orders awaiting warehouse confirmation</p>
+                    </div>
+                    <div className="overflow-x-auto">
+                        <table className="min-w-full divide-y divide-orange-100">
+                            <thead className="bg-orange-50/50">
+                                <tr className="text-[9px] font-black text-orange-600 uppercase tracking-widest">
+                                    <th className="px-6 py-3 text-left">Ref ID</th>
+                                    <th className="px-6 py-3 text-left">Material Name</th>
+                                    <th className="px-6 py-3 text-right">Order Qty</th>
+                                    <th className="px-6 py-3 text-center">Actual Received Qty</th>
+                                    <th className="px-6 py-3 text-left">Payment Date</th>
+                                    <th className="px-6 py-3 text-center">Action</th>
+                                </tr>
+                            </thead>
+                            <tbody className="divide-y divide-orange-100">
+                                {pendingReceipts.map(rec => {
+                                    const resource = resources.find(r => r.id === rec.materialId);
+                                    const orderQty = rec.orderQty || (() => {
+                                        const match = rec.description?.match(/Purchase Request: ([\d.]+) /);
+                                        return match ? parseFloat(match[1]) : 0;
+                                    })();
+                                    
+                                    const currentInput = receivedInputs[rec.id];
+                                    const actualQty = currentInput ? parseFloat(currentInput) : orderQty;
+                                    const hasDiscrepancy = actualQty !== orderQty;
+
+                                    return (
+                                        <tr key={rec.id} className="hover:bg-orange-100/30 transition-colors">
+                                            <td className="px-6 py-4 whitespace-nowrap text-[10px] font-mono font-bold text-orange-900">{rec.transactionId}</td>
+                                            <td className="px-6 py-4 whitespace-nowrap text-xs font-bold text-gray-700">
+                                                {resource?.name || 'Unknown Material'}
+                                                <div className="text-[9px] text-gray-400 font-normal uppercase">{rec.materialId}</div>
+                                            </td>
+                                            <td className="px-6 py-4 whitespace-nowrap text-sm font-black text-right text-gray-400">
+                                                {orderQty} <span className="text-[9px] font-bold">{resource?.unit || ''}</span>
+                                            </td>
+                                            <td className="px-6 py-4 whitespace-nowrap text-center">
+                                                <div className="inline-flex items-center gap-2">
+                                                    <input 
+                                                        type="number" 
+                                                        step="any"
+                                                        value={currentInput ?? orderQty}
+                                                        onChange={(e) => setReceivedInputs({...receivedInputs, [rec.id]: e.target.value})}
+                                                        className={`w-24 p-1.5 border rounded-lg text-xs font-black text-center focus:ring-2 focus:ring-orange-500 transition-all ${hasDiscrepancy ? 'border-red-400 bg-red-50 text-red-700' : 'border-gray-200 bg-white text-gray-700'}`}
+                                                    />
+                                                    {hasDiscrepancy ? (
+                                                        <span title={`Discrepancy of ${(actualQty - orderQty).toFixed(2)} detected`} className="text-red-500">
+                                                            <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" /></svg>
+                                                        </span>
+                                                    ) : (
+                                                        <span title="Matches Order Amount" className="text-green-500">
+                                                            <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" /></svg>
+                                                        </span>
+                                                    )}
+                                                </div>
+                                            </td>
+                                            <td className="px-6 py-4 whitespace-nowrap text-[10px] font-bold text-gray-500 uppercase">{rec.settledDate || rec.date}</td>
+                                            <td className="px-6 py-4 whitespace-nowrap text-center">
+                                                <button 
+                                                    onClick={() => handleConfirmReceipt(rec)}
+                                                    disabled={isConfirmingReceipt === rec.id}
+                                                    className="px-3 py-1.5 bg-orange-600 text-white text-[10px] font-black uppercase rounded-lg hover:bg-orange-700 shadow-md transition-all flex items-center gap-2 mx-auto disabled:opacity-50"
+                                                >
+                                                    {isConfirmingReceipt === rec.id ? (
+                                                        <svg className="animate-spin h-3 w-3 text-white" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+                                                    ) : (
+                                                        <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" /></svg>
+                                                    )}
+                                                    Confirm Received
+                                                </button>
+                                            </td>
+                                        </tr>
+                                    );
+                                })}
                             </tbody>
                         </table>
                     </div>
@@ -790,7 +1034,7 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
                                         </div>
                                         
                                         <div className="mt-6 flex gap-3">
-                                            <button type="button" onClick={() => setIsEditMatModalOpen(false)} className="flex-1 bg-white border border-gray-200 text-xs font-black uppercase py-4 rounded-xl hover:bg-gray-50 transition-all">Cancel</button>
+                                            <button type="button" onClick={() => setIsEditMatModalOpen(false)} className="flex-1 bg-white border border-gray-300 text-xs font-black uppercase py-4 rounded-xl hover:bg-gray-50 transition-all">Cancel</button>
                                             <button type="submit" disabled={isUpdatingDetails} className="flex-1 bg-blue-600 text-white hover:bg-blue-700 text-xs font-black uppercase py-4 rounded-xl shadow-lg transition-all">
                                                 {isUpdatingDetails ? 'Updating...' : 'Save Changes'}
                                             </button>

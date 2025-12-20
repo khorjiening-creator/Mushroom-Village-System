@@ -1,11 +1,11 @@
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { FinancialRecord } from '../types';
 
 interface SettleModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onConfirm: (amount: number, date: string, method: string, notes: string) => Promise<void>;
+  onConfirm: (amount: number, date: string, method: string, notes: string, attachmentName?: string) => Promise<void>;
   record: FinancialRecord | null;
   isSubmitting: boolean;
 }
@@ -13,26 +13,35 @@ interface SettleModalProps {
 export const SettleModal: React.FC<SettleModalProps> = ({ 
   isOpen, onClose, onConfirm, record, isSubmitting 
 }) => {
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [amount, setAmount] = useState('');
   const [date, setDate] = useState(new Date().toISOString().split('T')[0]);
   const [method, setMethod] = useState('Cash');
   const [notes, setNotes] = useState('');
+  const [attachmentName, setAttachmentName] = useState<string | null>(null);
 
   useEffect(() => {
     if (record) {
-      // Fixed: Use null-coalescing and fallback to avoid .toString() crash
       setAmount((record.amount ?? 0).toString());
       setDate(new Date().toISOString().split('T')[0]);
       setMethod('Cash');
       setNotes('');
+      setAttachmentName(null);
     }
   }, [record, isOpen]);
 
   if (!isOpen || !record) return null;
 
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      if (file) {
+          setAttachmentName(file.name);
+      }
+  };
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    onConfirm(parseFloat(amount), date, method, notes);
+    onConfirm(parseFloat(amount), date, method, notes, attachmentName || undefined);
   };
 
   const isIncome = record.type === 'INCOME';
@@ -101,6 +110,35 @@ export const SettleModal: React.FC<SettleModalProps> = ({
                                  <option value="E-Wallet">E-Wallet</option>
                              </select>
                          </div>
+
+                         <div className="pt-2">
+                            <label className="block text-sm font-medium text-gray-700 mb-1 flex items-center gap-2">
+                                <svg className="w-4 h-4 text-indigo-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
+                                </svg>
+                                {isIncome ? 'Proof of Receipt (optional)' : 'Proof of Payment (Invoice/Receipt)'}
+                            </label>
+                            <div className="flex items-center gap-2">
+                                <button 
+                                    type="button" 
+                                    onClick={() => fileInputRef.current?.click()}
+                                    className="px-3 py-1.5 bg-white border border-gray-300 rounded-lg text-xs font-bold text-gray-700 hover:bg-indigo-50 transition-all shadow-sm"
+                                >
+                                    {attachmentName ? 'Change File' : 'Upload File'}
+                                </button>
+                                <input 
+                                    type="file" 
+                                    ref={fileInputRef} 
+                                    className="hidden" 
+                                    onChange={handleFileChange}
+                                    accept=".pdf,.jpg,.jpeg,.png"
+                                />
+                                <span className="text-[10px] text-gray-500 truncate max-w-[150px]">
+                                    {attachmentName || 'No file selected'}
+                                </span>
+                            </div>
+                         </div>
+
                          <div>
                              <label className="block text-sm font-medium text-gray-700 mb-1">Notes</label>
                              <textarea 
@@ -108,7 +146,7 @@ export const SettleModal: React.FC<SettleModalProps> = ({
                                 onChange={e => setNotes(e.target.value)} 
                                 rows={2} 
                                 className="w-full border border-gray-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500" 
-                                placeholder="Reference ID, customer details, etc."
+                                placeholder="Reference ID, details, etc."
                              />
                          </div>
 

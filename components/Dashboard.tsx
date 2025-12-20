@@ -1,22 +1,58 @@
 
 import React, { useState, useEffect, useMemo } from 'react';
-import { collection, getDocs, doc, updateDoc, addDoc, setDoc, deleteDoc, query, orderBy, limit, where } from 'firebase/firestore';
-// Fix: Correct named export import for modular signOut function
+import { collection, getDocs, doc, updateDoc, addDoc, setDoc, deleteDoc, query, orderBy, limit, where, onSnapshot } from 'firebase/firestore';
 import { signOut } from 'firebase/auth';
-import { VillageType, UserRole, FinancialRecord, ActivityLog, HarvestLog, ResourceItem, VillageRole } from '../types';
+import { 
+    VillageType, 
+    UserRole, 
+    FinancialRecord, 
+    ActivityLog, 
+    HarvestLog, 
+    ResourceItem, 
+    VillageRole,
+    ProcessingLog,
+    PackagingLogData,
+    DeliveryLogData,
+    InventoryItem,
+    DeliveryRecord,
+    AuditLogEntry
+} from '../types';
 import { VILLAGES, COLOR_THEMES } from '../constants';
 import { auth, db } from '../services/firebase';
 
-// Sub-components
+// Shared Layout Components
 import { OverviewTab } from './dashboard/OverviewTab';
 import { FarmingTab } from './dashboard/FarmingTab';
 import { EnvironmentTab } from './dashboard/EnvironmentTab';
 import { ResourcesTab } from './dashboard/ResourcesTab';
-import { ProcessingTab } from './dashboard/ProcessingTab';
 import { FinancialsTab } from './dashboard/FinancialsTab';
 import { RegistryTab } from './dashboard/RegistryTab';
+// Fix: Added missing imports for components used in Village C workflow
+import { ProcessingFloor } from './dashboard/ProcessingFloor';
+import { Packaging } from './dashboard/Packaging';
+import { InventoryDelivery } from './dashboard/InventoryDelivery';
+import { Reports } from './dashboard/Reports';
 import { TransactionModal } from './TransactionModal';
 import { SettleModal } from './SettleModal';
+
+// Global Notification Component for Low Materials
+const GlobalLowStockAlert = ({ items, onClose, onAction }: { items: any[], onClose: () => void, onAction: () => void }) => (
+    <div className="fixed top-20 left-1/2 transform -translate-x-1/2 z-[100] w-full max-w-sm px-4 animate-bounce-subtle">
+        <div className="bg-white border-2 border-orange-500 shadow-2xl rounded-2xl p-4 flex items-center gap-4 backdrop-blur-md bg-white/90">
+            <div className="h-12 w-12 rounded-full bg-orange-100 flex items-center justify-center flex-shrink-0 animate-pulse">
+                <svg className="h-6 w-6 text-orange-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" /></svg>
+            </div>
+            <div className="flex-1">
+                <h4 className="text-sm font-black text-gray-900 uppercase">Material Shortage!</h4>
+                <p className="text-[10px] font-bold text-gray-500">{items.length} supplies are running low. Purchase required.</p>
+            </div>
+            <div className="flex flex-col gap-1">
+                <button onClick={onAction} className="px-3 py-1 bg-orange-600 text-white text-[10px] font-black uppercase rounded-lg hover:bg-orange-700 transition-colors">Buy</button>
+                <button onClick={onClose} className="px-3 py-1 text-gray-400 text-[10px] font-bold uppercase hover:text-gray-600 transition-colors">Hide</button>
+            </div>
+        </div>
+    </div>
+);
 
 // Toast Notification Component
 const Toast = ({ message, type, onClose }: { message: string, type: 'success' | 'error', onClose: () => void }) => (
@@ -49,51 +85,165 @@ export const Dashboard: React.FC<DashboardProps> = ({ villageId, userEmail, user
   const theme = COLOR_THEMES[village.color as keyof typeof COLOR_THEMES] || COLOR_THEMES.slate;
 
   // View State
-  const [activeTab, setActiveTab] = useState<'overview' | 'farming' | 'environment' | 'resources' | 'financial' | 'processing' | 'registry'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'farming' | 'environment' | 'resources' | 'financial' | 'processing' | 'packaging' | 'inventory' | 'reports' | 'registry'>('overview');
+  const [logisticsSubFilter, setLogisticsSubFilter] = useState<'ALL' | 'SCHEDULED' | 'OUT_FOR_DELIVERY' | 'DELIVERED' | 'FAILED'>('ALL');
   const [notification, setNotification] = useState<{message: string, type: 'success' | 'error'} | null>(null);
 
-  // Shared Data States
+  // Real-time Data states
   const [financialRecords, setFinancialRecords] = useState<FinancialRecord[]>([]);
   const [farmingLogs, setFarmingLogs] = useState<ActivityLog[]>([]);
   const [harvestLogs, setHarvestLogs] = useState<HarvestLog[]>([]);
+  const [processingLogs, setProcessingLogs] = useState<ProcessingLog[]>([]);
+  const [packagingHistory, setPackagingHistory] = useState<PackagingLogData[]>([]);
+  const [deliveryLogs, setDeliveryLogs] = useState<DeliveryLogData[]>([]);
+  const [inventory, setInventory] = useState<InventoryItem[]>([]);
+  const [auditLogs, setAuditLogs] = useState<AuditLogEntry[]>([]);
+  const [allDeliveries, setAllDeliveries] = useState<DeliveryRecord[]>([]);
   
-  // Transaction Modal State
+  // Notification & Alert states
+  const [lowStockItems, setLowStockItems] = useState<any[]>([]);
+  const [showGlobalLowStockAlert, setShowGlobalLowStockAlert] = useState(false);
+  const [hasNotifiedThisSession, setHasNotifiedThisSession] = useState(false);
+
+  // Modal State
   const [showTransModal, setShowTransModal] = useState(false);
   const [editingTransaction, setEditingTransaction] = useState<FinancialRecord | null>(null);
   const [isSubmittingTrans, setIsSubmittingTrans] = useState(false);
-
-  // Settle Modal State
   const [showSettleModal, setShowSettleModal] = useState(false);
   const [settleTransaction, setSettleTransaction] = useState<FinancialRecord | null>(null);
   const [isSettling, setIsSettling] = useState(false);
 
-  // Financial Filters (Lifted State)
-  const [financialPeriod, setFinancialPeriod] = useState<'ALL' | 'MONTH' | 'TODAY'>('MONTH');
-  const [filterCategory, setFilterCategory] = useState('ALL');
-  const [filterStatus, setFilterStatus] = useState<'ALL' | 'COMPLETED' | 'PENDING'>('ALL');
+  // Financial Filters
   const [chartFilter, setChartFilter] = useState<'DAILY' | 'WEEKLY' | 'MONTHLY' | 'YEARLY'>('MONTHLY');
 
   const isFinance = userRole === 'finance';
-  const isUser = userRole === 'user';
 
-  // Helper to determine collection name based on village
-  const getFarmingCollectionName = (vid: VillageType) => {
-    if (vid === VillageType.A) return "dailyfarming_logA";
-    if (vid === VillageType.B) return "dailyfarming_logB";
-    return "farmingActivities"; 
+  // --- Real-time Listeners (Unified) ---
+  useEffect(() => {
+    if (!villageId) return;
+
+    // A & B Resource Monitoring
+    const resColName = villageId === VillageType.A ? 'resourcesA' : villageId === VillageType.B ? 'resourcesB' : 'resourcesC';
+    const unsubResources = onSnapshot(collection(db, resColName), (snapshot) => {
+        const lowOnes: any[] = [];
+        snapshot.forEach(doc => {
+            const data = doc.data();
+            if (data.quantity <= (data.lowStockThreshold || 0)) {
+                lowOnes.push({ id: doc.id, ...data });
+            }
+        });
+        setLowStockItems(lowOnes);
+        if (lowOnes.length > 0 && !hasNotifiedThisSession) {
+            setShowGlobalLowStockAlert(true);
+            setHasNotifiedThisSession(true);
+        }
+    });
+
+    // Village C Processing Monitoring
+    const qProc = query(collection(db, "processing_logs"), where("villageId", "==", VillageType.C));
+    const qInv = query(collection(db, "inventory_items"), where("villageId", "==", villageId));
+    const qDelRecords = query(collection(db, "delivery_records"), where("villageId", "==", villageId));
+
+    const unsubProc = onSnapshot(qProc, (snap) => setProcessingLogs(snap.docs.map(d => ({id: d.id, ...d.data()} as ProcessingLog))));
+    const unsubInv = onSnapshot(qInv, (snap) => setInventory(snap.docs.map(d => ({id: d.id, ...d.data()} as InventoryItem))));
+    const unsubDelRecords = onSnapshot(qDelRecords, (snap) => setAllDeliveries(snap.docs.map(d => ({id: d.id, ...d.data()} as DeliveryRecord))));
+
+    return () => {
+        unsubResources();
+        unsubProc();
+        unsubInv();
+        unsubDelRecords();
+    };
+  }, [villageId, hasNotifiedThisSession]);
+
+  const fetchData = async () => {
+    try {
+        const qPack = query(collection(db, "Packaging_logs"), where("villageId", "==", villageId));
+        const qDel = query(collection(db, "Delivery_logs"), where("villageId", "==", villageId));
+        const qAudit = query(collection(db, "audit_logs"), where("villageId", "==", villageId));
+        
+        const [packS, delS, auditS] = await Promise.all([getDocs(qPack), getDocs(qDel), getDocs(qAudit)]);
+        
+        setPackagingHistory(packS.docs.map(d => ({id: d.id, ...d.data()} as PackagingLogData)).sort((a,b)=>b.timestamp.localeCompare(a.timestamp)));
+        setDeliveryLogs(delS.docs.map(d => ({id: d.id, ...d.data()} as DeliveryLogData)).sort((a,b)=>b.timestamp.localeCompare(a.timestamp)));
+        setAuditLogs(auditS.docs.map(d => ({id: d.id, ...d.data()} as AuditLogEntry)).sort((a,b)=>b.timestamp.localeCompare(a.timestamp)));
+        
+        // Fetch production/financial shared data
+        fetchFinancialRecords();
+        fetchProductionData();
+    } catch (e) { console.error(e); }
   };
 
-  const getHarvestCollectionName = (vid: VillageType) => {
-    if (vid === VillageType.A) return "harvestYield_A";
-    if (vid === VillageType.B) return "harvestYield_B";
-    return "harvestYield_A"; 
+  useEffect(() => { fetchData(); }, [villageId, activeTab]);
+
+  const fetchFinancialRecords = async () => {
+    try {
+      const colName = villageId === VillageType.A ? "financialRecords_A" : villageId === VillageType.B ? "financialRecords_B" : "financialRecords_C";
+      const q = query(collection(db, colName), limit(300));
+      const snapshot = await getDocs(q);
+      const data = snapshot.docs.map(doc => ({id: doc.id, ...doc.data()} as FinancialRecord));
+      data.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+      setFinancialRecords(data);
+    } catch (error) { console.error("Financial fetch error:", error); }
   };
-  
-  const getFinancialCollectionName = (vid: VillageType) => {
-    if (vid === VillageType.A) return "financialRecords_A";
-    if (vid === VillageType.B) return "financialRecords_B";
-    if (vid === VillageType.C) return "financialRecords_C";
-    return "financialRecords"; 
+
+  const fetchProductionData = async () => {
+     try {
+         const colName = villageId === VillageType.A ? "dailyfarming_logA" : "dailyfarming_logB";
+         let harvestCollection = villageId === VillageType.A ? "harvestYield_A" : "harvestYield_B";
+         if (villageId === VillageType.C) return;
+
+         const actSnap = await getDocs(query(collection(db, colName), orderBy("timestamp", "desc"), limit(5)));
+         setFarmingLogs(actSnap.docs.map(doc => ({ id: doc.id, ...doc.data() } as ActivityLog)));
+
+         const harvSnap = await getDocs(query(collection(db, harvestCollection), orderBy("timestamp", "desc"), limit(50)));
+         setHarvestLogs(harvSnap.docs.map(doc => ({ id: doc.id, ...doc.data() } as HarvestLog)));
+     } catch (e) { console.log("Production data fetch error", e); }
+  };
+
+  const expiryWarnings = useMemo(() => {
+    const today = new Date();
+    const warnLimit = new Date();
+    warnLimit.setDate(today.getDate() + 3);
+    return inventory.filter(item => {
+        const expDate = new Date(item.expiryDate);
+        return expDate <= warnLimit && expDate >= today;
+    });
+  }, [inventory]);
+
+  const financeOverviewData = useMemo(() => {
+    const completed = financialRecords.filter(r => r.status === 'COMPLETED' || !r.status);
+    const pending = financialRecords.filter(r => r.status === 'PENDING');
+    const totalRevenue = completed.filter(r => r.type === 'INCOME').reduce((acc, c) => acc + c.amount, 0);
+    const totalExpenses = completed.filter(r => r.type === 'EXPENSE').reduce((acc, c) => acc + c.amount, 0);
+    const chartData: any[] = []; // Simplified for merge
+    return { 
+        totalRevenue, totalExpenses, netCashFlow: totalRevenue - totalExpenses, 
+        totalReceivables: pending.filter(r => r.type === 'INCOME').reduce((acc, c) => acc + c.amount, 0), 
+        totalPayables: pending.filter(r => r.type === 'EXPENSE').reduce((acc, c) => acc + c.amount, 0), 
+        receivables: pending.filter(r => r.type === 'INCOME'), payables: pending.filter(r => r.type === 'EXPENSE'), 
+        chartData, maxChartValue: 100
+    };
+  }, [financialRecords]);
+
+  const navigateToLogistics = (filter: 'SCHEDULED' | 'OUT_FOR_DELIVERY' | 'DELIVERED' | 'FAILED') => {
+    setLogisticsSubFilter(filter);
+    setActiveTab('inventory');
+  };
+
+  const handleDeleteLog = async (collectionName: string, logId: string, e?: any) => {
+    if (!window.confirm("Are you sure?")) return;
+    try {
+        await deleteDoc(doc(db, collectionName, logId));
+        fetchData();
+    } catch (error) { console.error("Deletion Failed:", error); }
+  };
+
+  const handleClearQueue = async () => {
+    const step6Batches = processingLogs.filter(l => l.currentStep === 6);
+    if (step6Batches.length === 0 || !window.confirm("Clear all items?")) return;
+    await Promise.all(step6Batches.map(b => deleteDoc(doc(db, "processing_logs", b.id))));
+    fetchData();
   };
 
   const showNotification = (message: string, type: 'success' | 'error') => {
@@ -101,412 +251,225 @@ export const Dashboard: React.FC<DashboardProps> = ({ villageId, userEmail, user
       setTimeout(() => setNotification(null), 3000);
   };
 
-  // --- Data Fetching ---
-  useEffect(() => {
-    if (['farming', 'overview', 'processing', 'financial', 'resources'].includes(activeTab)) {
-        fetchProductionData();
-    }
-    // Always fetch financials if we are on resources tab to calculate remaining stock correctly
-    if (['financial', 'resources', 'overview'].includes(activeTab)) {
-        fetchFinancialRecords();
-    }
-  }, [isAdmin, activeTab, villageId, isFinance]);
-
-  const fetchFinancialRecords = async () => {
-      try {
-        const colName = getFinancialCollectionName(villageId);
-        const q = query(collection(db, colName), where('villageId', '==', villageId), limit(300));
-        const snapshot = await getDocs(q);
-        const data = snapshot.docs.map(doc => ({id: doc.id, ...doc.data()} as FinancialRecord));
-        data.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
-        setFinancialRecords(data);
-      } catch (error) {
-         console.error("Financial fetch error:", error);
-      }
-  };
-
-  const fetchProductionData = async () => {
-     try {
-         const collectionName = getFarmingCollectionName(villageId);
-         let harvestCollection = villageId === VillageType.A ? "harvestYield_A" : 
-                                  villageId === VillageType.B ? "harvestYield_B" : "";
-         
-         const activitiesQuery = query(collection(db, collectionName), orderBy("timestamp", "desc"), limit(5));
-         const acts: ActivityLog[] = [];
-         
-         const actSnap = await getDocs(activitiesQuery);
-         actSnap.forEach(doc => acts.push({ id: doc.id, ...doc.data() } as ActivityLog));
-         setFarmingLogs(acts);
-
-         const harvs: HarvestLog[] = [];
-         if (harvestCollection) {
-             const harvestQuery = query(collection(db, harvestCollection), orderBy("timestamp", "desc"), limit(50));
-             const harvSnap = await getDocs(harvestQuery);
-             harvSnap.forEach(doc => harvs.push({ id: doc.id, ...doc.data() } as HarvestLog));
-         }
-         setHarvestLogs(harvs);
-     } catch (e) {
-         console.log("Production data not yet initialized", e);
-     }
-  };
-
-  // --- Financial Logic ---
-  const filteredFinancials = useMemo(() => {
-      return financialRecords.filter(rec => {
-          if (filterCategory !== 'ALL' && rec.category !== filterCategory) return false;
-          if (filterStatus !== 'ALL') {
-              const recordStatus = rec.status || 'COMPLETED';
-              if (filterStatus !== recordStatus) return false;
-          }
-          const recDate = new Date(rec.date);
-          const now = new Date();
-          if (financialPeriod === 'TODAY') return recDate.toISOString().split('T')[0] === now.toISOString().split('T')[0];
-          if (financialPeriod === 'MONTH') return recDate.getMonth() === now.getMonth() && recDate.getFullYear() === now.getFullYear();
-          return true;
-      });
-  }, [financialRecords, filterCategory, financialPeriod, filterStatus]);
-
-  const financeOverviewData = useMemo(() => {
-      const completed = financialRecords.filter(r => r.status === 'COMPLETED' || !r.status);
-      const pending = financialRecords.filter(r => r.status === 'PENDING');
-      const totalRevenue = completed.filter(r => r.type === 'INCOME').reduce((acc, c) => acc + c.amount, 0);
-      const totalExpenses = completed.filter(r => r.type === 'EXPENSE').reduce((acc, c) => acc + c.amount, 0);
-      const netCashFlow = totalRevenue - totalExpenses;
-      const receivables = pending.filter(r => r.type === 'INCOME');
-      const payables = pending.filter(r => r.type === 'EXPENSE');
-
-      const now = new Date();
-      let groups: Record<string, { income: number, expense: number, date: Date }> = {};
-      
-      completed.forEach(rec => {
-        const d = new Date(rec.date);
-        let key = '';
-
-        if (chartFilter === 'DAILY') {
-            const diffTime = Math.abs(now.getTime() - d.getTime());
-            const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-            if (diffDays > 30) return; 
-            key = d.toISOString().split('T')[0];
-        } else if (chartFilter === 'WEEKLY') {
-            const diffTime = Math.abs(now.getTime() - d.getTime());
-            const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-            if (diffDays > 90) return; 
-            const day = d.getDay();
-            const diff = d.getDate() - day + (day === 0 ? -6 : 1);
-            const monday = new Date(d);
-            monday.setDate(diff);
-            key = monday.toISOString().split('T')[0];
-        } else if (chartFilter === 'MONTHLY') {
-            const monthDiff = (now.getFullYear() - d.getFullYear()) * 12 + (now.getMonth() - d.getMonth());
-            if (monthDiff > 12) return; 
-            key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-        } else if (chartFilter === 'YEARLY') {
-            key = `${d.getFullYear()}`;
-        }
-
-        if (key) {
-            if (!groups[key]) groups[key] = { income: 0, expense: 0, date: d };
-            if (rec.type === 'INCOME') groups[key].income += rec.amount;
-            else groups[key].expense += rec.amount;
-        }
-      });
-
-      const chartData = Object.entries(groups).map(([key, val]) => {
-          let label = key;
-          if (chartFilter === 'DAILY') label = val.date.toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
-          if (chartFilter === 'WEEKLY') label = `Wk ${val.date.getDate()}/${val.date.getMonth()+1}`;
-          if (chartFilter === 'MONTHLY') label = val.date.toLocaleDateString(undefined, { month: 'short', year: '2-digit' });
-          return { key, label, income: val.income, expense: val.expense };
-      }).sort((a, b) => a.key.localeCompare(b.key));
-
-      const maxChartValue = Math.max(...chartData.map(d => Math.max(d.income, d.expense)), 100);
-
-      return { 
-          totalRevenue, totalExpenses, netCashFlow, 
-          totalReceivables: receivables.reduce((acc, c) => acc + c.amount, 0), 
-          totalPayables: payables.reduce((acc, c) => acc + c.amount, 0), 
-          receivables, payables, chartData, maxChartValue
-      };
-  }, [financialRecords, chartFilter]);
-
   const handleSaveTransaction = async (data: Partial<FinancialRecord>) => {
       setIsSubmittingTrans(true);
-      const colName = getFinancialCollectionName(villageId);
+      const colName = villageId === VillageType.A ? "financialRecords_A" : villageId === VillageType.B ? "financialRecords_B" : "financialRecords_C";
       try {
-          if (editingTransaction && editingTransaction.id) {
+          if (editingTransaction?.id) {
               await updateDoc(doc(db, colName, editingTransaction.id), { ...data });
-              showNotification("Transaction updated successfully", "success");
+              showNotification("Transaction updated", "success");
           } else {
-              const transactionId = "TXN-" + Date.now().toString().slice(-6) + Math.floor(100 + Math.random() * 900);
+              const transactionId = "TXN-" + Date.now().toString().slice(-6);
               await setDoc(doc(db, colName, transactionId), { ...data, transactionId });
-              showNotification("Transaction added successfully", "success");
+              showNotification("Transaction added", "success");
           }
           setShowTransModal(false);
-          setEditingTransaction(null);
           fetchFinancialRecords();
-      } catch (error) {
-          console.error("Error saving transaction", error);
-          showNotification("Failed to save transaction", "error");
-      } finally {
-          setIsSubmittingTrans(false);
-      }
+      } catch (error) { showNotification("Failed to save", "error"); } finally { setIsSubmittingTrans(false); }
   };
 
-  const handleSettleTransaction = async (amount: number, date: string, method: string, notes: string) => {
-      if (!settleTransaction || !settleTransaction.id) return;
+  const handleSettleTransaction = async (amount: number, date: string, method: string, notes: string, attachmentName?: string) => {
+      if (!settleTransaction?.id) return;
       setIsSettling(true);
-      const colName = getFinancialCollectionName(villageId);
+      const colName = villageId === VillageType.A ? "financialRecords_A" : villageId === VillageType.B ? "financialRecords_B" : "financialRecords_C";
       try {
-          const txnRef = doc(db, colName, settleTransaction.id);
-          const paymentsCol = collection(txnRef, 'payments');
-          await addDoc(paymentsCol, {
-              amountPaid: amount, date: date, method: method, notes: notes, recordedBy: userEmail, timestamp: new Date().toISOString()
+          // Track received status for supply goods specifically when payment is finalized
+          const isSupplies = settleTransaction.category === 'Supplies' && settleTransaction.type === 'EXPENSE';
+          
+          await updateDoc(doc(db, colName, settleTransaction.id), { 
+            status: 'COMPLETED', 
+            paymentMethod: method, 
+            settledDate: date,
+            attachmentName: attachmentName || settleTransaction.attachmentName || null,
+            receivedInStock: isSupplies ? false : true // Initialize as false if it's a supply purchase to be confirmed in Resources
           });
-          await updateDoc(txnRef, { status: 'COMPLETED', paymentMethod: method, settledDate: date });
-          showNotification(`Transaction ${settleTransaction.transactionId} settled.`, "success");
+          showNotification(`Transaction settled.`, "success");
           setShowSettleModal(false);
-          setSettleTransaction(null);
           fetchFinancialRecords();
-      } catch (error) {
-          console.error("Error settling transaction", error);
-          showNotification("Failed to settle transaction", "error");
-      } finally {
-          setIsSettling(false);
-      }
+      } catch (error) { showNotification("Failed to settle", "error"); } finally { setIsSettling(false); }
   };
 
-  const handleDeleteTransaction = async (id?: string) => {
-      const targetId = id || editingTransaction?.id;
-      if (!targetId) return;
-      const colName = getFinancialCollectionName(villageId);
-      try {
-          await deleteDoc(doc(db, colName, targetId));
-          showNotification("Transaction deleted", "success");
-          setShowTransModal(false);
-          setEditingTransaction(null);
-          fetchFinancialRecords();
-      } catch (error) {
-          console.error("Error deleting transaction", error);
-          showNotification("Failed to delete transaction", "error");
-      }
-  };
-
-  const handlePrintReceipt = (record: FinancialRecord) => {
-      const printWindow = window.open('', '_blank');
-      if (!printWindow) return;
-
-      const isIncome = record.type === 'INCOME';
-      const title = isIncome ? 'Official Receipt' : 'Payment Voucher';
-      
-      printWindow.document.write(`
-        <html>
-          <head>
-            <title>${title} - ${record.transactionId}</title>
-            <style>
-              body { font-family: 'Inter', sans-serif; padding: 40px; color: #333; line-height: 1.6; }
-              .header { border-bottom: 2px solid #333; padding-bottom: 20px; margin-bottom: 30px; display: flex; justify-content: space-between; align-items: center; }
-              .village-name { font-size: 24px; font-weight: bold; text-transform: uppercase; letter-spacing: 1px; }
-              .doc-type { font-size: 18px; font-weight: 600; color: #666; }
-              .grid { display: grid; grid-template-cols: 1fr 1fr; gap: 20px; margin-bottom: 30px; }
-              .label { font-size: 12px; color: #666; text-transform: uppercase; font-weight: bold; display: block; margin-bottom: 4px; }
-              .value { font-size: 16px; font-weight: 500; }
-              .amount-box { background: #f4f4f4; padding: 20px; border-radius: 8px; margin: 30px 0; display: flex; justify-content: space-between; align-items: center; border: 1px solid #ddd; }
-              .amount-val { font-size: 28px; font-weight: 800; }
-              .footer { margin-top: 80px; display: flex; justify-content: space-between; }
-              .sig-line { border-top: 1px solid #333; width: 200px; padding-top: 8px; text-align: center; font-size: 12px; font-weight: bold; }
-              @media print { .no-print { display: none; } body { padding: 20px; } }
-            </style>
-          </head>
-          <body>
-            <div class="header">
-              <div>
-                <div class="village-name">${village.name} Mushroom Village</div>
-                <div class="doc-type">${title}</div>
-              </div>
-              <div style="text-align: right">
-                <div class="label">Reference No.</div>
-                <div class="value" style="font-family: monospace;">${record.transactionId}</div>
-              </div>
-            </div>
-
-            <div class="grid">
-              <div>
-                <span class="label">Date</span>
-                <div class="value">${new Date(record.date).toLocaleDateString()}</div>
-              </div>
-              <div>
-                <span class="label">Settled On</span>
-                <div class="value">${record.settledDate ? new Date(record.settledDate).toLocaleDateString() : 'N/A'}</div>
-              </div>
-              <div>
-                <span class="label">Category</span>
-                <div class="value">${record.category}</div>
-              </div>
-              <div>
-                <span class="label">Payment Method</span>
-                <div class="value">${record.paymentMethod || 'Manual'}</div>
-              </div>
-            </div>
-
-            <div style="margin-bottom: 30px;">
-              <span class="label">Description</span>
-              <div class="value">${record.description || 'Professional Mushroom Supply Services'}</div>
-              ${record.orderNumber ? `<div class="value" style="margin-top: 8px; color: #666;">Ref: ${record.orderNumber}</div>` : ''}
-              ${record.batchId ? `<div class="value" style="color: #666;">Batch: ${record.batchId}</div>` : ''}
-            </div>
-
-            <div class="amount-box">
-              <span class="label" style="font-size: 16px;">Total Amount</span>
-              <span class="amount-val">RM ${record.amount.toFixed(2)}</span>
-            </div>
-
-            <div class="footer">
-              <div>
-                <div class="sig-line">Prepared By</div>
-                <div style="text-align: center; font-size: 10px; margin-top: 4px;">${record.recordedBy}</div>
-              </div>
-              <div>
-                <div class="sig-line">Authorized Signatory</div>
-              </div>
-            </div>
-
-            <div style="margin-top: 50px; text-align: center; font-size: 10px; color: #999;">
-              This is a computer generated document. No signature required.
-            </div>
-          </body>
-        </html>
-      `);
-      printWindow.document.close();
-      setTimeout(() => {
-          printWindow.print();
-      }, 500);
-  };
-
-  const openEditTransModal = (rec: FinancialRecord) => {
-      setEditingTransaction(rec);
-      setShowTransModal(true);
-  };
-
-  const openSettleTransModal = (rec: FinancialRecord) => {
-      setSettleTransaction(rec);
-      setShowSettleModal(true);
-  };
-
-  const activeBatchesWithYield = useMemo(() => {
-    const batchYieldMap: Record<string, number> = {};
-    harvestLogs.forEach(log => {
-        const y = log.totalYield || log.weightKg || 0;
-        if (y > 0) batchYieldMap[log.batchId] = (batchYieldMap[log.batchId] || 0) + y;
-    });
-    financialRecords.forEach(rec => {
-        if (rec.category === 'Sales' && rec.batchId && rec.weightKg) {
-            if (editingTransaction?.id !== rec.id) {
-                if (batchYieldMap[rec.batchId]) batchYieldMap[rec.batchId] -= rec.weightKg;
-            }
-        }
-    });
-    return Object.entries(batchYieldMap).filter(([id, remaining]) => remaining > 0).map(([id, remaining]) => ({ id, remaining }));
-  }, [harvestLogs, financialRecords, editingTransaction]);
+  const openEditTransModal = (rec: FinancialRecord) => { setEditingTransaction(rec); setShowTransModal(true); };
+  const openSettleTransModal = (rec: FinancialRecord) => { setSettleTransaction(rec); setShowSettleModal(true); };
 
   return (
     <div className={`min-h-screen ${theme.bgSoft} flex flex-col transition-colors duration-500 relative`}>
       {notification && <Toast message={notification.message} type={notification.type} onClose={() => setNotification(null)} />}
+      
+      {showGlobalLowStockAlert && lowStockItems.length > 0 && (
+          <GlobalLowStockAlert 
+            items={lowStockItems} 
+            onClose={() => setShowGlobalLowStockAlert(false)} 
+            onAction={() => { setActiveTab('resources'); setShowGlobalLowStockAlert(false); }}
+          />
+      )}
 
       <header className="bg-white shadow-sm border-b border-gray-200 sticky top-0 z-20">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3 sm:py-4 flex justify-between items-center">
-          <div className="flex items-center space-x-2 sm:space-x-3">
-             <div className={`px-4 py-2 rounded-lg ${theme.bgLight} ${theme.textMain} border ${theme.borderSoft} shadow-sm`}>
-                <span className="font-bold text-lg sm:text-xl tracking-tight">Dashboard</span>
-             </div>
-             {isAdmin && <span className="ml-2 px-2 py-0.5 rounded text-[10px] sm:text-xs font-bold bg-red-100 text-red-800 border border-red-200 uppercase tracking-wide">Admin</span>}
-          </div>
-          <div className="flex items-center space-x-2 sm:space-x-4">
-            <div className="hidden md:flex flex-col items-end">
-                <span className="text-sm font-semibold text-gray-900">{userName || 'Unknown User'}</span>
-                <span className="text-xs text-gray-500">{userEmail}</span>
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 flex justify-between items-center">
+          <div className="flex flex-col">
+            <h1 className={`text-2xl font-bold ${theme.textMain}`}>{village.name} Dashboard</h1>
+            <div className="text-xs text-gray-500 flex items-center gap-2">
+                <span className="font-semibold">{userName || userEmail}</span>
+                <span className="w-1 h-1 bg-gray-300 rounded-full"></span>
+                <span className="uppercase font-bold text-[9px] px-1.5 py-0.5 rounded-full bg-gray-100">{userRole}</span>
             </div>
-            {/* Fix: Pass the auth instance to the signOut function imported from modular SDK */}
-            <button onClick={() => signOut(auth)} className="text-xs sm:text-sm font-medium text-red-600 hover:text-red-700 hover:bg-red-50 px-2 sm:px-3 py-1.5 sm:py-2 rounded-md transition-colors">Sign Out</button>
+          </div>
+          <div className="flex items-center space-x-4">
+             {expiryWarnings.length > 0 && (
+                 <div className="bg-red-100 text-red-700 px-3 py-1 rounded-lg text-xs font-black animate-pulse">
+                     {expiryWarnings.length} EXPIRY ALERTS
+                 </div>
+             )}
+             <button onClick={() => signOut(auth)} className="text-xs font-bold text-red-600 hover:bg-red-50 px-3 py-2 rounded-md transition-colors">Sign Out</button>
           </div>
         </div>
       </header>
 
-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-4 sm:py-8 relative">
-        <div className="border-b border-gray-200 mb-6 overflow-x-auto">
-            <nav className="-mb-px flex space-x-6 sm:space-x-8" aria-label="Tabs">
-                <button onClick={() => setActiveTab('overview')} className={`${activeTab === 'overview' ? `border-${village.color}-500 text-${village.color}-600` : 'border-transparent text-gray-500 hover:text-gray-700'} whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm transition-colors`}>Overview</button>
-                {village.role === 'FARMING' && (isUser || isAdmin) && (
+      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        <div className="border-b border-gray-200 mb-6 overflow-x-auto no-print">
+            <nav className="-mb-px flex space-x-6" aria-label="Tabs">
+                <button onClick={() => setActiveTab('overview')} className={`${activeTab === 'overview' ? `border-indigo-500 text-indigo-600` : 'border-transparent text-gray-500'} whitespace-nowrap py-4 px-1 border-b-2 font-bold text-sm transition-colors`}>Overview</button>
+                
+                {village.role === VillageRole.FARMING && (
                     <>
-                        <button onClick={() => setActiveTab('farming')} className={`${activeTab === 'farming' ? `border-${village.color}-500 text-${village.color}-600` : 'border-transparent text-gray-500 hover:text-gray-700'} whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm transition-colors`}>Farming</button>
-                        <button onClick={() => setActiveTab('environment')} className={`${activeTab === 'environment' ? `border-${village.color}-500 text-${village.color}-600` : 'border-transparent text-gray-500 hover:text-gray-700'} whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm transition-colors`}>Environment</button>
+                        <button onClick={() => setActiveTab('farming')} className={`${activeTab === 'farming' ? `border-green-500 text-green-600` : 'border-transparent text-gray-500'} whitespace-nowrap py-4 px-1 border-b-2 font-bold text-sm transition-colors`}>Farming</button>
+                        <button onClick={() => setActiveTab('environment')} className={`${activeTab === 'environment' ? `border-green-500 text-green-600` : 'border-transparent text-gray-500'} whitespace-nowrap py-4 px-1 border-b-2 font-bold text-sm transition-colors`}>Environment</button>
                     </>
                 )}
-                {(village.role === 'FARMING' || villageId === VillageType.C) && (isUser || isAdmin) && (
-                    <button onClick={() => setActiveTab('resources')} className={`${activeTab === 'resources' ? `border-${village.color}-500 text-${village.color}-600` : 'border-transparent text-gray-500 hover:text-gray-700'} whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm transition-colors`}>Resources</button>
+
+                {village.role === VillageRole.PROCESSING && (
+                    <>
+                        <button onClick={() => setActiveTab('processing')} className={`${activeTab === 'processing' ? `border-blue-500 text-blue-600` : 'border-transparent text-gray-500'} whitespace-nowrap py-4 px-1 border-b-2 font-bold text-sm transition-colors`}>Processing</button>
+                        <button onClick={() => setActiveTab('packaging')} className={`${activeTab === 'packaging' ? `border-blue-500 text-blue-600` : 'border-transparent text-gray-500'} whitespace-nowrap py-4 px-1 border-b-2 font-bold text-sm transition-colors`}>Packaging</button>
+                        <button onClick={() => setActiveTab('inventory')} className={`${activeTab === 'inventory' ? `border-blue-500 text-blue-600` : 'border-transparent text-gray-500'} whitespace-nowrap py-4 px-1 border-b-2 font-bold text-sm transition-colors`}>Inventory & Delivery</button>
+                        <button onClick={() => setActiveTab('reports')} className={`${activeTab === 'reports' ? `border-blue-500 text-blue-600` : 'border-transparent text-gray-500'} whitespace-nowrap py-4 px-1 border-b-2 font-bold text-sm transition-colors`}>Reports</button>
+                    </>
                 )}
+
+                <button onClick={() => setActiveTab('resources')} className={`${activeTab === 'resources' ? `border-indigo-500 text-indigo-600` : 'border-transparent text-gray-500'} whitespace-nowrap py-4 px-1 border-b-2 font-bold text-sm transition-colors relative`}>
+                    Resources
+                    {lowStockItems.length > 0 && <span className="absolute -top-1 -right-2 bg-red-500 text-white text-[8px] font-black px-1.5 py-0.5 rounded-full ring-2 ring-white">!</span>}
+                </button>
+                
                 {(isFinance || isAdmin) && (
-                    <button onClick={() => setActiveTab('financial')} className={`${activeTab === 'financial' ? `border-${village.color}-500 text-${village.color}-600` : 'border-transparent text-gray-500 hover:text-gray-700'} whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm transition-colors`}>Financials</button>
-                )}
-                {village.role === 'PROCESSING' && (isUser || isAdmin) && (
-                    <button onClick={() => setActiveTab('processing')} className={`${activeTab === 'processing' ? `border-${village.color}-500 text-${village.color}-600` : 'border-transparent text-gray-500 hover:text-gray-700'} whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm transition-colors`}>Production</button>
+                    <button onClick={() => setActiveTab('financial')} className={`${activeTab === 'financial' ? `border-indigo-500 text-indigo-600` : 'border-transparent text-gray-500'} whitespace-nowrap py-4 px-1 border-b-2 font-bold text-sm transition-colors`}>Financials</button>
                 )}
                 {isAdmin && (
-                    <button onClick={() => setActiveTab('registry')} className={`${activeTab === 'registry' ? `border-${village.color}-500 text-${village.color}-600` : 'border-transparent text-gray-500 hover:text-gray-700'} whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm transition-colors`}>User Registry</button>
+                    <button onClick={() => setActiveTab('registry')} className={`${activeTab === 'registry' ? `border-slate-500 text-slate-600` : 'border-transparent text-gray-500'} whitespace-nowrap py-4 px-1 border-b-2 font-bold text-sm transition-colors`}>User Registry</button>
                 )}
             </nav>
         </div>
 
-        {activeTab === 'overview' && (
-            <OverviewTab 
-                villageId={villageId} 
-                userName={userName || 'User'} 
-                theme={theme} 
-                isFinance={isFinance}
-                financeOverviewData={financeOverviewData}
-                setActiveTab={setActiveTab}
-                openEditTransModal={openEditTransModal}
-                chartFilter={chartFilter}
-                setChartFilter={setChartFilter}
-            />
-        )}
-        
-        {activeTab === 'farming' && <FarmingTab villageId={villageId} userEmail={userEmail} theme={theme} farmingLogs={farmingLogs} onActivityLogged={fetchProductionData} onSuccess={(msg) => showNotification(msg, 'success')} onError={(msg) => showNotification(msg, 'error')} />}
-        {activeTab === 'environment' && <EnvironmentTab villageId={villageId} userEmail={userEmail} theme={theme} onSuccess={(msg) => showNotification(msg, 'success')} onError={(msg) => showNotification(msg, 'error')} />}
-        {activeTab === 'resources' && <ResourcesTab villageId={villageId} userEmail={userEmail} theme={theme} onSuccess={(msg) => showNotification(msg, 'success')} financialRecords={financialRecords} />}
-        {activeTab === 'processing' && <ProcessingTab harvestLogs={harvestLogs} />}
-        
-        {activeTab === 'financial' && (
-            <FinancialsTab 
-                records={filteredFinancials}
-                onAddRecord={() => { setEditingTransaction(null); setShowTransModal(true); }}
-                onEditRecord={openEditTransModal}
-                onDeleteRecord={handleDeleteTransaction}
-                onSettleRecord={openSettleTransModal}
-                userRole={userRole}
-                theme={theme}
-                onPrintRecord={handlePrintReceipt}
-                financeOverviewData={financeOverviewData}
-                chartFilter={chartFilter}
-                setChartFilter={setChartFilter}
-                onFilterChange={(p, c, s) => { 
-                    setFinancialPeriod(p as any); setFilterCategory(c); setFilterStatus(s as any); 
-                }}
-            />
-        )}
-        
-        {activeTab === 'registry' && isAdmin && <RegistryTab adminEmail={userEmail} />}
+        <div className="bg-white rounded-3xl shadow-xl border border-gray-100 min-h-[600px] p-6 sm:p-8">
+            {activeTab === 'overview' && (
+                <div className="space-y-10">
+                    <OverviewTab 
+                        villageId={villageId} 
+                        userName={userName || 'User'} 
+                        theme={theme} 
+                        isFinance={isFinance}
+                        financeOverviewData={financeOverviewData}
+                        setActiveTab={setActiveTab}
+                        openEditTransModal={openEditTransModal}
+                        chartFilter={chartFilter}
+                        setChartFilter={setChartFilter}
+                    />
+                    
+                    {villageId === VillageType.C && (
+                        <div className="space-y-6 pt-6 border-t">
+                            <div className="flex justify-between items-center">
+                                <h2 className="text-xl font-black text-gray-800 uppercase tracking-tight">Logistics Board</h2>
+                                <button onClick={() => setActiveTab('inventory')} className="text-xs font-bold text-blue-600 hover:underline uppercase">Full Dashboard</button>
+                            </div>
+                            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                                <button onClick={() => navigateToLogistics('SCHEDULED')} className="p-4 bg-yellow-50 rounded-xl border border-yellow-100 text-left">
+                                    <div className="text-[10px] font-bold text-yellow-600 uppercase mb-1">Scheduled</div>
+                                    <div className="text-2xl font-black text-gray-800">{allDeliveries.filter(d => d.status === 'SCHEDULED').length}</div>
+                                </button>
+                                <button onClick={() => navigateToLogistics('OUT_FOR_DELIVERY')} className="p-4 bg-blue-50 rounded-xl border border-blue-100 text-left">
+                                    <div className="text-[10px] font-bold text-blue-600 uppercase mb-1">In Transit</div>
+                                    <div className="text-2xl font-black text-gray-800">{allDeliveries.filter(d => d.status === 'OUT_FOR_DELIVERY').length}</div>
+                                </button>
+                                <button onClick={() => navigateToLogistics('DELIVERED')} className="p-4 bg-green-50 rounded-xl border border-green-100 text-left">
+                                    <div className="text-[10px] font-bold text-green-600 uppercase mb-1">Delivered</div>
+                                    <div className="text-2xl font-black text-gray-800">{allDeliveries.filter(d => d.status === 'DELIVERED').length}</div>
+                                </button>
+                                <button onClick={() => navigateToLogistics('FAILED')} className="p-4 bg-red-50 rounded-xl border border-red-100 text-left">
+                                    <div className="text-[10px] font-bold text-red-600 uppercase mb-1">Failed</div>
+                                    <div className="text-2xl font-black text-gray-800">{allDeliveries.filter(d => d.status === 'FAILED').length}</div>
+                                </button>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            )}
+            
+            {activeTab === 'farming' && <FarmingTab villageId={villageId} userEmail={userEmail} theme={theme} farmingLogs={farmingLogs} onActivityLogged={fetchProductionData} onSuccess={(msg) => showNotification(msg, 'success')} onError={(msg) => showNotification(msg, 'error')} />}
+            {activeTab === 'environment' && <EnvironmentTab villageId={villageId} userEmail={userEmail} theme={theme} onSuccess={(msg) => showNotification(msg, 'success')} onError={(msg) => showNotification(msg, 'error')} />}
+            {activeTab === 'resources' && <ResourcesTab villageId={villageId} userEmail={userEmail} theme={theme} onSuccess={(msg) => showNotification(msg, 'success')} financialRecords={financialRecords} />}
+            
+            {activeTab === 'processing' && <ProcessingFloor villageId={villageId} userEmail={userEmail} theme={theme} processingLogs={processingLogs} onRefresh={fetchData} handleDeleteLog={handleDeleteLog} handleClearQueue={handleClearQueue} />}
+            {activeTab === 'packaging' && <Packaging villageId={villageId} userEmail={userEmail} theme={theme} processingLogs={processingLogs} onRefresh={fetchData} />}
+            {activeTab === 'inventory' && <InventoryDelivery villageId={villageId} userEmail={userEmail} onRefresh={fetchData} initialFilter={logisticsSubFilter} />}
+            {activeTab === 'reports' && <Reports processingLogs={processingLogs} packagingHistory={packagingHistory} deliveryLogs={deliveryLogs} allDeliveries={allDeliveries} />}
+            
+            {activeTab === 'financial' && (
+                <FinancialsTab 
+                    records={financialRecords}
+                    onAddRecord={() => { setEditingTransaction(null); setShowTransModal(true); }}
+                    onEditRecord={openEditTransModal}
+                    onDeleteRecord={(id) => handleDeleteLog(villageId === VillageType.C ? "financialRecords_C" : villageId === VillageType.A ? "financialRecords_A" : "financialRecords_B", id)}
+                    onSettleRecord={openSettleTransModal}
+                    userRole={userRole}
+                    theme={theme}
+                    financeOverviewData={financeOverviewData}
+                    chartFilter={chartFilter}
+                    setChartFilter={setChartFilter}
+                    onFilterChange={() => {}}
+                    villageId={villageId}
+                />
+            )}
+            
+            {activeTab === 'registry' && isAdmin && (
+                <div className="space-y-10">
+                    <RegistryTab adminEmail={userEmail} />
+                    <div className="pt-10 border-t">
+                        <h2 className="text-xl font-bold mb-6">System Audit Trail</h2>
+                        <div className="bg-gray-50 rounded-2xl border overflow-hidden">
+                            <table className="min-w-full divide-y divide-gray-200">
+                                <thead className="bg-gray-100">
+                                    <tr><th className="px-6 py-3 text-left text-[10px] font-bold uppercase text-gray-500">Time</th><th className="px-6 py-3 text-left text-[10px] font-bold uppercase text-gray-500">Action</th><th className="px-6 py-3 text-left text-[10px] font-bold uppercase text-gray-500">User</th></tr>
+                                </thead>
+                                <tbody className="divide-y divide-gray-100">
+                                    {auditLogs.slice(0, 10).map(log => (
+                                        <tr key={log.id} className="text-xs">
+                                            <td className="px-6 py-4 font-mono">{new Date(log.timestamp).toLocaleString()}</td>
+                                            <td className="px-6 py-4 font-bold">{log.action}</td>
+                                            <td className="px-6 py-4">{log.performedBy}</td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            )}
+        </div>
       </main>
 
       <TransactionModal 
           isOpen={showTransModal}
           onClose={() => { setShowTransModal(false); setEditingTransaction(null); }}
           onSave={handleSaveTransaction}
-          onDelete={(isFinance || isAdmin) ? async () => { await handleDeleteTransaction(editingTransaction?.id); } : undefined}
+          onDelete={(isFinance || isAdmin) ? async () => { 
+              const col = villageId === VillageType.C ? "financialRecords_C" : villageId === VillageType.A ? "financialRecords_A" : "financialRecords_B";
+              await handleDeleteLog(col, editingTransaction!.id); 
+              setShowTransModal(false);
+          } : undefined}
           initialData={editingTransaction}
           villageId={villageId}
           userEmail={userEmail}
           isSubmitting={isSubmittingTrans}
-          availableBatches={activeBatchesWithYield}
       />
 
       <SettleModal 

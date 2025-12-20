@@ -28,25 +28,22 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
   const [transWeight, setTransWeight] = useState(''); 
   const [transCategory, setTransCategory] = useState('Supplies');
   const [transDate, setTransDate] = useState(new Date().toISOString().split('T')[0]);
-  const [transBatchId, setTransBatchId] = useState('');
-  const [transOrderNumber, setTransOrderNumber] = useState('');
   const [transDesc, setTransDesc] = useState('');
   const [transPaymentMethod, setTransPaymentMethod] = useState('Cash');
   const [transIsPending, setTransIsPending] = useState(false);
   const [attachmentName, setAttachmentName] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  const isFarmingVillage = villageId === VillageType.A || villageId === VillageType.B;
+
   useEffect(() => {
     setError(null);
     if (initialData) {
       setTransType(initialData.type);
-      // Fixed: Use null-coalescing and fallback to avoid .toString() crash
       setTransAmount((initialData.amount ?? 0).toString());
       setTransWeight(initialData.weightKg ? (initialData.weightKg ?? 0).toString() : '');
       setTransCategory(initialData.category);
       setTransDate(initialData.date);
-      setTransBatchId(initialData.batchId || '');
-      setTransOrderNumber(initialData.orderNumber || '');
       setTransDesc(initialData.description || '');
       setTransPaymentMethod(initialData.paymentMethod || 'Cash');
       setTransIsPending(initialData.status === 'PENDING');
@@ -57,8 +54,6 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
       setTransWeight('');
       setTransCategory('Supplies');
       setTransDate(new Date().toISOString().split('T')[0]);
-      setTransBatchId('');
-      setTransOrderNumber('');
       setTransDesc('');
       setTransPaymentMethod('Cash');
       setTransIsPending(false);
@@ -70,10 +65,10 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
       setTransType(newType);
       setError(null);
       if (newType === 'INCOME') {
-          setTransCategory('Sales');
+          // Manual income is never Sales (Sales are auto-generated)
+          setTransCategory('Others');
       } else {
           setTransCategory('Supplies');
-          setTransBatchId(''); 
       }
   };
 
@@ -84,35 +79,11 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
       }
   };
 
-  const isOrderNumberRequired = transIsPending && (
-      (transType === 'INCOME' && transCategory === 'Sales') || 
-      (transType === 'EXPENSE' && transCategory === 'Supplies')
-  );
-
   const isIncome = transType === 'INCOME';
-  const isSales = isIncome && transCategory === 'Sales';
 
   const handleSubmit = (e: React.FormEvent) => {
       e.preventDefault();
       setError(null);
-
-      if (isOrderNumberRequired && !transOrderNumber.trim()) {
-          setError(transType === 'INCOME' ? "Customer Order Number is mandatory for pending sales." : "Invoice Number is mandatory for pending supplies.");
-          return;
-      }
-
-      if (isSales && transBatchId) {
-          const weight = parseFloat(transWeight);
-          if (isNaN(weight) || weight <= 0) {
-              setError("Please enter a valid weight for sales.");
-              return;
-          }
-          const selectedBatch = availableBatches.find(b => b.id === transBatchId);
-          if (selectedBatch && weight > selectedBatch.remaining) {
-              setError(`Selling amount (${weight}kg) exceeds available yield for this batch (${selectedBatch.remaining.toFixed(1)}kg).`);
-              return;
-          }
-      }
 
       let finalSettledDate: string | null = null;
       if (!transIsPending) {
@@ -123,10 +94,10 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
           type: transType,
           category: transCategory,
           amount: parseFloat(transAmount) || 0,
-          weightKg: isSales ? (parseFloat(transWeight) || null) : null,
+          weightKg: null,
           date: transDate,
-          batchId: (isIncome && transBatchId.trim()) ? transBatchId.trim() : null,
-          orderNumber: transOrderNumber.trim() || null,
+          batchId: initialData?.batchId || null, // Preserve if editing an auto-generated one, but otherwise null
+          orderNumber: initialData?.orderNumber || null,
           description: transDesc,
           recordedBy: initialData?.recordedBy || userEmail,
           villageId: initialData?.villageId || villageId,
@@ -167,17 +138,9 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
                              </label>
                          </div>
                          
-                         <div className="grid grid-cols-2 gap-4">
-                            <div>
-                                <label className="block text-sm font-medium text-gray-700 mb-1">Amount (RM)</label>
-                                <input type="number" step="0.01" required value={transAmount} onChange={e => setTransAmount(e.target.value)} className="w-full border border-gray-600 rounded-lg p-2.5 bg-gray-700 text-white focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors placeholder-gray-400" placeholder="0.00" />
-                            </div>
-                            {isSales && (
-                                <div>
-                                    <label className="block text-sm font-medium text-gray-700 mb-1">Weight (kg)</label>
-                                    <input type="number" step="0.1" required={isSales} value={transWeight} onChange={e => setTransWeight(e.target.value)} className="w-full border border-gray-600 rounded-lg p-2.5 bg-gray-700 text-white focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors placeholder-gray-400" placeholder="0.0" />
-                                </div>
-                            )}
+                         <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">Amount (RM)</label>
+                            <input type="number" step="0.01" required value={transAmount} onChange={e => setTransAmount(e.target.value)} className="w-full border border-gray-600 rounded-lg p-2.5 bg-gray-700 text-white focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors placeholder-gray-400" placeholder="0.00" />
                          </div>
 
                          <div>
@@ -185,7 +148,6 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
                              <select value={transCategory} onChange={e => { setTransCategory(e.target.value); setError(null); }} className="w-full border border-gray-600 rounded-lg p-2.5 bg-gray-700 text-white focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors">
                                  {transType === 'INCOME' ? (
                                      <>
-                                         <option value="Sales">Sales</option>
                                          <option value="Investment">Investment</option>
                                          <option value="Others">Others</option>
                                      </>
@@ -200,48 +162,15 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
                                      </>
                                  )}
                              </select>
+                             {isFarmingVillage && isIncome && !initialData && (
+                                 <p className="mt-1 text-[10px] text-indigo-600 font-medium italic">Note: "Sales" transactions are auto-generated from farming harvests.</p>
+                             )}
                          </div>
 
                          <div>
                              <label className="block text-sm font-medium text-gray-700 mb-1">Date</label>
                              <input type="date" required value={transDate} onChange={e => setTransDate(e.target.value)} className="w-full border border-gray-600 rounded-lg p-2.5 bg-gray-700 text-white focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors" />
                          </div>
-
-                         {isIncome && (
-                            <div className="animate-fade-in-up">
-                                <label className="block text-sm font-medium text-gray-700 mb-1">Batch ID {isSales && <span className="text-indigo-600 font-bold ml-1">(Must select batch with yield)</span>}</label>
-                                <select 
-                                    value={transBatchId} 
-                                    onChange={e => setTransBatchId(e.target.value)} 
-                                    required={isSales}
-                                    className="w-full border border-gray-600 rounded-lg p-2.5 bg-gray-700 text-white focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors"
-                                >
-                                    <option value="">{isSales ? '-- Select Batch with Yield --' : '-- Optional Batch ID --'}</option>
-                                    {availableBatches.map(b => (
-                                        <option key={b.id} value={b.id}>
-                                            {b.id} {isSales ? `(Avail: ${b.remaining.toFixed(1)}kg)` : ''}
-                                        </option>
-                                    ))}
-                                </select>
-                            </div>
-                         )}
-
-                         {(transIsPending || initialData?.orderNumber) && (
-                            <div className="animate-fade-in-up">
-                                <label className="block text-sm font-medium text-gray-700 mb-1">
-                                {transType === 'INCOME' ? 'Customer Order #' : 'Invoice Number'}
-                                {isOrderNumberRequired && <span className="text-red-500 ml-1 font-bold">*</span>}
-                                </label>
-                                <input 
-                                type="text" 
-                                required={isOrderNumberRequired}
-                                value={transOrderNumber} 
-                                onChange={e => { setTransOrderNumber(e.target.value); if(e.target.value.trim()) setError(null); }} 
-                                className={`w-full border rounded-lg p-2.5 text-white focus:ring-2 transition-colors placeholder-gray-400 ${isOrderNumberRequired && !transOrderNumber.trim() ? 'border-red-400 bg-red-900/20' : 'border-gray-600 bg-gray-700 focus:ring-blue-500'}`} 
-                                placeholder={transType === 'INCOME' ? "e.g. ORD-123" : "e.g. INV-987"} 
-                                />
-                            </div>
-                         )}
 
                          <div>
                              <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
@@ -261,47 +190,49 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
                              </label>
                          </div>
 
-                         <div className="pt-4 border-t border-gray-100">
-                            <label className="block text-sm font-bold text-gray-800 mb-2 flex items-center gap-2">
-                                <svg className="w-4 h-4 text-indigo-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
-                                </svg>
-                                Document Attachment
-                            </label>
-                            <div className="flex items-center gap-3 bg-gray-50 p-3 rounded-xl border border-gray-200 shadow-inner">
-                                <button 
-                                    type="button" 
-                                    onClick={() => fileInputRef.current?.click()}
-                                    className="px-4 py-2 bg-white border border-gray-300 rounded-lg text-xs font-bold text-gray-700 hover:bg-indigo-50 hover:text-indigo-600 hover:border-indigo-300 transition-all flex items-center gap-2 shadow-sm"
-                                >
-                                    {attachmentName ? 'Change Document' : 'Upload Invoice/Order'}
-                                </button>
-                                <input 
-                                    type="file" 
-                                    ref={fileInputRef} 
-                                    className="hidden" 
-                                    onChange={handleFileChange}
-                                    accept=".pdf,.jpg,.jpeg,.png"
-                                />
-                                <div className="flex-1 min-w-0">
-                                    {attachmentName ? (
-                                        <div className="flex items-center justify-between">
-                                            <span className="text-xs text-indigo-600 font-bold truncate pr-2">{attachmentName}</span>
-                                            <button 
-                                                type="button" 
-                                                onClick={() => setAttachmentName(null)}
-                                                className="p-1 text-red-500 hover:bg-red-50 rounded-full flex-shrink-0"
-                                                title="Remove"
-                                            >
-                                                <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" /></svg>
-                                            </button>
-                                        </div>
-                                    ) : (
-                                        <span className="text-[10px] text-gray-400 italic">No document attached. Supporting PDF/JPG/PNG.</span>
-                                    )}
+                         {!initialData && (
+                            <div className="pt-4 border-t border-gray-100">
+                                <label className="block text-sm font-bold text-gray-800 mb-2 flex items-center gap-2">
+                                    <svg className="w-4 h-4 text-indigo-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
+                                    </svg>
+                                    Document Attachment
+                                </label>
+                                <div className="flex items-center gap-3 bg-gray-50 p-3 rounded-xl border border-gray-200 shadow-inner">
+                                    <button 
+                                        type="button" 
+                                        onClick={() => fileInputRef.current?.click()}
+                                        className="px-4 py-2 bg-white border border-gray-300 rounded-lg text-xs font-bold text-gray-700 hover:bg-indigo-50 hover:text-indigo-600 hover:border-indigo-300 transition-all flex items-center gap-2 shadow-sm"
+                                    >
+                                        {attachmentName ? 'Change Document' : 'Upload File'}
+                                    </button>
+                                    <input 
+                                        type="file" 
+                                        ref={fileInputRef} 
+                                        className="hidden" 
+                                        onChange={handleFileChange}
+                                        accept=".pdf,.jpg,.jpeg,.png"
+                                    />
+                                    <div className="flex-1 min-w-0">
+                                        {attachmentName ? (
+                                            <div className="flex items-center justify-between">
+                                                <span className="text-xs text-indigo-600 font-bold truncate pr-2">{attachmentName}</span>
+                                                <button 
+                                                    type="button" 
+                                                    onClick={() => setAttachmentName(null)}
+                                                    className="p-1 text-red-500 hover:bg-red-50 rounded-full flex-shrink-0"
+                                                    title="Remove"
+                                                >
+                                                    <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" /></svg>
+                                                </button>
+                                            </div>
+                                        ) : (
+                                            <span className="text-[10px] text-gray-400 italic">No document attached.</span>
+                                        )}
+                                    </div>
                                 </div>
                             </div>
-                         </div>
+                         )}
 
                          <div className="flex gap-3 mt-6">
                             {initialData && onDelete ? (

@@ -1,9 +1,9 @@
 
 import React, { useState, useEffect } from 'react';
 import { collection, getDocs, doc, updateDoc, setDoc, query, orderBy, limit, addDoc } from 'firebase/firestore';
-// Fix: Use separate type imports and named modular exports for auth functions
-import { initializeApp, deleteApp } from 'firebase/app';
-import type { FirebaseApp } from 'firebase/app';
+// Fix: Use @firebase/app path to resolve initializeApp, deleteApp, and FirebaseApp exports
+import { initializeApp, deleteApp } from '@firebase/app';
+import type { FirebaseApp } from '@firebase/app';
 import { getAuth, createUserWithEmailAndPassword, signOut } from 'firebase/auth';
 import { db, firebaseConfig } from '../../services/firebase';
 import { UserProfile, UserRole, VillageType, SystemLog } from '../../types';

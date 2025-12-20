@@ -1,3 +1,4 @@
+
 import { VillageType, VillageRole, VillageConfig, UserRole } from './types';
 
 export const VILLAGES: Record<VillageType, VillageConfig> = {
@@ -27,6 +28,17 @@ export const VILLAGES: Record<VillageType, VillageConfig> = {
   }
 };
 
+export const MUSHROOM_PRICES: Record<string, number> = {
+    'Button Mushroom': 10,
+    'Button': 10,
+    'Oyster Mushroom': 12,
+    'Oyster': 12,
+    'Shiitake Mushroom': 45,
+    'Shiitake': 45,
+    'Lion’s Mane': 50,
+    "Lion's Mane": 50
+};
+
 export const JOB_ROLES = [
   "Farmer",
   "Farm Manager",
@@ -35,6 +47,16 @@ export const JOB_ROLES = [
   "Financial Clerk",
   "Packaging Worker",
   "Sales Coordinator"
+];
+
+// Added missing STAFF_LIST constant
+export const STAFF_LIST = [
+  "Alice Worker",
+  "Bob Laborer",
+  "Charlie Checker",
+  "David Driver",
+  "Eve Examiner",
+  "Frank Farmer"
 ];
 
 export const USER_ROLES: UserRole[] = ['admin', 'user', 'finance'];

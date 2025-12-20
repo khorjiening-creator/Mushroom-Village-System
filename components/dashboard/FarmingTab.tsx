@@ -1,11 +1,13 @@
 
 import React, { useState, useEffect, useMemo } from 'react';
-import { addDoc, collection, query, orderBy, limit, getDocs, where, setDoc, doc, updateDoc, increment, getDoc, deleteDoc } from 'firebase/firestore';
+import { addDoc, collection, query, orderBy, limit, getDocs, where, setDoc, doc, updateDoc, increment, getDoc, deleteDoc, arrayUnion } from 'firebase/firestore';
 import { db } from '../../services/firebase';
-import { ActivityLog, VillageType } from '../../types';
+import { ActivityLog, VillageType, FinancialRecord, ProcessingLog } from '../../types';
+import { MUSHROOM_PRICES } from '../../constants';
 
 interface ExtendedActivityLog extends ActivityLog {
     totalWastage?: number;
+    stepsCompleted?: string[];
 }
 
 interface FarmingTabProps {
@@ -19,30 +21,26 @@ interface FarmingTabProps {
 }
 
 /**
- * AUTOMATED DEDUCTION RECIPES BASED ON ITEM CODES
- * Straw: MAT-573260995
- * Spawn: MAT-282015830
- * Bran: MAT-406637503
- * Gypsum: MAT-446059102
- * Water: MAT-545594408 (Quantity stored in L, price per 10L)
+ * AUTOMATED DEDUCTION RECIPES (Per 1kg of Predicted Mushroom Yield)
+ * Values represent requirements for ONE kg of output.
  */
-const ACTIVITY_RECIPES: Record<string, { id: string, name: string, amount: number }[]> = {
+const ACTIVITY_RECIPES: Record<string, { id: string, name: string, perKgAmount: number }[]> = {
     'SUBSTRATE_PREP': [
-        { id: "MAT-573260995", name: "Straw", amount: 20 },
-        { id: "MAT-545594408", name: "Water", amount: 50 }, // 50 Liters
+        { id: "MAT-573260995", name: "Straw", perKgAmount: 20 },
+        { id: "MAT-545594408", name: "Water", perKgAmount: 50 },
     ],
     'SUBSTRATE_MIXING': [
-        { id: "MAT-406637503", name: "Bran", amount: 0.5 },
-        { id: "MAT-446059102", name: "Gypsum", amount: 0.2 },
+        { id: "MAT-406637503", name: "Bran", perKgAmount: 0.5 },
+        { id: "MAT-446059102", name: "Gypsum", perKgAmount: 0.2 },
     ],
     'SPAWNING': [
-        { id: "MAT-282015830", name: "Spawn", amount: 1 },
+        { id: "MAT-282015830", name: "Spawn", perKgAmount: 1 },
     ],
     'HUMIDITY_CONTROL': [
-        { id: "MAT-545594408", name: "Water", amount: 5 }, // 5 Liters
+        { id: "MAT-545594408", name: "Water", perKgAmount: 5 },
     ],
     'FLUSH_REHYDRATION': [
-        { id: "MAT-545594408", name: "Water", amount: 20 }, // 20 Liters
+        { id: "MAT-545594408", name: "Water", perKgAmount: 20 },
     ]
 };
 
@@ -115,6 +113,7 @@ export const FarmingTab: React.FC<FarmingTabProps> = ({
   const [editBatchStrain, setEditBatchStrain] = useState('');
   const [editBatchDetails, setEditBatchDetails] = useState('');
   const [editBatchYield, setEditBatchYield] = useState(''); 
+  const [editBatchPredictedYield, setEditBatchPredictedYield] = useState('');
   const [isSavingEdit, setIsSavingEdit] = useState(false);
 
   // --- State for Productivity ---
@@ -138,8 +137,12 @@ export const FarmingTab: React.FC<FarmingTabProps> = ({
                   const actual = data.totalYield || 0;
                   const wastage = data.totalWastage || 0;
                   const totalOutput = actual + wastage;
+                  
+                  // Requirement: Must complete Spawning before weigh-in
+                  const steps = data.stepsCompleted || [];
+                  const isSpawningDone = steps.includes('SPAWNING');
 
-                  if (predicted === 0 || totalOutput < predicted) {
+                  if (isSpawningDone && (predicted === 0 || totalOutput < predicted)) {
                       batches.add(doc.id);
                   }
               });
@@ -314,7 +317,7 @@ export const FarmingTab: React.FC<FarmingTabProps> = ({
       setIsSubmittingActivity(true);
       try {
           const finalBatchId = activityBatchId.trim();
-          const newLog: ActivityLog = {
+          const newLog: any = {
               type: activityType as any,
               details: activityNotes,
               userEmail: userEmail,
@@ -323,33 +326,68 @@ export const FarmingTab: React.FC<FarmingTabProps> = ({
               batchId: finalBatchId,
           };
           
+          let yieldMultiplier = 0;
+
           if (activityType === 'SUBSTRATE_PREP') {
+              if (!predictedYield || parseFloat(predictedYield) <= 0) {
+                  throw new Error("Predicted yield is required for Substrate Prep.");
+              }
               newLog.mushroomStrain = batchStrain;
-              if (predictedYield) newLog.predictedYield = parseFloat(predictedYield);
+              yieldMultiplier = parseFloat(predictedYield) || 0;
+              newLog.predictedYield = yieldMultiplier;
+              newLog.stepsCompleted = ['SUBSTRATE_PREP']; // Initialize steps tracking
+              
               if (!finalBatchId) throw new Error("Batch ID is required for Substrate Prep");
               await setDoc(doc(db, collectionName, finalBatchId), newLog);
               
-              // Automated Material Deduction based on item codes
               const recipe = ACTIVITY_RECIPES[activityType] || [];
               for (const item of recipe) {
-                  await performAutoDeduction(item.id, item.amount, "Substrate Prep", finalBatchId);
+                  const totalDeduct = item.perKgAmount * yieldMultiplier;
+                  if (totalDeduct > 0) {
+                    await performAutoDeduction(item.id, totalDeduct, "Substrate Prep", finalBatchId);
+                  }
               }
-              onSuccess("Batch created & Substrate materials automatically deducted.");
+              onSuccess(`Batch created. ${yieldMultiplier}kg capacity materials deducted.`);
           } else {
               if (!finalBatchId) {
                   onError("Please select a Batch ID to log this activity.");
                   setIsSubmittingActivity(false);
                   return;
               }
+
+              // --- Sequential Workflow Logic ---
+              const batchRef = doc(db, collectionName, finalBatchId);
+              const batchSnap = await getDoc(batchRef);
+              if (!batchSnap.exists()) throw new Error("Batch record not found.");
+              const batchData = batchSnap.data();
+              const completedSteps = batchData.stepsCompleted || [];
+
+              if (activityType === 'SUBSTRATE_MIXING') {
+                  if (!completedSteps.includes('SUBSTRATE_PREP')) {
+                      throw new Error("Must complete Substrate Prep before Substrate Mixing.");
+                  }
+                  await updateDoc(batchRef, { stepsCompleted: arrayUnion('SUBSTRATE_MIXING') });
+              } else if (activityType === 'SPAWNING') {
+                  if (!completedSteps.includes('SUBSTRATE_MIXING')) {
+                      throw new Error("Must complete Substrate Mixing before Spawning.");
+                  }
+                  await updateDoc(batchRef, { stepsCompleted: arrayUnion('SPAWNING') });
+              }
+
+              // Fetch the batch's predicted yield for the multiplier
+              yieldMultiplier = batchData.predictedYield || 0;
+
               await addDoc(collection(db, collectionName, finalBatchId, "activity_logs"), newLog);
               
-              // Automated Material Deduction for incremental steps (Mixing, Spawning, etc)
               const recipe = ACTIVITY_RECIPES[activityType] || [];
               if (recipe.length > 0) {
                   for (const item of recipe) {
-                      await performAutoDeduction(item.id, item.amount, activityType.replace('_', ' '), finalBatchId);
+                      const totalDeduct = item.perKgAmount * yieldMultiplier;
+                      if (totalDeduct > 0) {
+                        await performAutoDeduction(item.id, totalDeduct, activityType.replace('_', ' '), finalBatchId);
+                      }
                   }
-                  onSuccess(`${activityType.replace('_', ' ').toLowerCase()} logged & materials deducted.`);
+                  onSuccess(`${activityType.replace('_', ' ')} logged. Materials deducted for ${yieldMultiplier}kg capacity.`);
               } else {
                   onSuccess("Activity logged successfully.");
               }
@@ -371,7 +409,7 @@ export const FarmingTab: React.FC<FarmingTabProps> = ({
           if (onActivityLogged) onActivityLogged();
       } catch (error: any) {
           console.error("Error logging activity", error);
-          onError("Failed to log activity: " + error.message);
+          onError(error.message);
       } finally {
           setIsSubmittingActivity(false);
       }
@@ -384,16 +422,67 @@ export const FarmingTab: React.FC<FarmingTabProps> = ({
           const weight = parseFloat(harvestWeight);
           const harvestCollection = villageId === VillageType.A ? "harvestYield_A" : villageId === VillageType.B ? "harvestYield_B" : null;
           if (!harvestCollection) throw new Error("Invalid village for harvest logging");
+          
           const timestamp = new Date().toISOString();
           const harvestDocRef = doc(db, harvestCollection, harvestBatch);
+          
+          // 1. Log Harvest Yield
           await setDoc(harvestDocRef, { batchId: harvestBatch, strain: harvestStrain, totalYield: increment(weight), lastRecordedBy: userEmail, timestamp, villageId }, { merge: true });
+          
           if (harvestBatch) {
               await updateDoc(doc(db, collectionName, harvestBatch), { totalYield: increment(weight) });
               await addDoc(collection(db, collectionName, harvestBatch, "activity_logs"), { type: 'HARVEST', details: `Harvested ${weight}kg of ${harvestStrain}`, userEmail, timestamp, villageId, batchId: harvestBatch, totalYield: weight });
           }
+
+          // 2. AUTOGENERATE FINANCIAL SALES TRANSACTION (for A and B)
+          const pricePerKg = MUSHROOM_PRICES[harvestStrain] || 10;
+          const totalSaleAmount = weight * pricePerKg;
+          const finColName = villageId === VillageType.A ? "financialRecords_A" : "financialRecords_B";
+          const transactionId = "TXN-SALE-" + Date.now().toString().slice(-6);
+          
+          const saleRecord: Partial<FinancialRecord> = {
+            transactionId,
+            type: 'INCOME',
+            category: 'Sales',
+            amount: totalSaleAmount,
+            weightKg: weight,
+            date: new Date().toISOString().split('T')[0],
+            batchId: harvestBatch,
+            description: `Auto-generated sale from harvest: ${weight}kg of ${harvestStrain} @ RM${pricePerKg}/kg`,
+            recordedBy: 'System/Automation',
+            villageId: villageId,
+            status: 'PENDING', // Initialized as pending to allow manual payment receipt confirmation
+            createdAt: timestamp
+          };
+          await setDoc(doc(db, finColName, transactionId), saleRecord);
+
+          // 3. VILLAGE C LINKAGE: Create processing intake log automatically
+          const intakeBatchId = `C-INT-${harvestBatch}-${Date.now().toString().slice(-4)}`;
+          const packagingDueTime = new Date(new Date().getTime() + 2 * 3600000).toISOString();
+          
+          const processingIntake: Omit<ProcessingLog, 'id'> = {
+              batchId: harvestBatch, // Use the actual farm batch ID for tracking
+              harvestId: harvestBatch,
+              sourceVillage: villageId,
+              mushroomType: harvestStrain,
+              statedWeight: weight,
+              actualWeight: weight, // Auto-synced for now
+              variance: 0,
+              receivedBy: 'Village Hub Automation',
+              intakeTimestamp: timestamp,
+              packagingDueTime,
+              status: 'IN_PROGRESS',
+              currentStep: 2, // Moves directly to QC
+              villageId: VillageType.C,
+              timestamp: timestamp,
+              hasImageEvidence: false
+          };
+          
+          await addDoc(collection(db, "processing_logs"), processingIntake);
+
           setHarvestBatch('');
           setHarvestWeight('');
-          onSuccess("Harvest recorded & Batch Yield Updated.");
+          onSuccess(`Harvest recorded. RM${totalSaleAmount.toFixed(2)} sale generated & synced to Village C Hub.`);
           fetchBatches(); 
           if (onActivityLogged) onActivityLogged();
       } catch (error: any) {
@@ -566,6 +655,7 @@ export const FarmingTab: React.FC<FarmingTabProps> = ({
       setEditBatchStrain(batch.mushroomStrain || 'Oyster');
       setEditBatchDetails(batch.details || '');
       setEditBatchYield((batch.totalYield ?? 0).toString());
+      setEditBatchPredictedYield((batch.predictedYield ?? 0).toString());
       setIsEditingBatch(true);
   };
 
@@ -574,7 +664,12 @@ export const FarmingTab: React.FC<FarmingTabProps> = ({
       if (!selectedBatch?.id) return;
       setIsSavingEdit(true);
       try {
-          await updateDoc(doc(db, collectionName, selectedBatch.id), { mushroomStrain: editBatchStrain, details: editBatchDetails, totalYield: parseFloat(editBatchYield) || 0 });
+          await updateDoc(doc(db, collectionName, selectedBatch.id), { 
+              mushroomStrain: editBatchStrain, 
+              details: editBatchDetails, 
+              totalYield: parseFloat(editBatchYield) || 0,
+              predictedYield: parseFloat(editBatchPredictedYield) || 0
+          });
           onSuccess("Batch updated successfully.");
           fetchBatches(); setSelectedBatch(null); setIsEditingBatch(false);
       } catch (error: any) {
@@ -585,12 +680,63 @@ export const FarmingTab: React.FC<FarmingTabProps> = ({
       }
   };
 
+  // Fix: Added missing handleExportCSV function to resolve the 'Cannot find name handleExportCSV' error
+  const handleExportCSV = () => {
+    if (batchList.length === 0) {
+        onError("No data to export.");
+        return;
+    }
+
+    const headers = ["Date", "Batch ID", "Strain", "Status", "Actual Yield (kg)", "Predicted Yield (kg)", "Wastage (kg)"];
+    const rows = batchList.map(log => {
+        const predicted = log.predictedYield || 0;
+        const actual = log.totalYield || 0;
+        const wastage = log.totalWastage || 0;
+        const totalOutput = actual + wastage;
+        
+        let statusText = 'In Progress';
+        if (predicted > 0 && totalOutput >= predicted) {
+            statusText = 'Completed';
+        }
+
+        return [
+            new Date(log.timestamp).toLocaleDateString(),
+            log.batchId || log.id,
+            log.mushroomStrain || '-',
+            statusText,
+            actual.toFixed(2),
+            predicted.toFixed(2),
+            wastage.toFixed(2)
+        ];
+    });
+
+    const csvContent = [
+        headers.join(","),
+        ...rows.map(row => row.join(","))
+    ].join("\n");
+
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.setAttribute("href", url);
+    link.setAttribute("download", `production_report_${villageId}_${new Date().toISOString().split('T')[0]}.csv`);
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    onSuccess("Report exported to CSV.");
+  };
+
   const wastageCandidates = useMemo(() => {
     return batchList.filter(b => {
+        // Requirement: Must complete Spawning before wastage logging
+        const steps = (b as any).stepsCompleted || [];
+        const isSpawningDone = steps.includes('SPAWNING');
+        
         const pred = b.predictedYield || 0;
         const act = b.totalYield || 0;
         const waste = b.totalWastage || 0;
-        return pred > 0 && (act + waste) < pred;
+        return isSpawningDone && pred > 0 && (act + waste) < pred;
     });
   }, [batchList]);
 
@@ -642,24 +788,6 @@ export const FarmingTab: React.FC<FarmingTabProps> = ({
       return { totalEfficiencyLoss, wastageRate: totalPredicted > 0 ? (totalEfficiencyLoss / totalPredicted) * 100 : 0, totalRecordedWastage };
   }, [batchList]);
 
-  const handleExportCSV = () => {
-      let csvContent = ""; let filename = "";
-      if (reportType === 'BATCH') {
-          const headers = ["Batch ID", "Date Created", "Strain", "Actual Yield (kg)", "Predicted Yield (kg)", "Recorded Wastage (kg)", "Harvest Yet Done (kg)", "Status"];
-          const rows = batchList.map(batch => { const predicted = batch.predictedYield || 0; const actual = batch.totalYield || 0; const wastage = batch.totalWastage || 0; const remaining = Math.max(0, predicted - (actual + wastage)); const totalOutput = actual + wastage; let status = predicted > 0 ? (totalOutput >= predicted ? "Completed" : "In Progress") : "Unknown"; return [batch.batchId || batch.id, new Date(batch.timestamp).toLocaleDateString(), batch.mushroomStrain || '-', actual.toFixed(2), predicted.toFixed(2), wastage.toFixed(2), remaining.toFixed(2), status]; });
-          csvContent = "data:text/csv;charset=utf-8," + [headers.join(','), ...rows.map(e => e.join(','))].join('\n'); filename = `batch_report_${villageId}_${filterStartDate}.csv`;
-      } else if (reportType === 'PREDICTION') {
-         const headers = ["Strain", "Active Batches", "Predicted Total (kg)", "Harvested So Far (kg)", "Recorded Wastage (kg)", "Remaining Forecast (kg)"];
-         const rows = predictionStats.map(stat => { const remaining = Math.max(0, stat.predicted - stat.actual - stat.recordedWastage); return [stat.strain, stat.activeBatches, stat.predicted.toFixed(2), stat.actual.toFixed(2), stat.recordedWastage.toFixed(2), remaining.toFixed(2)]; });
-         csvContent = "data:text/csv;charset=utf-8," + [headers.join(','), ...rows.map(e => e.join(','))].join('\n'); filename = `prediction_report_${villageId}.csv`;
-      } else {
-          const headers = ["Month", "Total Harvested Yield (kg)", "Avg Daily (kg)"];
-          const rows = monthlyStats.map(m => [m.month, m.total.toFixed(2), (m.total / 30).toFixed(2)]);
-          csvContent = "data:text/csv;charset=utf-8," + [headers.join(','), ...rows.map(e => e.join(','))].join('\n'); filename = `monthly_production_${villageId}.csv`;
-      }
-      const encodedUri = encodeURI(csvContent); const link = document.createElement("a"); link.setAttribute("href", encodedUri); link.setAttribute("download", filename); document.body.appendChild(link); link.click(); document.body.removeChild(link);
-  };
-
   return (
     <div className="space-y-6 animate-fade-in-up">
         {/* View Switcher */}
@@ -700,7 +828,7 @@ export const FarmingTab: React.FC<FarmingTabProps> = ({
                                         <div className="relative">
                                             <input type="text" list="batchOptions" value={activityBatchId} onChange={(e) => setActivityBatchId(e.target.value)} className="block w-full rounded-md border-gray-300 shadow-sm focus:border-green-500 focus:ring-green-500 sm:text-sm border p-2" placeholder="Select active batch..." />
                                             <datalist id="batchOptions">
-                                                {availableBatches.map(b => <option key={b} value={b} />)}
+                                                {batchList.filter(b => b.batchStatus !== 'COMPLETED').map(b => <option key={b.id} value={b.batchId || b.id} />)}
                                             </datalist>
                                         </div>
                                     )}
@@ -719,8 +847,8 @@ export const FarmingTab: React.FC<FarmingTabProps> = ({
                                         </select>
                                     </div>
                                     <div>
-                                        <label className="block text-sm font-medium text-gray-700 mb-1">Predicted Yield (kg)</label>
-                                        <input type="number" step="0.1" value={predictedYield} onChange={(e) => setPredictedYield(e.target.value)} className="block w-full rounded-md border-gray-300 shadow-sm focus:border-green-500 focus:ring-green-500 sm:text-sm border p-2" placeholder="e.g. 150" />
+                                        <label className="block text-sm font-medium text-gray-700 mb-1">Predicted Yield (kg) <span className="text-red-500">*</span></label>
+                                        <input type="number" step="0.1" required value={predictedYield} onChange={(e) => setPredictedYield(e.target.value)} className="block w-full rounded-md border-gray-300 shadow-sm focus:border-green-500 focus:ring-green-500 sm:text-sm border p-2" placeholder="e.g. 150" />
                                     </div>
                                 </div>
                             )}
@@ -919,15 +1047,16 @@ export const FarmingTab: React.FC<FarmingTabProps> = ({
                                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Batch ID</th>
                                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Strain</th>
                                     <th className="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase">Status</th>
-                                    <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Yield</th>
+                                    <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Yield (kg)</th>
+                                    <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Est. Yield (kg)</th>
                                     <th className="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase">Actions</th>
                                 </tr>
                             </thead>
                             <tbody className="bg-white divide-y divide-gray-200">
                                 {isLoadingBatches ? (
-                                    <tr><td colSpan={6} className="px-6 py-10 text-center text-sm text-gray-500">Loading...</td></tr>
+                                    <tr><td colSpan={7} className="px-6 py-10 text-center text-sm text-gray-500">Loading...</td></tr>
                                 ) : filteredRegistryList.length === 0 ? (
-                                    <tr><td colSpan={6} className="px-6 py-10 text-center text-sm text-gray-500">No batches matching criteria.</td></tr>
+                                    <tr><td colSpan={7} className="px-6 py-10 text-center text-sm text-gray-500">No batches matching criteria.</td></tr>
                                 ) : (
                                     filteredRegistryList.map((log) => {
                                         const predicted = log.predictedYield || 0;
@@ -953,7 +1082,8 @@ export const FarmingTab: React.FC<FarmingTabProps> = ({
                                                         {statusText}
                                                     </span>
                                                 </td>
-                                                <td className="px-6 py-4 whitespace-nowrap text-sm font-bold text-green-700 text-right">{log.totalYield ? `${log.totalYield.toFixed(1)} kg` : '-'}</td>
+                                                <td className="px-6 py-4 whitespace-nowrap text-sm font-bold text-green-700 text-right">{log.totalYield ? `${log.totalYield.toFixed(1)}` : '-'}</td>
+                                                <td className="px-6 py-4 whitespace-nowrap text-sm font-bold text-indigo-700 text-right">{log.predictedYield ? `${log.predictedYield.toFixed(1)}` : '-'}</td>
                                                 <td className="px-6 py-4 whitespace-nowrap text-center">
                                                     <div className="flex justify-center space-x-2">
                                                         <button onClick={() => fetchBatchDetails(log)} className="text-indigo-600 hover:text-indigo-900 text-xs font-medium border border-indigo-200 px-2 py-1 rounded">View</button>
@@ -1067,7 +1197,10 @@ export const FarmingTab: React.FC<FarmingTabProps> = ({
                             <form onSubmit={handleUpdateBatch} className="space-y-4">
                                 <div><label className="block text-sm font-medium text-gray-700 mb-1">Mushroom Strain</label><select value={editBatchStrain} onChange={(e) => setEditBatchStrain(e.target.value)} className="block w-full rounded-md border-gray-600 shadow-sm focus:border-green-500 focus:ring-green-500 sm:text-sm p-2.5 bg-gray-700 text-white"><option value="Oyster">Oyster</option><option value="Shiitake">Shiitake</option><option value="Button">Button</option><option value="Lion's Mane">Lion's Mane</option></select></div>
                                 <div><label className="block text-sm font-medium text-gray-700 mb-1">Initial Notes</label><textarea value={editBatchDetails} onChange={(e) => setEditBatchDetails(e.target.value)} rows={4} className="block w-full rounded-md border-gray-600 shadow-sm focus:border-green-500 focus:ring-green-500 sm:text-sm p-2.5 bg-gray-700 text-white" /></div>
-                                <div className="pt-2"><label className="block text-sm font-medium text-gray-700 mb-1">Actual Production Weight (kg)</label><input type="number" step="0.1" value={editBatchYield} onChange={(e) => setEditBatchYield(e.target.value)} className="block w-full rounded-md border-gray-600 shadow-sm focus:border-green-500 focus:ring-green-500 sm:text-sm p-2.5 bg-gray-700 text-white" /><p className="text-xs text-amber-600 mt-1 font-medium">Warning: Overwriting this manually resets calculated harvest sums.</p></div>
+                                <div className="grid grid-cols-2 gap-4">
+                                    <div className="pt-2"><label className="block text-sm font-medium text-gray-700 mb-1">Estimated Yield (kg)</label><input type="number" step="0.1" value={editBatchPredictedYield} onChange={(e) => setEditBatchPredictedYield(e.target.value)} className="block w-full rounded-md border-gray-600 shadow-sm focus:border-green-500 focus:ring-green-500 sm:text-sm p-2.5 bg-gray-700 text-white" /></div>
+                                    <div className="pt-2"><label className="block text-sm font-medium text-gray-700 mb-1">Actual Production Weight (kg)</label><input type="number" step="0.1" value={editBatchYield} onChange={(e) => setEditBatchYield(e.target.value)} className="block w-full rounded-md border-gray-600 shadow-sm focus:border-green-500 focus:ring-green-500 sm:text-sm p-2.5 bg-gray-700 text-white" /><p className="text-xs text-amber-600 mt-1 font-medium">Warning: Resets calculated harvest sums.</p></div>
+                                </div>
                                 <div className="flex justify-end space-x-3 pt-4 border-t border-gray-100"><button type="button" onClick={() => setIsEditingBatch(false)} className="px-4 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 hover:bg-gray-50">Cancel</button><button type="submit" disabled={isSavingEdit} className={`px-4 py-2 rounded-md text-sm font-medium text-white ${theme.button}`}>{isSavingEdit ? 'Saving...' : 'Save Changes'}</button></div>
                             </form>
                         ) : (

@@ -1,5 +1,6 @@
+
 import React, { useState, useMemo } from 'react';
-import { FinancialRecord, UserRole } from '../../types';
+import { FinancialRecord, UserRole, VillageType } from '../../types';
 
 interface FinancialsTabProps {
     records: FinancialRecord[];
@@ -14,11 +15,12 @@ interface FinancialsTabProps {
     chartFilter?: 'DAILY' | 'WEEKLY' | 'MONTHLY' | 'YEARLY';
     setChartFilter?: (f: 'DAILY' | 'WEEKLY' | 'MONTHLY' | 'YEARLY') => void;
     onFilterChange: (period: string, category: string, status: string) => void;
+    villageId?: VillageType;
 }
 
 export const FinancialsTab: React.FC<FinancialsTabProps> = ({ 
     records, onAddRecord, onEditRecord, onDeleteRecord, onSettleRecord, onPrintRecord, userRole, theme, 
-    financeOverviewData, chartFilter, setChartFilter, onFilterChange 
+    financeOverviewData, chartFilter, setChartFilter, onFilterChange, villageId
 }) => {
     const [financialPeriod, setFinancialPeriod] = useState<'ALL' | 'MONTH' | 'TODAY'>('MONTH');
     const [filterCategory, setFilterCategory] = useState('ALL');
@@ -49,140 +51,215 @@ export const FinancialsTab: React.FC<FinancialsTabProps> = ({
         return records.filter(r => r.status === 'PENDING' && isOverdue(r.date)).length;
     }, [records]);
 
+    const performanceData = useMemo(() => {
+        const incomeRecords = records.filter(r => r.type === 'INCOME');
+        const expenseRecords = records.filter(r => r.type === 'EXPENSE');
+
+        const salesIncome = incomeRecords.filter(r => r.category === 'Sales').reduce((acc, curr) => acc + curr.amount, 0);
+        const materialCosts = expenseRecords.filter(r => r.category === 'Supplies').reduce((acc, curr) => acc + curr.amount, 0);
+        const otherExpenses = expenseRecords.filter(r => r.category !== 'Supplies').reduce((acc, curr) => acc + curr.amount, 0);
+        const otherIncome = incomeRecords.filter(r => r.category !== 'Sales').reduce((acc, curr) => acc + curr.amount, 0);
+
+        return {
+            salesIncome,
+            materialCosts,
+            otherExpenses,
+            otherIncome,
+            totalIncome: salesIncome + otherIncome,
+            totalExpense: materialCosts + otherExpenses,
+            grossMargin: salesIncome - materialCosts,
+            netProfit: (salesIncome + otherIncome) - (materialCosts + otherExpenses)
+        };
+    }, [records]);
+
+    const handlePrintPerformance = (type: 'MONTHLY' | 'YEARLY') => {
+        const printWindow = window.open('', '_blank');
+        if (!printWindow) return;
+
+        const dateStr = new Date().toLocaleDateString();
+        const p = performanceData;
+        const reportTitle = `${type === 'MONTHLY' ? 'Monthly' : 'Yearly'} Financial Performance Report`;
+
+        printWindow.document.write(`
+            <html>
+                <head>
+                    <title>${reportTitle}</title>
+                    <style>
+                        body { font-family: 'Inter', sans-serif; padding: 40px; color: #333; line-height: 1.6; }
+                        .header { border-bottom: 3px solid #1e40af; padding-bottom: 20px; margin-bottom: 30px; display: flex; justify-content: space-between; align-items: flex-end; }
+                        .title { font-size: 28px; font-weight: 800; color: #1e3a8a; margin: 0; text-transform: uppercase; letter-spacing: -0.5px; }
+                        .subtitle { font-size: 14px; color: #64748b; margin: 5px 0 0 0; font-weight: 600; }
+                        .section-title { font-size: 16px; font-weight: 800; color: #1e40af; text-transform: uppercase; border-bottom: 1px solid #e2e8f0; padding-bottom: 8px; margin: 30px 0 15px 0; }
+                        .metrics-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 30px; }
+                        .metric-card { background: #f8fafc; border: 1px solid #e2e8f0; padding: 20px; border-radius: 12px; }
+                        .metric-label { font-size: 11px; font-weight: 700; color: #64748b; text-transform: uppercase; margin-bottom: 4px; }
+                        .metric-value { font-size: 24px; font-weight: 800; color: #1e293b; }
+                        .metric-value.positive { color: #15803d; }
+                        .metric-value.negative { color: #b91c1c; }
+                        table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+                        th { text-align: left; background: #f1f5f9; padding: 12px 10px; font-size: 11px; text-transform: uppercase; font-weight: 700; color: #475569; }
+                        td { padding: 10px; border-bottom: 1px solid #f1f5f9; font-size: 13px; }
+                        .total-row { background: #f8fafc; font-weight: 800; }
+                        .footer { margin-top: 50px; text-align: center; font-size: 10px; color: #94a3b8; border-top: 1px solid #f1f5f9; padding-top: 20px; }
+                        @media print { .no-print { display: none; } body { padding: 20px; } }
+                    </style>
+                </head>
+                <body>
+                    <div class="header">
+                        <div>
+                            <h1 class="title">${reportTitle}</h1>
+                            <p class="subtitle">${villageId || 'Mushroom Supply Chain'}</p>
+                        </div>
+                        <div style="text-align: right; font-size: 12px; color: #64748b;">
+                            Period: ${type === 'MONTHLY' ? 'Current Month' : 'Current Year'}<br>
+                            Generated: ${dateStr}
+                        </div>
+                    </div>
+
+                    <div class="section-title">Executive Summary</div>
+                    <div class="metrics-grid">
+                        <div class="metric-card">
+                            <div class="metric-label">Sales Revenue (In Flow)</div>
+                            <div class="metric-value positive">RM ${p.salesIncome.toLocaleString(undefined, {minimumFractionDigits: 2})}</div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="metric-label">Input Costs (Out Flow)</div>
+                            <div class="metric-value negative">RM ${p.materialCosts.toLocaleString(undefined, {minimumFractionDigits: 2})}</div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="metric-label">Total Cash Inflow</div>
+                            <div class="metric-value positive">RM ${p.totalIncome.toLocaleString(undefined, {minimumFractionDigits: 2})}</div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="metric-label">Total Cash Outflow</div>
+                            <div class="metric-value negative">RM ${p.totalExpense.toLocaleString(undefined, {minimumFractionDigits: 2})}</div>
+                        </div>
+                    </div>
+
+                    <div class="section-title">Net Balance</div>
+                    <div class="metric-card" style="background: #eff6ff; border-color: #bfdbfe;">
+                        <div class="metric-label" style="color: #1e40af;">Operating Surplus/Deficit</div>
+                        <div class="metric-value ${p.netProfit >= 0 ? 'positive' : 'negative'}">RM ${p.netProfit.toLocaleString(undefined, {minimumFractionDigits: 2})}</div>
+                    </div>
+
+                    <div class="footer">
+                        This document is a certified financial snapshot generated by the Mushroom Village ERP.
+                    </div>
+                    <script>window.onload = () => { window.print(); window.close(); }</script>
+                </body>
+            </html>
+        `);
+        printWindow.document.close();
+    };
+
     const canDelete = userRole === 'admin' || userRole === 'finance';
     const canEdit = userRole === 'admin' || userRole === 'finance';
 
     return (
         <div className="space-y-6 animate-fade-in-up">
+            {/* Performance Summary Cards (For A and B specifically) */}
+            {(villageId === VillageType.A || villageId === VillageType.B) && (
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                    <div className="bg-white p-5 rounded-xl border border-gray-200 shadow-sm">
+                        <span className="text-[10px] font-black text-gray-400 uppercase tracking-widest block mb-1">Total In Flow</span>
+                        <div className="text-2xl font-black text-emerald-600">RM{performanceData.totalIncome.toLocaleString()}</div>
+                        <p className="text-[9px] text-gray-400 mt-1 font-bold">Sales & Investments</p>
+                    </div>
+                    <div className="bg-white p-5 rounded-xl border border-gray-200 shadow-sm">
+                        <span className="text-[10px] font-black text-gray-400 uppercase tracking-widest block mb-1">Total Out Flow</span>
+                        <div className="text-2xl font-black text-rose-500">RM{performanceData.totalExpense.toLocaleString()}</div>
+                        <p className="text-[9px] text-gray-400 mt-1 font-bold italic">Procurement & Ops</p>
+                    </div>
+                    <div className="bg-white p-5 rounded-xl border border-gray-200 shadow-sm">
+                        <span className="text-[10px] font-black text-gray-400 uppercase tracking-widest block mb-1">Net Flow</span>
+                        <div className={`text-2xl font-black ${performanceData.netProfit >= 0 ? 'text-indigo-600' : 'text-rose-600'}`}>
+                            RM{performanceData.netProfit.toLocaleString()}
+                        </div>
+                    </div>
+                    <div className="bg-gray-900 p-5 rounded-xl border border-gray-800 shadow-xl flex flex-col justify-between">
+                        <span className="text-[10px] font-black text-gray-500 uppercase tracking-widest block mb-1">Print Performance</span>
+                        <div className="flex gap-2 mt-2">
+                            <button 
+                                onClick={() => handlePrintPerformance('MONTHLY')}
+                                className="flex-1 bg-blue-600 hover:bg-blue-700 text-white text-[9px] font-black uppercase py-2 rounded transition-all"
+                            >
+                                Monthly
+                            </button>
+                            <button 
+                                onClick={() => handlePrintPerformance('YEARLY')}
+                                className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white text-[9px] font-black uppercase py-2 rounded transition-all"
+                            >
+                                Yearly
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
             {/* Finance Dashboard Section */}
             {isFinanceOrAdmin && financeOverviewData && (
                 <div className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
                     <div className="px-6 py-4 border-b border-gray-100 bg-gray-50 flex justify-between items-center">
                         <div>
-                            <h2 className="text-lg font-bold text-gray-900">Financial Insights</h2>
-                            <p className="text-xs text-gray-500">Global performance and trend analysis</p>
+                            <h2 className="text-lg font-bold text-gray-900">Cash Flow Trends</h2>
+                            <p className="text-xs text-gray-500">In flow vs Out flow analysis</p>
                         </div>
-                        <button 
-                            onClick={() => setShowOverview(!showOverview)}
-                            className="text-indigo-600 text-xs font-bold hover:text-indigo-800 transition-colors uppercase tracking-widest"
-                        >
-                            {showOverview ? 'Hide Summary' : 'Show Summary'}
-                        </button>
+                        <div className="flex items-center gap-4">
+                             {setChartFilter && (
+                                <div className="flex bg-gray-100 p-1 rounded-lg">
+                                    {(['DAILY', 'WEEKLY', 'MONTHLY', 'YEARLY'] as const).map(filter => (
+                                        <button 
+                                            key={filter}
+                                            onClick={() => setChartFilter(filter)}
+                                            className={`px-3 py-1 text-[10px] font-bold rounded-md transition-colors ${chartFilter === filter ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
+                                        >
+                                            {filter.charAt(0) + filter.slice(1).toLowerCase()}
+                                        </button>
+                                    ))}
+                                </div>
+                            )}
+                            <button 
+                                onClick={() => setShowOverview(!showOverview)}
+                                className="text-indigo-600 text-xs font-bold hover:text-indigo-800 transition-colors uppercase tracking-widest"
+                            >
+                                {showOverview ? 'Hide Summary' : 'Show Summary'}
+                            </button>
+                        </div>
                     </div>
 
                     {showOverview && (
                         <div className="p-6 space-y-6 animate-fade-in">
-                            {/* KPI Cards */}
-                            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-                                <div className="bg-emerald-50 border border-emerald-100 p-4 rounded-xl">
-                                    <span className="text-[10px] font-bold text-emerald-600 uppercase tracking-wider block mb-1">Total Revenue</span>
-                                    <div className="text-2xl font-black text-emerald-800">RM{financeOverviewData.totalRevenue.toLocaleString(undefined, {minimumFractionDigits: 2})}</div>
-                                </div>
-                                <div className="bg-rose-50 border border-rose-100 p-4 rounded-xl">
-                                    <span className="text-[10px] font-bold text-rose-600 uppercase tracking-wider block mb-1">Total Expenses</span>
-                                    <div className="text-2xl font-black text-rose-800">RM{financeOverviewData.totalExpenses.toLocaleString(undefined, {minimumFractionDigits: 2})}</div>
-                                </div>
-                                <div className="bg-indigo-50 border border-indigo-100 p-4 rounded-xl">
-                                    <span className="text-[10px] font-bold text-indigo-600 uppercase tracking-wider block mb-1">Net Cashflow</span>
-                                    <div className={`text-2xl font-black ${financeOverviewData.netCashFlow >= 0 ? 'text-indigo-800' : 'text-rose-600'}`}>
-                                        {financeOverviewData.netCashFlow < 0 ? '-' : ''}RM{Math.abs(financeOverviewData.netCashFlow).toLocaleString(undefined, {minimumFractionDigits: 2})}
-                                    </div>
-                                </div>
-                                <div className="bg-orange-50 border border-orange-100 p-4 rounded-xl">
-                                    <span className="text-[10px] font-bold text-orange-600 uppercase tracking-wider block mb-1">Outstanding (Rec)</span>
-                                    <div className="text-2xl font-black text-orange-800">RM{financeOverviewData.totalReceivables.toLocaleString(undefined, {minimumFractionDigits: 2})}</div>
-                                </div>
-                            </div>
-
-                            {/* Charts & Outstanding Lists */}
-                            <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
-                                {/* Trend Chart */}
-                                <div className="xl:col-span-2 border border-gray-100 rounded-xl p-4">
-                                    <div className="flex justify-between items-center mb-6">
-                                        <h3 className="text-sm font-bold text-gray-700">Cash Flow Trends</h3>
-                                        {setChartFilter && (
-                                            <div className="flex bg-gray-100 p-1 rounded-lg">
-                                                {(['DAILY', 'WEEKLY', 'MONTHLY', 'YEARLY'] as const).map(filter => (
-                                                    <button 
-                                                        key={filter}
-                                                        onClick={() => setChartFilter(filter)}
-                                                        className={`px-3 py-1 text-[10px] font-bold rounded-md transition-colors ${chartFilter === filter ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
-                                                    >
-                                                        {filter.charAt(0) + filter.slice(1).toLowerCase()}
-                                                    </button>
-                                                ))}
+                            <div className="h-48 w-full flex items-end justify-between gap-2 overflow-x-auto pb-4">
+                                {financeOverviewData.chartData.length === 0 ? (
+                                    <div className="w-full h-full flex items-center justify-center text-gray-400 text-sm italic">No data recorded for this view</div>
+                                ) : (
+                                    financeOverviewData.chartData.map((d: any) => (
+                                        <div key={d.label} className="flex flex-col items-center flex-1 group min-w-[40px]">
+                                            <div className="relative w-full h-full flex items-end justify-center gap-1">
+                                                <div 
+                                                    className="w-full bg-emerald-500 rounded-t-sm transition-all duration-300 group-hover:bg-emerald-400 relative"
+                                                    style={{ height: `${Math.max((d.income / (financeOverviewData.maxChartValue || 100)) * 100, 2)}%` }}
+                                                >
+                                                    <span className="absolute -top-6 left-1/2 -translate-x-1/2 text-[8px] font-bold text-emerald-600 opacity-0 group-hover:opacity-100">+{d.income}</span>
+                                                </div>
+                                                <div 
+                                                    className="w-full bg-rose-400 rounded-t-sm transition-all duration-300 group-hover:bg-rose-300 relative"
+                                                    style={{ height: `${Math.max((d.expense / (financeOverviewData.maxChartValue || 100)) * 100, 2)}%` }}
+                                                >
+                                                    <span className="absolute -top-6 left-1/2 -translate-x-1/2 text-[8px] font-bold text-rose-600 opacity-0 group-hover:opacity-100">-{d.expense}</span>
+                                                </div>
                                             </div>
-                                        )}
-                                    </div>
-                                    <div className="h-48 w-full flex items-end justify-between gap-2 overflow-x-auto pb-4">
-                                        {financeOverviewData.chartData.length === 0 ? (
-                                            <div className="w-full h-full flex items-center justify-center text-gray-400 text-sm italic">No data recorded for this view</div>
-                                        ) : (
-                                            financeOverviewData.chartData.map((d: any) => (
-                                                <div key={d.label} className="flex flex-col items-center flex-1 group min-w-[30px]">
-                                                    <div className="relative w-full h-full flex items-end justify-center gap-1">
-                                                        <div 
-                                                            className="w-full bg-emerald-500 rounded-t-sm transition-all duration-300 group-hover:bg-emerald-400 relative"
-                                                            style={{ height: `${Math.max((d.income / financeOverviewData.maxChartValue) * 100, 2)}%` }}
-                                                        />
-                                                        <div 
-                                                            className="w-full bg-rose-400 rounded-t-sm transition-all duration-300 group-hover:bg-rose-300 relative"
-                                                            style={{ height: `${Math.max((d.expense / financeOverviewData.maxChartValue) * 100, 2)}%` }}
-                                                        />
-                                                    </div>
-                                                    <span className="text-[8px] text-gray-400 mt-2 font-bold uppercase truncate w-full text-center">{d.label}</span>
-                                                </div>
-                                            ))
-                                        )}
-                                    </div>
-                                </div>
-
-                                {/* Order Tracking Summary */}
-                                <div className="border border-gray-100 rounded-xl p-4 flex flex-col">
-                                    <h3 className="text-sm font-bold text-gray-700 mb-4">Urgent Outstanding Items</h3>
-                                    <div className="flex-1 overflow-y-auto max-h-[180px] space-y-2 pr-1">
-                                        {financeOverviewData.receivables.concat(financeOverviewData.payables).slice(0, 8).map((rec: FinancialRecord) => {
-                                            const delayed = isOverdue(rec.date);
-                                            return (
-                                                <div key={rec.id} className={`flex items-center justify-between p-2 rounded-lg border text-xs ${delayed ? 'bg-rose-50 border-rose-200' : 'bg-gray-50 border-gray-100'}`}>
-                                                    <div className="flex flex-col overflow-hidden">
-                                                        <span className="font-mono text-[10px] text-gray-500 font-bold">{rec.orderNumber || rec.transactionId}</span>
-                                                        <span className="truncate text-gray-400">{rec.category}</span>
-                                                    </div>
-                                                    <div className="text-right ml-2">
-                                                        <div className={`font-black ${rec.type === 'INCOME' ? 'text-emerald-600' : 'text-rose-600'}`}>
-                                                            RM{rec.amount.toFixed(0)}
-                                                        </div>
-                                                        {delayed && <span className="text-[8px] font-bold text-rose-500 uppercase tracking-tighter">Overdue</span>}
-                                                    </div>
-                                                </div>
-                                            );
-                                        })}
-                                        {financeOverviewData.receivables.length + financeOverviewData.payables.length === 0 && (
-                                            <div className="h-full flex items-center justify-center text-xs text-gray-400 italic">All accounts settled.</div>
-                                        )}
-                                    </div>
-                                </div>
+                                            <span className="text-[8px] text-gray-400 mt-2 font-bold uppercase truncate w-full text-center">{d.label}</span>
+                                        </div>
+                                    ))
+                                )}
+                            </div>
+                            <div className="flex justify-center gap-4 text-[10px] font-bold uppercase tracking-widest text-gray-400">
+                                <span className="flex items-center gap-1.5"><div className="w-2 h-2 bg-emerald-500 rounded-sm"></div> In Flow</span>
+                                <span className="flex items-center gap-1.5"><div className="w-2 h-2 bg-rose-400 rounded-sm"></div> Out Flow</span>
                             </div>
                         </div>
                     )}
-                </div>
-            )}
-
-            {/* Overdue Reminder Banner */}
-            {overdueCount > 0 && (
-                <div className="bg-red-50 border-l-4 border-red-500 p-4 rounded-md shadow-sm flex items-start animate-pulse">
-                    <div className="flex-shrink-0">
-                        <svg className="h-5 w-5 text-red-400" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
-                            <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
-                        </svg>
-                    </div>
-                    <div className="ml-3">
-                        <h3 className="text-sm font-bold text-red-800">Unsettled Transaction Reminder</h3>
-                        <div className="mt-1 text-sm text-red-700">
-                            <p>There are {overdueCount} transactions (Receivables/Payables) pending for more than 7 days. Please review customer orders and supplier invoices.</p>
-                        </div>
-                    </div>
                 </div>
             )}
 
@@ -243,11 +320,11 @@ export const FinancialsTab: React.FC<FinancialsTabProps> = ({
                     <table className="min-w-full divide-y divide-gray-200">
                         <thead className="bg-gray-50">
                             <tr>
+                                <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Transaction ID</th>
                                 <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Date</th>
-                                <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Settled</th>
                                 <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Type</th>
                                 <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Category</th>
-                                <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Order/Ref</th>
+                                <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Batch Link</th>
                                 <th scope="col" className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Amount</th>
                                 <th scope="col" className="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
                                 {(canDelete || canEdit) && <th scope="col" className="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>}
@@ -259,10 +336,8 @@ export const FinancialsTab: React.FC<FinancialsTabProps> = ({
                                 const isCompleted = record.status === 'COMPLETED' || !record.status;
                                 return (
                                     <tr key={record.id} className={`hover:bg-gray-50 ${delayed ? 'bg-red-50/30' : ''}`}>
+                                        <td className="px-6 py-4 whitespace-nowrap text-xs font-mono font-bold text-gray-900" onClick={() => onEditRecord(record)}>{record.transactionId}</td>
                                         <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500" onClick={() => onEditRecord(record)}>{new Date(record.date).toLocaleDateString()}</td>
-                                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500" onClick={() => onEditRecord(record)}>
-                                            {record.settledDate ? new Date(record.settledDate).toLocaleDateString() : <span className="text-gray-300 italic">--</span>}
-                                        </td>
                                         <td className="px-6 py-4 whitespace-nowrap" onClick={() => onEditRecord(record)}>
                                             <span className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${record.type === 'INCOME' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>
                                                 {record.type}
@@ -272,15 +347,14 @@ export const FinancialsTab: React.FC<FinancialsTabProps> = ({
                                         <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500" onClick={() => onEditRecord(record)}>
                                             <div className="flex flex-col">
                                                 <div className="flex items-center gap-1">
-                                                    <span className="font-mono text-xs font-bold text-gray-800">{record.orderNumber || '-'}</span>
+                                                    <span className="font-mono text-xs font-bold text-gray-800">{record.batchId || '-'}</span>
                                                     {record.attachmentName && (
                                                         <svg className="w-3.5 h-3.5 text-indigo-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" title={`Attached: ${record.attachmentName}`}>
                                                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
                                                         </svg>
                                                     )}
                                                 </div>
-                                                <span className="text-[10px] text-gray-400 uppercase tracking-tighter">{record.transactionId}</span>
-                                                {record.weightKg && <span className="text-[10px] font-bold text-indigo-600">{record.weightKg} kg sold</span>}
+                                                {record.category === 'Sales' && record.weightKg && <span className="text-[10px] font-bold text-indigo-600">{record.weightKg} kg sold</span>}
                                             </div>
                                         </td>
                                         <td className={`px-6 py-4 whitespace-nowrap text-sm font-bold text-right ${record.type === 'INCOME' ? 'text-green-600' : 'text-red-600'}`} onClick={() => onEditRecord(record)}>
@@ -312,7 +386,7 @@ export const FinancialsTab: React.FC<FinancialsTabProps> = ({
                                                             className={`text-white text-xs font-bold py-1 px-2 rounded shadow-sm transition-colors ${record.type === 'EXPENSE' ? 'bg-orange-500 hover:bg-orange-600' : 'bg-green-600 hover:bg-green-700'}`}
                                                             title={record.type === 'EXPENSE' ? "Mark as Paid" : "Mark as Received"}
                                                         >
-                                                            {record.type === 'EXPENSE' ? 'Pay' : 'Rec'}
+                                                            {record.type === 'EXPENSE' ? 'Pay' : 'Receive'}
                                                         </button>
                                                     )}
                                                     {isCompleted && onPrintRecord && (
