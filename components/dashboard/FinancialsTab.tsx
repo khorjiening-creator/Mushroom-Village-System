@@ -1,6 +1,7 @@
 
 import React, { useState, useMemo } from 'react';
 import { FinancialRecord, UserRole, VillageType } from '../../types';
+import { MUSHROOM_PRICES } from '../../constants';
 
 interface FinancialsTabProps {
     records: FinancialRecord[];
@@ -47,9 +48,29 @@ export const FinancialsTab: React.FC<FinancialsTabProps> = ({
         return diffDays > 7;
     };
 
-    const overdueCount = useMemo(() => {
-        return records.filter(r => r.status === 'PENDING' && isOverdue(r.date)).length;
-    }, [records]);
+    const filteredRecords = useMemo(() => {
+        return records.filter(rec => {
+            // Period Filter
+            const date = new Date(rec.date);
+            const now = new Date();
+            if (financialPeriod === 'TODAY') {
+                if (date.toDateString() !== now.toDateString()) return false;
+            } else if (financialPeriod === 'MONTH') {
+                if (date.getMonth() !== now.getMonth() || date.getFullYear() !== now.getFullYear()) return false;
+            }
+
+            // Category Filter
+            if (filterCategory !== 'ALL' && rec.category !== filterCategory) return false;
+
+            // Status Filter
+            if (filterStatus !== 'ALL') {
+                const status = rec.status || 'COMPLETED'; // Default to COMPLETED if undefined
+                if (status !== filterStatus) return false;
+            }
+
+            return true;
+        });
+    }, [records, financialPeriod, filterCategory, filterStatus]);
 
     const performanceData = useMemo(() => {
         const incomeRecords = records.filter(r => r.type === 'INCOME');
@@ -60,6 +81,11 @@ export const FinancialsTab: React.FC<FinancialsTabProps> = ({
         const otherExpenses = expenseRecords.filter(r => r.category !== 'Supplies').reduce((acc, curr) => acc + curr.amount, 0);
         const otherIncome = incomeRecords.filter(r => r.category !== 'Sales').reduce((acc, curr) => acc + curr.amount, 0);
 
+        // Capital Available Calculation (Completed transactions only)
+        const completedIncome = records.filter(r => r.type === 'INCOME' && (r.status === 'COMPLETED' || !r.status)).reduce((acc, curr) => acc + curr.amount, 0);
+        const completedExpense = records.filter(r => r.type === 'EXPENSE' && (r.status === 'COMPLETED' || !r.status)).reduce((acc, curr) => acc + curr.amount, 0);
+        const capitalAvailable = completedIncome - completedExpense;
+
         return {
             salesIncome,
             materialCosts,
@@ -68,7 +94,8 @@ export const FinancialsTab: React.FC<FinancialsTabProps> = ({
             totalIncome: salesIncome + otherIncome,
             totalExpense: materialCosts + otherExpenses,
             grossMargin: salesIncome - materialCosts,
-            netProfit: (salesIncome + otherIncome) - (materialCosts + otherExpenses)
+            netProfit: (salesIncome + otherIncome) - (materialCosts + otherExpenses),
+            capitalAvailable
         };
     }, [records]);
 
@@ -78,72 +105,199 @@ export const FinancialsTab: React.FC<FinancialsTabProps> = ({
 
         const dateStr = new Date().toLocaleDateString();
         const p = performanceData;
-        const reportTitle = `${type === 'MONTHLY' ? 'Monthly' : 'Yearly'} Financial Performance Report`;
+        const reportTitle = `${type === 'MONTHLY' ? 'Monthly' : 'Yearly'} Financial Statement`;
 
         printWindow.document.write(`
             <html>
                 <head>
-                    <title>${reportTitle}</title>
+                    <title>Financial Statement - ${villageId}</title>
                     <style>
-                        body { font-family: 'Inter', sans-serif; padding: 40px; color: #333; line-height: 1.6; }
-                        .header { border-bottom: 3px solid #1e40af; padding-bottom: 20px; margin-bottom: 30px; display: flex; justify-content: space-between; align-items: flex-end; }
-                        .title { font-size: 28px; font-weight: 800; color: #1e3a8a; margin: 0; text-transform: uppercase; letter-spacing: -0.5px; }
-                        .subtitle { font-size: 14px; color: #64748b; margin: 5px 0 0 0; font-weight: 600; }
-                        .section-title { font-size: 16px; font-weight: 800; color: #1e40af; text-transform: uppercase; border-bottom: 1px solid #e2e8f0; padding-bottom: 8px; margin: 30px 0 15px 0; }
-                        .metrics-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 30px; }
-                        .metric-card { background: #f8fafc; border: 1px solid #e2e8f0; padding: 20px; border-radius: 12px; }
-                        .metric-label { font-size: 11px; font-weight: 700; color: #64748b; text-transform: uppercase; margin-bottom: 4px; }
-                        .metric-value { font-size: 24px; font-weight: 800; color: #1e293b; }
-                        .metric-value.positive { color: #15803d; }
-                        .metric-value.negative { color: #b91c1c; }
-                        table { width: 100%; border-collapse: collapse; margin-top: 10px; }
-                        th { text-align: left; background: #f1f5f9; padding: 12px 10px; font-size: 11px; text-transform: uppercase; font-weight: 700; color: #475569; }
-                        td { padding: 10px; border-bottom: 1px solid #f1f5f9; font-size: 13px; }
-                        .total-row { background: #f8fafc; font-weight: 800; }
-                        .footer { margin-top: 50px; text-align: center; font-size: 10px; color: #94a3b8; border-top: 1px solid #f1f5f9; padding-top: 20px; }
-                        @media print { .no-print { display: none; } body { padding: 20px; } }
+                        @import url('https://fonts.googleapis.com/css2?family=Times+New+Roman&display=swap');
+                        body { font-family: 'Times New Roman', serif; padding: 40px; color: #000; line-height: 1.4; max-width: 800px; margin: 0 auto; }
+                        .letterhead { text-align: center; margin-bottom: 40px; border-bottom: 2px solid #000; padding-bottom: 20px; }
+                        .company-name { font-size: 24px; font-weight: bold; text-transform: uppercase; letter-spacing: 2px; }
+                        .report-title { font-size: 18px; font-weight: bold; margin-top: 20px; text-decoration: underline; }
+                        .meta-info { display: flex; justify-content: space-between; margin-bottom: 30px; font-size: 12px; }
+                        .section-header { background-color: #f0f0f0; font-weight: bold; padding: 5px 10px; border-top: 1px solid #000; border-bottom: 1px solid #000; margin-top: 20px; font-size: 14px; }
+                        .line-item { display: flex; justify-content: space-between; padding: 8px 10px; border-bottom: 1px dotted #ccc; font-size: 13px; }
+                        .total-line { display: flex; justify-content: space-between; padding: 10px; font-weight: bold; font-size: 14px; border-top: 1px solid #000; margin-top: 5px; }
+                        .grand-total { border-top: 2px double #000; border-bottom: 2px double #000; font-size: 16px; margin-top: 20px; background-color: #f9f9f9; }
+                        .footer { margin-top: 60px; text-align: center; font-size: 10px; font-style: italic; }
+                        .signatures { display: flex; justify-content: space-between; margin-top: 80px; }
+                        .sig-block { border-top: 1px solid #000; width: 200px; text-align: center; padding-top: 5px; font-size: 12px; }
+                        @media print { body { padding: 0; } }
                     </style>
                 </head>
                 <body>
-                    <div class="header">
-                        <div>
-                            <h1 class="title">${reportTitle}</h1>
-                            <p class="subtitle">${villageId || 'Mushroom Supply Chain'}</p>
-                        </div>
-                        <div style="text-align: right; font-size: 12px; color: #64748b;">
-                            Period: ${type === 'MONTHLY' ? 'Current Month' : 'Current Year'}<br>
-                            Generated: ${dateStr}
-                        </div>
+                    <div class="letterhead">
+                        <div class="company-name">Mushroom Village Supply Chain</div>
+                        <div>${villageId || 'Central Operations'}</div>
+                        <div class="report-title">${reportTitle.toUpperCase()}</div>
                     </div>
 
-                    <div class="section-title">Executive Summary</div>
-                    <div class="metrics-grid">
-                        <div class="metric-card">
-                            <div class="metric-label">Sales Revenue (In Flow)</div>
-                            <div class="metric-value positive">RM ${p.salesIncome.toLocaleString(undefined, {minimumFractionDigits: 2})}</div>
-                        </div>
-                        <div class="metric-card">
-                            <div class="metric-label">Input Costs (Out Flow)</div>
-                            <div class="metric-value negative">RM ${p.materialCosts.toLocaleString(undefined, {minimumFractionDigits: 2})}</div>
-                        </div>
-                        <div class="metric-card">
-                            <div class="metric-label">Total Cash Inflow</div>
-                            <div class="metric-value positive">RM ${p.totalIncome.toLocaleString(undefined, {minimumFractionDigits: 2})}</div>
-                        </div>
-                        <div class="metric-card">
-                            <div class="metric-label">Total Cash Outflow</div>
-                            <div class="metric-value negative">RM ${p.totalExpense.toLocaleString(undefined, {minimumFractionDigits: 2})}</div>
-                        </div>
+                    <div class="meta-info">
+                        <div>Report Generated: ${dateStr}</div>
+                        <div>Period: ${type}</div>
+                        <div>Currency: MYR (RM)</div>
                     </div>
 
-                    <div class="section-title">Net Balance</div>
-                    <div class="metric-card" style="background: #eff6ff; border-color: #bfdbfe;">
-                        <div class="metric-label" style="color: #1e40af;">Operating Surplus/Deficit</div>
-                        <div class="metric-value ${p.netProfit >= 0 ? 'positive' : 'negative'}">RM ${p.netProfit.toLocaleString(undefined, {minimumFractionDigits: 2})}</div>
+                    <div class="section-header">REVENUE</div>
+                    <div class="line-item">
+                        <span>Sales Revenue</span>
+                        <span>${p.salesIncome.toLocaleString(undefined, {minimumFractionDigits: 2})}</span>
+                    </div>
+                    <div class="line-item">
+                        <span>Other Income / Investments</span>
+                        <span>${p.otherIncome.toLocaleString(undefined, {minimumFractionDigits: 2})}</span>
+                    </div>
+                    <div class="total-line">
+                        <span>TOTAL REVENUE</span>
+                        <span>${p.totalIncome.toLocaleString(undefined, {minimumFractionDigits: 2})}</span>
+                    </div>
+
+                    <div class="section-header">OPERATING EXPENSES</div>
+                    <div class="line-item">
+                        <span>Cost of Goods Sold (Supplies)</span>
+                        <span>(${p.materialCosts.toLocaleString(undefined, {minimumFractionDigits: 2})})</span>
+                    </div>
+                    <div class="line-item">
+                        <span>Operational Expenses (Labor, Utilities, etc.)</span>
+                        <span>(${p.otherExpenses.toLocaleString(undefined, {minimumFractionDigits: 2})})</span>
+                    </div>
+                    <div class="total-line">
+                        <span>TOTAL EXPENSES</span>
+                        <span>(${p.totalExpense.toLocaleString(undefined, {minimumFractionDigits: 2})})</span>
+                    </div>
+
+                    <div class="grand-total total-line">
+                        <span>NET PROFIT / (LOSS)</span>
+                        <span>${p.netProfit.toLocaleString(undefined, {minimumFractionDigits: 2})}</span>
+                    </div>
+
+                    <div class="signatures">
+                        <div class="sig-block">Prepared By</div>
+                        <div class="sig-block">Approved By</div>
                     </div>
 
                     <div class="footer">
-                        This document is a certified financial snapshot generated by the Mushroom Village ERP.
+                        This is a computer-generated document. No signature is required unless for official auditing purposes.
+                    </div>
+                    <script>window.onload = () => { window.print(); window.close(); }</script>
+                </body>
+            </html>
+        `);
+        printWindow.document.close();
+    };
+
+    const handlePrintMushroomProfitability = () => {
+        const printWindow = window.open('', '_blank');
+        if (!printWindow) return;
+
+        // 1. Filter Logic
+        const sales = records.filter(r => r.type === 'INCOME' && r.category === 'Sales');
+        const suppliesCost = records.filter(r => r.type === 'EXPENSE' && r.category === 'Supplies').reduce((acc, curr) => acc + curr.amount, 0);
+        
+        // 2. Group by Mushroom Strain
+        const strains = ['Button', 'Oyster', 'Shiitake', "Lion's Mane"];
+        const strainStats: Record<string, { weight: number, revenue: number }> = {};
+        let totalSalesWeight = 0;
+
+        strains.forEach(s => strainStats[s] = { weight: 0, revenue: 0 });
+
+        sales.forEach(rec => {
+            const desc = (rec.description || "").toLowerCase();
+            let matched = false;
+            
+            for (const s of strains) {
+                if (desc.includes(s.toLowerCase())) {
+                    strainStats[s].weight += (rec.weightKg || 0);
+                    strainStats[s].revenue += rec.amount;
+                    totalSalesWeight += (rec.weightKg || 0);
+                    matched = true;
+                    break;
+                }
+            }
+            // Fallback for unclassified sales
+            if (!matched && rec.weightKg) {
+                totalSalesWeight += rec.weightKg;
+            }
+        });
+
+        // 3. Generate Table Rows
+        const rows = strains.map(s => {
+            const weight = strainStats[s].weight;
+            const revenue = strainStats[s].revenue;
+            const pricePerKg = MUSHROOM_PRICES[s] || MUSHROOM_PRICES[`${s} Mushroom`];
+            
+            // Allocated Cost: (Strain Weight / Total Weight) * Total Supply Cost
+            const allocatedCost = totalSalesWeight > 0 ? (weight / totalSalesWeight) * suppliesCost : 0;
+            const profit = revenue - allocatedCost;
+            const margin = revenue > 0 ? (profit / revenue) * 100 : 0;
+
+            return `
+                <tr>
+                    <td style="font-weight: bold;">${s}</td>
+                    <td style="text-align: right;">RM ${pricePerKg.toFixed(2)}</td>
+                    <td style="text-align: right;">${weight.toFixed(2)}</td>
+                    <td style="text-align: right;">RM ${revenue.toLocaleString(undefined, {minimumFractionDigits: 2})}</td>
+                    <td style="text-align: right;">(RM ${allocatedCost.toLocaleString(undefined, {minimumFractionDigits: 2})})</td>
+                    <td style="text-align: right; font-weight: bold;">RM ${profit.toLocaleString(undefined, {minimumFractionDigits: 2})}</td>
+                    <td style="text-align: right;">${margin.toFixed(1)}%</td>
+                </tr>
+            `;
+        }).join('');
+
+        const totalRevenue = Object.values(strainStats).reduce((a, b) => a + b.revenue, 0);
+        const totalProfit = totalRevenue - suppliesCost;
+
+        printWindow.document.write(`
+            <html>
+                <head>
+                    <title>Product Profitability Report</title>
+                    <style>
+                        body { font-family: 'Times New Roman', serif; padding: 40px; color: #000; }
+                        h1 { font-size: 20px; text-transform: uppercase; text-align: center; margin-bottom: 5px; text-decoration: underline; }
+                        .subtitle { text-align: center; font-size: 12px; margin-bottom: 40px; }
+                        table { width: 100%; border-collapse: collapse; border: 1px solid #000; }
+                        th { background: #eee; text-align: right; padding: 8px; font-size: 12px; text-transform: uppercase; border-bottom: 1px solid #000; border-right: 1px solid #ccc; }
+                        th:first-child { text-align: left; }
+                        td { padding: 8px; border-bottom: 1px solid #ccc; font-size: 13px; border-right: 1px solid #ccc; }
+                        .totals { background: #f9f9f9; font-weight: bold; border-top: 2px solid #000; }
+                        .note { margin-top: 20px; font-size: 11px; font-style: italic; }
+                    </style>
+                </head>
+                <body>
+                    <h1>Product Profitability Analysis</h1>
+                    <div class="subtitle">Generated for ${villageId || 'All Villages'} on ${new Date().toLocaleDateString()}</div>
+
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Product</th>
+                                <th>Ref Price/kg</th>
+                                <th>Sold (kg)</th>
+                                <th>Revenue</th>
+                                <th>Allocated Cost</th>
+                                <th>Net Profit</th>
+                                <th>Margin</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${rows}
+                            <tr class="totals">
+                                <td>TOTALS</td>
+                                <td>-</td>
+                                <td style="text-align: right;">${totalSalesWeight.toFixed(2)}</td>
+                                <td style="text-align: right;">RM ${totalRevenue.toLocaleString(undefined, {minimumFractionDigits: 2})}</td>
+                                <td style="text-align: right;">(RM ${suppliesCost.toLocaleString(undefined, {minimumFractionDigits: 2})})</td>
+                                <td style="text-align: right;">RM ${totalProfit.toLocaleString(undefined, {minimumFractionDigits: 2})}</td>
+                                <td>-</td>
+                            </tr>
+                        </tbody>
+                    </table>
+
+                    <div class="note">
+                        * Cost Allocation Method: Total Supply Expenses are prorated across product lines based on sales volume (weight).
                     </div>
                     <script>window.onload = () => { window.print(); window.close(); }</script>
                 </body>
@@ -171,26 +325,36 @@ export const FinancialsTab: React.FC<FinancialsTabProps> = ({
                         <p className="text-[9px] text-gray-400 mt-1 font-bold italic">Procurement & Ops</p>
                     </div>
                     <div className="bg-white p-5 rounded-xl border border-gray-200 shadow-sm">
-                        <span className="text-[10px] font-black text-gray-400 uppercase tracking-widest block mb-1">Net Flow</span>
-                        <div className={`text-2xl font-black ${performanceData.netProfit >= 0 ? 'text-indigo-600' : 'text-rose-600'}`}>
-                            RM{performanceData.netProfit.toLocaleString()}
+                        <span className="text-[10px] font-black text-gray-400 uppercase tracking-widest block mb-1">Capital Available</span>
+                        <div className={`text-2xl font-black ${performanceData.capitalAvailable >= 0 ? 'text-blue-600' : 'text-red-600'}`}>
+                            RM{performanceData.capitalAvailable.toLocaleString()}
                         </div>
+                        <p className="text-[9px] text-gray-400 mt-1 font-bold">Current Liquidity</p>
                     </div>
                     <div className="bg-gray-900 p-5 rounded-xl border border-gray-800 shadow-xl flex flex-col justify-between">
-                        <span className="text-[10px] font-black text-gray-500 uppercase tracking-widest block mb-1">Print Performance</span>
-                        <div className="flex gap-2 mt-2">
+                        <span className="text-[10px] font-black text-gray-500 uppercase tracking-widest block mb-1">Print Reports</span>
+                        <div className="flex flex-col gap-2 mt-1">
                             <button 
-                                onClick={() => handlePrintPerformance('MONTHLY')}
-                                className="flex-1 bg-blue-600 hover:bg-blue-700 text-white text-[9px] font-black uppercase py-2 rounded transition-all"
+                                onClick={handlePrintMushroomProfitability}
+                                className="w-full bg-green-600 hover:bg-green-700 text-white text-[9px] font-black uppercase py-2 rounded transition-all flex items-center justify-center gap-2"
                             >
-                                Monthly
+                                <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                                Mushroom Profit Report
                             </button>
-                            <button 
-                                onClick={() => handlePrintPerformance('YEARLY')}
-                                className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white text-[9px] font-black uppercase py-2 rounded transition-all"
-                            >
-                                Yearly
-                            </button>
+                            <div className="flex gap-2">
+                                <button 
+                                    onClick={() => handlePrintPerformance('MONTHLY')}
+                                    className="flex-1 bg-blue-600 hover:bg-blue-700 text-white text-[9px] font-black uppercase py-2 rounded transition-all"
+                                >
+                                    Monthly
+                                </button>
+                                <button 
+                                    onClick={() => handlePrintPerformance('YEARLY')}
+                                    className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white text-[9px] font-black uppercase py-2 rounded transition-all"
+                                >
+                                    Yearly
+                                </button>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -331,7 +495,7 @@ export const FinancialsTab: React.FC<FinancialsTabProps> = ({
                             </tr>
                         </thead>
                         <tbody className="bg-white divide-y divide-gray-200">
-                            {records.map((record) => {
+                            {filteredRecords.map((record) => {
                                 const delayed = record.status === 'PENDING' && isOverdue(record.date);
                                 const isCompleted = record.status === 'COMPLETED' || !record.status;
                                 return (
@@ -349,7 +513,8 @@ export const FinancialsTab: React.FC<FinancialsTabProps> = ({
                                                 <div className="flex items-center gap-1">
                                                     <span className="font-mono text-xs font-bold text-gray-800">{record.batchId || '-'}</span>
                                                     {record.attachmentName && (
-                                                        <svg className="w-3.5 h-3.5 text-indigo-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" title={`Attached: ${record.attachmentName}`}>
+                                                        <svg className="w-3.5 h-3.5 text-indigo-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                                            <title>Attached: {record.attachmentName}</title>
                                                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
                                                         </svg>
                                                     )}

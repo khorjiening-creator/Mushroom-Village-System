@@ -72,6 +72,7 @@ export interface ActivityLog {
   timestamp: string;
   villageId: VillageType;
   batchId?: string;
+  roomId?: string; // Linked Room ID
   totalYield?: number; // Added for Yield Tracking feature
   totalWastage?: number;
   mushroomStrain?: string; // Added for Batch Registry display
@@ -250,4 +251,6 @@ export interface PackagingLogData {
 }
 
 // Added missing DeliveryLogData alias for reporting
-export type DeliveryLogData = DeliveryRecord;
+export interface DeliveryLogData extends DeliveryRecord {
+  timestamp: string;
+}

@@ -1,8 +1,9 @@
 
 import React, { useState, useEffect, useMemo } from 'react';
-import { collection, query, orderBy, limit, onSnapshot, addDoc, where, getDocs, doc, updateDoc } from 'firebase/firestore';
+import { collection, query, orderBy, limit, onSnapshot, addDoc, getDocs, where } from 'firebase/firestore';
 import { db } from '../../services/firebase';
-import { VillageType, EnvironmentLog, ActivityLog } from '../../types';
+import { VillageType, ActivityLog } from '../../types';
+import { MUSHROOM_ROOM_MAPPING } from '../../constants';
 
 interface EnvironmentTabProps {
     villageId: VillageType;
@@ -10,598 +11,661 @@ interface EnvironmentTabProps {
     theme?: any;
     onSuccess?: (msg: string) => void;
     onError?: (msg: string) => void;
+    setActiveTab?: (tab: any) => void;
 }
 
-// --- Knowledge Base: Optimal Conditions per Species ---
-const SPECIES_PROFILES: Record<string, { minT: number, maxT: number, minH: number, cycleDays: number }> = {
-    'Oyster': { minT: 20, maxT: 28, minH: 80, cycleDays: 21 }, // Fast grower
-    'Shiitake': { minT: 12, maxT: 25, minH: 80, cycleDays: 90 }, // Slow grower
-    'Button': { minT: 18, maxT: 24, minH: 85, cycleDays: 35 },
-    "Lion's Mane": { minT: 18, maxT: 24, minH: 85, cycleDays: 35 },
-    // Default fallback
-    'Unknown': { minT: 20, maxT: 25, minH: 80, cycleDays: 30 }
+interface ExtendedEnvLog {
+    id: string;
+    roomId?: string;
+    temperature: number;
+    humidity: number;
+    moisture: number;
+    timestamp: string;
+    recordedBy: string;
+}
+
+// 3️⃣ Ideal Conditions Reference (By Mushroom Type)
+const IDEAL_CONDITIONS: Record<string, { minT: number, maxT: number, minH: number, maxH: number, minM: number, maxM: number }> = {
+    'Oyster': { minT: 22, maxT: 30, minH: 80, maxH: 95, minM: 60, maxM: 70 },
+    'Button': { minT: 16, maxT: 22, minH: 85, maxH: 90, minM: 65, maxM: 75 },
+    'Shiitake': { minT: 18, maxT: 24, minH: 75, maxH: 85, minM: 60, maxM: 70 },
+    "Lion's Mane": { minT: 18, maxT: 24, minH: 85, maxH: 95, minM: 65, maxM: 75 },
 };
 
-interface BatchPrediction {
-    id: string; // Document ID
-    batchId: string;
-    villageId: VillageType;
-    strain: string;
-    plantingDate: Date;
-    daysElapsed: number;
-    baseDaysRemaining: number;
-    adjustedDaysRemaining: number;
-    predictedDate: Date;
-    status: 'On Track' | 'Delayed (Heat)' | 'Delayed (Cold)' | 'Delayed (Dry)' | 'Harvest Ready' | 'Critical' | 'Target Met';
-    stressFactor: number; // Days added due to stress
-    isTemperatureBad: boolean;
-    isHumidityBad: boolean;
-}
+const SPECIES_CYCLES: Record<string, number> = {
+    'Oyster': 21,
+    'Shiitake': 90,
+    'Button': 35,
+    "Lion's Mane": 35,
+    'Unknown': 30
+};
 
-interface RealWeather {
-    temp: number;
-    humidity: number;
-    condition: string;
-    locationName: string;
-}
-
-export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userEmail, theme, onSuccess, onError }) => {
-    const [logs, setLogs] = useState<EnvironmentLog[]>([]);
-    const [activeBatches, setActiveBatches] = useState<ActivityLog[]>([]);
+export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userEmail, theme, onSuccess, onError, setActiveTab }) => {
+    const [logs, setLogs] = useState<ExtendedEnvLog[]>([]);
     const [loading, setLoading] = useState(true);
-    const [externalWeather, setExternalWeather] = useState<RealWeather | null>(null);
-    const [weatherLoading, setWeatherLoading] = useState(false);
+    const [activeRoom, setActiveRoom] = useState('A1');
+    const [activeBatches, setActiveBatches] = useState<ActivityLog[]>([]);
+    const [activeRooms, setActiveRooms] = useState<string[]>(['A1']); // Derived from active batches
+    const [selectedTypeFilter, setSelectedTypeFilter] = useState('All');
     
-    // Input State
-    const [tempInput, setTempInput] = useState('');
-    const [humidityInput, setHumidityInput] = useState('');
-    const [moistureInput, setMoistureInput] = useState('');
+    // External Weather Simulation State
+    const [outsideTemp, setOutsideTemp] = useState(30);
+    const [outsideHumidity, setOutsideHumidity] = useState(65);
+    const [outsideCondition, setOutsideCondition] = useState<'Sunny' | 'Rain' | 'Cloudy' | 'Night'>('Sunny');
+
+    // Manual Input State
+    const [inputTemp, setInputTemp] = useState('');
+    const [inputHumid, setInputHumid] = useState('');
+    const [inputMoist, setInputMoist] = useState('');
     const [isSubmitting, setIsSubmitting] = useState(false);
 
-    // --- Weather Fetching ---
-    const fetchRealWorldWeather = async (lat: number, lon: number) => {
-        setWeatherLoading(true);
-        try {
-            // Using Open-Meteo (Free, no API key required for basic usage)
-            const response = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,relative_humidity_2m,weather_code&timezone=auto`);
-            const data = await response.json();
-            
-            if (data.current) {
-                setExternalWeather({
-                    temp: data.current.temperature_2m,
-                    humidity: data.current.relative_humidity_2m,
-                    condition: getWeatherCondition(data.current.weather_code),
-                    locationName: "Local Area"
-                });
-            }
-        } catch (err) {
-            console.warn("Weather fetch failed", err);
-        } finally {
-            setWeatherLoading(false);
-        }
-    };
+    // Automation Status State
+    const [fanActive, setFanActive] = useState(false);
+    const [coolingActive, setCoolingActive] = useState(false);
+    const [humidifierActive, setHumidifierActive] = useState(false);
 
-    const getWeatherCondition = (code: number) => {
-        if (code === 0) return "Clear Sky";
-        if (code < 4) return "Partly Cloudy";
-        if (code < 70) return "Rainy";
-        if (code < 80) return "Snowy";
-        return "Stormy";
-    };
+    // Notifications State
+    const [notifications, setNotifications] = useState<{type: 'HARVEST'|'RISK'|'WEATHER'|'SYSTEM', msg: string, action?: string, urgency?: 'Normal'|'High'|'Critical'}[]>([]);
+    const [systemActions, setSystemActions] = useState<string[]>([]);
 
-    // --- Data Fetching ---
+    // Fetch Env Logs
     useEffect(() => {
         const envColName = `environmentLogs_${villageId.replace(/\s/g, '')}`;
-
-        // 1. Fetch Environment Logs (Realtime)
-        const qEnv = query(collection(db, envColName), orderBy('timestamp', 'desc'), limit(50));
-        const unsubEnv = onSnapshot(qEnv, (snapshot) => {
-            const data: EnvironmentLog[] = [];
-            snapshot.forEach(doc => {
-                data.push({ id: doc.id, ...doc.data() } as EnvironmentLog);
-            });
+        const qEnv = query(collection(db, envColName), orderBy('timestamp', 'desc'), limit(100));
+        const unsub = onSnapshot(qEnv, (snapshot) => {
+            const data: ExtendedEnvLog[] = [];
+            snapshot.forEach(doc => { const d = doc.data() as ExtendedEnvLog; data.push({ id: doc.id, ...d }); });
             setLogs(data);
+            setLoading(false);
         });
-
-        // 2. Fetch External Weather via Geolocation
-        if ("geolocation" in navigator) {
-            navigator.geolocation.getCurrentPosition(
-                (pos) => fetchRealWorldWeather(pos.coords.latitude, pos.coords.longitude),
-                () => fetchRealWorldWeather(3.1390, 101.6869) // Default to KL, Malaysia if denied
-            );
-        } else {
-            fetchRealWorldWeather(3.1390, 101.6869);
-        }
-
-        fetchBatches();
-        setLoading(false);
-
-        return () => unsubEnv();
+        return () => unsub();
     }, [villageId]);
 
-    const fetchBatches = async () => {
-        try {
-            let colName = '';
-            if (villageId === VillageType.A) colName = 'dailyfarming_logA';
-            else if (villageId === VillageType.B) colName = 'dailyfarming_logB';
-            
-            if (!colName) {
-                setActiveBatches([]);
-                return;
-            }
+    // Fetch Active Batches & Derive Rooms
+    useEffect(() => {
+        const fetchBatches = async () => {
+            if (villageId === VillageType.C) return;
+            const farmingCol = villageId === VillageType.A ? 'dailyfarming_logA' : 'dailyfarming_logB';
+            try {
+                // Fetch all recent batches. 
+                const q = query(collection(db, farmingCol), orderBy('timestamp', 'desc'), limit(50));
+                const snap = await getDocs(q);
+                const batches: ActivityLog[] = [];
+                const roomSet = new Set<string>();
 
-            const q = query(
-                collection(db, colName),
-                orderBy('timestamp', 'desc'),
-                limit(150)
-            );
-
-            const snap = await getDocs(q);
-            const batches: ActivityLog[] = [];
-            
-            snap.forEach(doc => {
-                const data = doc.data() as ActivityLog;
-                if (data.type === 'SUBSTRATE_PREP') {
-                    batches.push({ id: doc.id, ...data });
+                snap.forEach(doc => {
+                    const data = doc.data() as ActivityLog;
+                    // Filter specifically for batch creation records that are active
+                    if (data.type === 'SUBSTRATE_PREP' && data.batchStatus !== 'COMPLETED') {
+                        batches.push({ id: doc.id, ...data });
+                        if (data.roomId) roomSet.add(data.roomId);
+                    }
+                });
+                
+                setActiveBatches(batches);
+                const rooms = Array.from(roomSet).sort();
+                
+                // If rooms are empty, default to config based on filter
+                if (rooms.length > 0) {
+                    setActiveRooms(rooms);
+                } else {
+                    // Fallback to configured rooms if no active batches
+                    const allRooms = Object.values(MUSHROOM_ROOM_MAPPING).flat().sort();
+                    setActiveRooms(allRooms);
                 }
-            });
-
-            setActiveBatches(batches);
-        } catch (e) {
-            console.warn("Error fetching active batches for prediction:", e);
-        }
-    };
-
-    // --- Actions ---
-    const handleStopMonitoring = async (batchDocId: string, originVillage: VillageType) => {
-        if (!confirm("Confirm to delete harvest forecast for this batch? This will stop monitoring but keep the registry data.")) return;
-
-        const colName = originVillage === VillageType.A ? 'dailyfarming_logA' : 
-                        originVillage === VillageType.B ? 'dailyfarming_logB' : null;
-        
-        if (!colName) return;
-
-        setActiveBatches(current => current.filter(b => b.id !== batchDocId));
-
-        try {
-            const docRef = doc(db, colName, batchDocId);
-            await updateDoc(docRef, {
-                batchStatus: 'COMPLETED'
-            });
-            if (onSuccess) onSuccess(`Batch monitoring ended.`);
-        } catch (e) {
-            console.error("Failed to archive batch", e);
-            if (onError) onError("Could not update batch status.");
-            fetchBatches();
-        }
-    };
-
-    const handleContinueMonitoring = () => {
-        if (onSuccess) onSuccess("Batch monitoring continued.");
-    };
-
-    // --- Core Logic: Prediction Engine ---
-    const latest = logs[0] || { temperature: 0, humidity: 0, moisture: 0 };
-    
-    const predictions: BatchPrediction[] = useMemo(() => {
-        if (!latest.timestamp) return [];
-
-        return activeBatches.filter(batch => {
-            return batch.batchStatus !== 'COMPLETED';
-        }).map(batch => {
-            const profile = SPECIES_PROFILES[batch.mushroomStrain || 'Unknown'] || SPECIES_PROFILES['Unknown'];
-            const planted = new Date(batch.timestamp);
-            const now = new Date();
-            
-            const diffTime = Math.abs(now.getTime() - planted.getTime());
-            const daysElapsed = Math.ceil(diffTime / (1000 * 60 * 60 * 24)); 
-            const baseRemaining = Math.max(0, profile.cycleDays - daysElapsed);
-
-            const predicted = batch.predictedYield || 0;
-            const actual = batch.totalYield || 0;
-            const waste = batch.totalWastage || 0;
-            const isYieldMet = predicted > 0 && (actual + waste) >= predicted;
-
-            const t = latest.temperature;
-            const h = latest.humidity;
-            
-            let stressDelay = 0;
-            let status: BatchPrediction['status'] = 'On Track';
-            let isTemperatureBad = false;
-            let isHumidityBad = false;
-
-            if (t > profile.maxT) {
-                stressDelay += 3;
-                status = 'Delayed (Heat)';
-                isTemperatureBad = true;
-            } else if (t < profile.minT) {
-                stressDelay += 2;
-                status = 'Delayed (Cold)';
-                isTemperatureBad = true;
-            }
-
-            if (h < profile.minH) {
-                stressDelay += 2;
-                status = isTemperatureBad ? 'Critical' : 'Delayed (Dry)';
-                isHumidityBad = true;
-            }
-
-            const totalRemaining = baseRemaining + stressDelay;
-            const predictDate = new Date();
-            predictDate.setDate(predictDate.getDate() + totalRemaining);
-
-            if (isYieldMet) {
-                status = 'Target Met';
-            } else if (baseRemaining <= 0 && !isTemperatureBad && !isHumidityBad) {
-                status = 'Harvest Ready';
-            }
-
-            return {
-                id: batch.id || 'unknown',
-                batchId: batch.batchId || '???',
-                villageId: batch.villageId,
-                strain: batch.mushroomStrain || 'Unknown',
-                plantingDate: planted,
-                daysElapsed,
-                baseDaysRemaining: baseRemaining,
-                adjustedDaysRemaining: totalRemaining,
-                predictedDate: predictDate,
-                status,
-                stressFactor: stressDelay,
-                isTemperatureBad,
-                isHumidityBad
-            };
-        }).sort((a, b) => a.adjustedDaysRemaining - b.adjustedDaysRemaining); 
-    }, [activeBatches, logs]);
+            } catch (e) { console.error("Error fetching batches", e); }
+        };
+        fetchBatches();
+    }, [villageId]);
 
     const handleAddReading = async (e: React.FormEvent) => {
         e.preventDefault();
-        if(!tempInput || !humidityInput) return;
-        
         setIsSubmitting(true);
         try {
-            const colName = `environmentLogs_${villageId.replace(/\s/g, '')}`;
-            await addDoc(collection(db, colName), {
-                temperature: parseFloat(tempInput),
-                humidity: parseFloat(humidityInput),
-                moisture: parseFloat(moistureInput) || 0,
+            const envColName = `environmentLogs_${villageId.replace(/\s/g, '')}`;
+            await addDoc(collection(db, envColName), {
+                roomId: activeRoom,
+                temperature: parseFloat(inputTemp),
+                humidity: parseFloat(inputHumid),
+                moisture: parseFloat(inputMoist),
                 timestamp: new Date().toISOString(),
                 recordedBy: userEmail,
                 villageId
             });
-            setTempInput('');
-            setHumidityInput('');
-            setMoistureInput('');
-            if (onSuccess) onSuccess("Sensor reading added.");
-        } catch (err) {
-            console.error(err);
-            if (onError) onError("Failed to save reading");
-        } finally {
-            setIsSubmitting(false);
-        }
+            if (onSuccess) onSuccess(`Sensor reading logged for ${activeRoom}.`);
+            setInputTemp(''); setInputHumid(''); setInputMoist('');
+        } catch (err) { console.error(err); if (onError) onError("Failed to save reading."); } finally { setIsSubmitting(false); }
     };
 
-    const chartData = useMemo(() => {
-        return [...logs].reverse().slice(-20);
-    }, [logs]);
+    // Filter Logic
+    const filteredRooms = useMemo(() => {
+        if (selectedTypeFilter === 'All') return activeRooms;
+        const allowedRooms = MUSHROOM_ROOM_MAPPING[selectedTypeFilter] || [];
+        return activeRooms.filter(r => allowedRooms.includes(r));
+    }, [activeRooms, selectedTypeFilter]);
 
-    const maxTemp = 40; 
-    const maxHumid = 100;
+    // Ensure activeRoom is valid within filter
+    useEffect(() => {
+        if (filteredRooms.length > 0 && !filteredRooms.includes(activeRoom)) {
+            setActiveRoom(filteredRooms[0]);
+        }
+    }, [filteredRooms, activeRoom]);
+
+    // Derived Logic
+    const roomLogs = logs.filter(l => l.roomId === activeRoom);
+    const latest = roomLogs[0] || { temperature: 0, humidity: 0, moisture: 0, roomId: activeRoom, timestamp: new Date().toISOString() };
+    const previous = roomLogs[1] || { temperature: latest.temperature, humidity: latest.humidity, moisture: latest.moisture };
+    
+    // Determine Assigned Strain for Active Room (Latest batch wins or Map lookup)
+    const batchesInRoom = activeBatches.filter(b => b.roomId === activeRoom);
+    let assignedStrain = batchesInRoom.length > 0 ? batchesInRoom[0].mushroomStrain || 'Oyster' : 'Oyster';
+    
+    // Fallback using mapping if no active batch
+    if (batchesInRoom.length === 0) {
+        for (const [strain, rooms] of Object.entries(MUSHROOM_ROOM_MAPPING)) {
+            if (rooms.includes(activeRoom)) {
+                assignedStrain = strain;
+                break;
+            }
+        }
+    }
+
+    const rules = IDEAL_CONDITIONS[assignedStrain] || IDEAL_CONDITIONS['Oyster'];
+
+    // 1️⃣ Notification & Automation Logic Engine (Updated with Outside Impact Rules)
+    useEffect(() => {
+        const newNotifs: typeof notifications = [];
+        const newActions: string[] = [];
+        
+        let fOn = false;
+        let cOn = false;
+        let hOn = false;
+
+        const isIndoorTempRising = latest.temperature > previous.temperature;
+
+        // --- Environmental Impact Rules (Outside -> Inside) ---
+
+        // Rule 1: High Outside Temp + Rising Indoor Temp
+        // Impact: Ventilation or Cooling Needed
+        if (outsideTemp > 32 && isIndoorTempRising) {
+            fOn = true;
+            cOn = true;
+            newNotifs.push({ 
+                type: 'WEATHER', 
+                msg: `Ext Heat Impact: Outside ${outsideTemp}°C & Indoor Rising.`, 
+                action: "Ventilation + Cooling ON",
+                urgency: 'High'
+            });
+            newActions.push("Activate Cooling System", "Maximize Ventilation");
+        } 
+        // Rule 2: Sharp Drop / Low Outside Temp
+        // Impact: Risk of indoor temp decline
+        else if (outsideTemp < 18) {
+            newNotifs.push({ 
+                type: 'WEATHER', 
+                msg: `Cold Front Alert: Outside ${outsideTemp}°C. Monitor Indoor Temp.`, 
+                action: "Reduce Ventilation + Heater Alert", 
+                urgency: 'Normal' 
+            });
+            newActions.push("Reduce Ventilation", "Check Heater");
+        }
+
+        // Rule 3: Heavy Rain or High Outside Humidity
+        // Impact: Risk of excessive indoor humidity -> Increase air exchange
+        if (outsideCondition === 'Rain' || outsideHumidity > 85) {
+            fOn = true;
+            newNotifs.push({ 
+                type: 'WEATHER', 
+                msg: `High Outdoor Moisture (Rain/${outsideHumidity}%). Indoor humidity risk.`, 
+                action: "Increase Air Exchange", 
+                urgency: 'Normal' 
+            });
+            newActions.push("Increase Air Exchange Rate");
+        }
+
+        // Rule 4: Dry Hot Weather
+        if (outsideTemp > 30 && outsideHumidity < 40) {
+             hOn = true;
+             newNotifs.push({
+                 type: 'WEATHER',
+                 msg: `Dry Heat Alert: Low Outside Humidity (${outsideHumidity}%).`,
+                 action: "Activate Humidifier",
+                 urgency: 'Normal'
+             });
+             newActions.push("Activate Humidifier");
+        }
+
+        // --- Standard Indoor Threshold Rules ---
+
+        // 🌡️ Temperature Control Flow
+        // IF outsideTemp > 32°C AND indoorTemp > idealMax
+        if (outsideTemp > 32 && latest.temperature > rules.maxT) {
+            fOn = true;
+            newNotifs.push({ type: 'RISK', msg: `Temp Critical: ${latest.temperature}°C > ${rules.maxT}°C (Outside ${outsideTemp}°C)`, action: "Fan + Alert", urgency: 'High' });
+            if (!newActions.includes("Turn on exhaust fan")) newActions.push("Turn on exhaust fan", "Increase monitoring frequency");
+        } else if (latest.temperature > rules.maxT) {
+            fOn = true;
+            newNotifs.push({ type: 'RISK', msg: `Temp High: ${latest.temperature}°C > ${rules.maxT}°C`, action: "Fan ON", urgency: 'Normal' });
+            if (!newActions.includes("Turn on exhaust fan")) newActions.push("Turn on exhaust fan");
+        } else if (latest.temperature < rules.minT) {
+            newNotifs.push({ type: 'RISK', msg: `Temp Low: ${latest.temperature}°C < ${rules.minT}°C`, action: "Heater Alert", urgency: 'Normal' });
+        }
+
+        // 💧 Humidity Control Flow
+        // IF indoorHumidity < idealMin
+        if (latest.humidity < rules.minH) {
+            hOn = true;
+            newNotifs.push({ 
+                type: 'RISK', 
+                msg: `Humidity Low: ${latest.humidity}% < ${rules.minH}%`, 
+                action: "Humidifier ON",
+                urgency: 'Normal'
+            });
+            if (!newActions.includes("Activate humidifier")) newActions.push("Activate humidifier", "Log water usage");
+        }
+
+        // 4️⃣ Harvest Notification Logic (AI + Rule Engine)
+        batchesInRoom.forEach(batch => {
+            const cycleDays = SPECIES_CYCLES[batch.mushroomStrain || 'Oyster'] || 30;
+            const daysElapsed = (new Date().getTime() - new Date(batch.timestamp).getTime()) / (1000 * 60 * 60 * 24);
+            const progress = daysElapsed / cycleDays; // growthStage >= 90%
+            
+            if (progress >= 0.9) {
+                const daysRemaining = Math.max(0, Math.ceil(cycleDays - daysElapsed));
+                
+                if (daysRemaining <= 3) {
+                    let urgency: 'Normal' | 'High' | 'Critical' = 'Normal';
+                    let msg = `Harvest Alert: Batch ${batch.batchId} ready in ${daysRemaining} days.`;
+                    
+                    if (daysRemaining === 1) {
+                        urgency = 'High';
+                        msg = `URGENT: Batch ${batch.batchId} harvest due TOMORROW.`;
+                    } else if (daysRemaining === 0) {
+                        urgency = 'Critical';
+                        msg = `CRITICAL: HARVEST TODAY - Batch ${batch.batchId}.`;
+                    }
+
+                    newNotifs.push({
+                        type: 'HARVEST',
+                        msg,
+                        action: "Prepare Labor & Baskets",
+                        urgency
+                    });
+                }
+            }
+        });
+
+        setFanActive(fOn);
+        setCoolingActive(cOn);
+        setHumidifierActive(hOn);
+        setNotifications(newNotifs);
+        setSystemActions(newActions);
+    }, [latest, previous, outsideTemp, outsideHumidity, outsideCondition, activeRoom, batchesInRoom, rules]);
+
+    // 6️⃣ AI Prediction Logic (Simulated)
+    const getTrend = (curr: number, prev: number) => {
+        if (Math.abs(curr - prev) < 0.5) return 'Stable ↔';
+        return curr > prev ? 'Increasing ↑' : 'Decreasing ↓';
+    };
+
+    const aiAnalysis = useMemo(() => {
+        let riskScore = 0;
+        if (latest.temperature > rules.maxT || latest.temperature < rules.minT) riskScore += 20;
+        if (latest.humidity < rules.minH) riskScore += 15;
+        // Impact of outside conditions on risk
+        if (outsideTemp > 35) riskScore += 10;
+        if (outsideHumidity > 90) riskScore += 5;
+        
+        const confidence = Math.max(50, 98 - riskScore);
+        const cycle = SPECIES_CYCLES[assignedStrain] || 30;
+        // Estimate based on the oldest active batch
+        const oldestBatch = batchesInRoom[batchesInRoom.length - 1]; 
+        let daysToHarvest = cycle;
+        
+        if (oldestBatch) {
+             const elapsed = (new Date().getTime() - new Date(oldestBatch.timestamp).getTime()) / (1000 * 60 * 60 * 24);
+             daysToHarvest = Math.max(0, Math.ceil(cycle - elapsed));
+        }
+        
+        const adjustedDays = riskScore > 20 ? daysToHarvest + 2 : daysToHarvest;
+
+        return {
+            tempTrend: getTrend(latest.temperature, previous.temperature),
+            humidTrend: getTrend(latest.humidity, previous.humidity),
+            moistTrend: getTrend(latest.moisture, previous.moisture),
+            harvestDays: adjustedDays,
+            confidence,
+            risk: riskScore > 30 ? 'High' : riskScore > 10 ? 'Medium' : 'Low'
+        };
+    }, [latest, previous, rules, assignedStrain, batchesInRoom, outsideTemp, outsideHumidity]);
+
+    const getStatus = (val: number, min: number, max: number) => {
+        if (val >= min && val <= max) return 'green';
+        if (val < min * 0.9 || val > max * 1.1) return 'red';
+        return 'yellow';
+    };
+
+    const metrics = [
+        { label: 'Temperature', unit: '°C', val: latest.temperature, min: rules.minT, max: rules.maxT, status: getStatus(latest.temperature, rules.minT, rules.maxT) },
+        { label: 'Humidity', unit: '%', val: latest.humidity, min: rules.minH, max: rules.maxH, status: getStatus(latest.humidity, rules.minH, rules.maxH) },
+        { label: 'Substrate Moisture', unit: '%', val: latest.moisture, min: rules.minM, max: rules.maxM, status: getStatus(latest.moisture, rules.minM, rules.maxM) },
+    ];
+
+    if (loading) return <div className="p-10 text-center animate-pulse">Loading environmental data...</div>;
 
     return (
-        <div className="space-y-6 animate-fade-in-up">
+        <div className="space-y-8 animate-fade-in-up">
             
-            {/* Real World Weather Comparison Banner */}
-            <div className="bg-indigo-600 rounded-xl p-6 text-white shadow-lg overflow-hidden relative">
-                <div className="absolute top-0 right-0 -mr-16 -mt-16 w-64 h-64 bg-indigo-500 rounded-full opacity-20"></div>
-                <div className="relative z-10 flex flex-col md:flex-row justify-between items-center gap-6">
-                    <div className="flex items-center gap-4">
-                        <div className="p-4 bg-white/20 rounded-2xl backdrop-blur-md">
-                            <svg className="w-10 h-10" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 15a4 4 0 004 4h9a5 5 0 10-.1-9.999 5.002 5.002 0 10-9.78 2.096A4.001 4.001 0 003 15z" />
-                            </svg>
-                        </div>
-                        <div>
-                            <h3 className="text-xl font-bold">Outside Weather Forecast</h3>
-                            <p className="text-indigo-100 text-sm">Real-time external conditions for your location</p>
-                        </div>
+            {/* Room Selector Header */}
+            <div className="flex flex-col sm:flex-row justify-between items-center gap-4 bg-white p-4 rounded-xl border border-gray-200 shadow-sm">
+                <div className="flex items-center gap-3">
+                    <div className="bg-indigo-100 p-2 rounded-lg">
+                        <svg className="w-6 h-6 text-indigo-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" /></svg>
                     </div>
-                    
-                    {weatherLoading ? (
-                        <div className="animate-pulse flex space-x-4">
-                            <div className="h-10 w-24 bg-indigo-500 rounded"></div>
-                            <div className="h-10 w-24 bg-indigo-500 rounded"></div>
-                        </div>
-                    ) : externalWeather ? (
-                        <div className="flex gap-8 items-center bg-black/10 px-6 py-3 rounded-2xl backdrop-blur-sm border border-white/10">
-                            <div className="text-center">
-                                <p className="text-[10px] uppercase font-bold text-indigo-200">External Temp</p>
-                                <p className="text-2xl font-black">{externalWeather.temp}°C</p>
-                            </div>
-                            <div className="w-px h-10 bg-white/20"></div>
-                            <div className="text-center">
-                                <p className="text-[10px] uppercase font-bold text-indigo-200">External Humid</p>
-                                <p className="text-2xl font-black">{externalWeather.humidity}%</p>
-                            </div>
-                            <div className="w-px h-10 bg-white/20"></div>
-                            <div className="text-center">
-                                <p className="text-[10px] uppercase font-bold text-indigo-200">Conditions</p>
-                                <p className="text-sm font-bold whitespace-nowrap">{externalWeather.condition}</p>
-                            </div>
-                        </div>
-                    ) : (
-                        <p className="text-sm italic text-indigo-200">Awaiting location access...</p>
-                    )}
-                </div>
-            </div>
-
-            {/* Existing internal sensors */}
-            <div className="grid grid-cols-1 gap-5 sm:grid-cols-3">
-                <div className={`bg-white overflow-hidden shadow rounded-lg border-l-4 ${latest.temperature > 28 ? 'border-red-500' : 'border-green-500'}`}>
-                    <div className="px-4 py-5 sm:p-6">
-                        <dt className="text-xs font-medium text-gray-500 uppercase truncate">Internal Temperature</dt>
-                        <dd className="mt-1 text-3xl font-semibold text-gray-900 flex items-baseline">
-                            {latest.temperature}°C
-                            {latest.temperature > 28 && <span className="ml-2 text-[10px] font-bold bg-red-100 text-red-600 px-2 py-0.5 rounded-full animate-pulse">HOT</span>}
-                        </dd>
-                        {externalWeather && (
-                            <p className="text-[10px] mt-1 text-gray-400">
-                                {latest.temperature > externalWeather.temp ? 'Inside is warmer' : 'Inside is cooler'} than outside
-                            </p>
-                        )}
-                    </div>
-                </div>
-                <div className={`bg-white overflow-hidden shadow rounded-lg border-l-4 ${latest.humidity < 75 ? 'border-orange-500' : 'border-blue-500'}`}>
-                    <div className="px-4 py-5 sm:p-6">
-                        <dt className="text-xs font-medium text-gray-500 uppercase truncate">Internal Humidity</dt>
-                        <dd className="mt-1 text-3xl font-semibold text-gray-900 flex items-baseline">
-                            {latest.humidity}%
-                            {latest.humidity < 75 && <span className="ml-2 text-[10px] font-bold bg-orange-100 text-orange-600 px-2 py-0.5 rounded-full">DRY</span>}
-                        </dd>
-                        {externalWeather && (
-                            <p className="text-[10px] mt-1 text-gray-400">
-                                Outside humidity is {externalWeather.humidity}%
-                            </p>
-                        )}
-                    </div>
-                </div>
-                <div className="bg-white overflow-hidden shadow rounded-lg border-l-4 border-gray-400">
-                    <div className="px-4 py-5 sm:p-6">
-                        <dt className="text-xs font-medium text-gray-500 uppercase truncate">Substrate Moisture</dt>
-                        <dd className="mt-1 text-3xl font-semibold text-gray-900">{latest.moisture}%</dd>
-                    </div>
-                </div>
-            </div>
-
-            {/* 3. Harvest Forecast & Countdowns */}
-            <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-                <div className="px-6 py-4 border-b border-gray-200 bg-gray-50 flex justify-between items-center">
                     <div>
-                        <h3 className="text-lg font-bold text-gray-900">Active Batch Harvest Forecast</h3>
-                        <p className="text-xs text-gray-500">Real-time predictions based on species & environment ({villageId})</p>
-                    </div>
-                    <div className="hidden sm:flex gap-2 text-[10px] font-medium uppercase text-gray-400">
-                        <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-green-500"></span> On Track</span>
-                        <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-red-500"></span> Delayed</span>
+                        <h2 className="text-lg font-bold text-gray-900">Room Monitor</h2>
+                        <div className="flex items-center gap-2">
+                            <span className="text-xs text-gray-500">Active Crop:</span>
+                            <span className="text-xs font-black bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded border border-indigo-100 uppercase">{assignedStrain}</span>
+                        </div>
                     </div>
                 </div>
                 
-                {predictions.length === 0 ? (
-                    <div className="p-10 text-center text-gray-400">
-                        <p>No active batches or sensor data available for {villageId}.</p>
-                        <p className="text-xs mt-2">Ensure "Substrate Prep" has been logged in Farming tab and sensors are active.</p>
+                <div className="flex flex-col sm:flex-row items-center gap-3">
+                    <select 
+                        value={selectedTypeFilter} 
+                        onChange={(e) => setSelectedTypeFilter(e.target.value)}
+                        className="text-xs font-bold border border-gray-300 rounded-md py-1.5 pl-2 pr-8 focus:ring-indigo-500 focus:border-indigo-500 bg-white text-gray-700 h-9"
+                    >
+                        <option value="All">All Crops</option>
+                        {Object.keys(MUSHROOM_ROOM_MAPPING).map(type => (
+                            <option key={type} value={type}>{type}</option>
+                        ))}
+                    </select>
+
+                    <div className="flex gap-2 bg-gray-100 p-1 rounded-lg overflow-x-auto max-w-xs sm:max-w-md">
+                        {filteredRooms.length > 0 ? filteredRooms.map(room => (
+                            <button 
+                                key={room} 
+                                onClick={() => setActiveRoom(room)}
+                                className={`px-4 py-1.5 rounded-md text-xs font-bold transition-all whitespace-nowrap ${activeRoom === room ? 'bg-white text-indigo-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
+                            >
+                                {room}
+                            </button>
+                        )) : <span className="text-xs text-gray-400 px-4 py-2">No rooms found</span>}
                     </div>
-                ) : (
-                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 p-6 bg-gray-50/50">
-                        {predictions.map((p) => {
-                            const isDelayed = p.stressFactor > 0;
-                            const isReady = p.status === 'Harvest Ready';
-                            const isTargetMet = p.status === 'Target Met';
-                            
-                            let cardBorder = "border-gray-200";
-                            let statusBadge = "bg-gray-100 text-gray-600";
-                            
-                            if (isReady) {
-                                cardBorder = "border-green-400 ring-2 ring-green-100";
-                                statusBadge = "bg-green-100 text-green-800";
-                            } else if (isTargetMet) {
-                                cardBorder = "border-blue-400 ring-2 ring-blue-100";
-                                statusBadge = "bg-blue-100 text-blue-800";
-                            } else if (p.status.includes('Heat')) {
-                                cardBorder = "border-red-300";
-                                statusBadge = "bg-red-100 text-red-800";
-                            } else if (p.status.includes('Dry')) {
-                                cardBorder = "border-orange-300";
-                                statusBadge = "bg-orange-100 text-orange-800";
-                            } else if (p.status.includes('Cold')) {
-                                cardBorder = "border-blue-300";
-                                statusBadge = "bg-blue-100 text-blue-800";
-                            } else {
-                                cardBorder = "border-l-4 border-l-green-500";
-                                statusBadge = "bg-green-50 text-green-700";
-                            }
-
-                            return (
-                                <div key={p.batchId} className={`bg-white rounded-lg shadow-sm border p-4 relative ${cardBorder} transition-all duration-300 hover:shadow-md flex flex-col justify-between`}>
-                                    <div>
-                                        <div className="flex justify-between items-start mb-2 pr-6">
-                                            <div>
-                                                <h4 className="font-bold text-gray-900 flex items-center gap-2">
-                                                    {p.batchId}
-                                                    <span className="text-[10px] px-1.5 py-0.5 bg-gray-100 text-gray-500 rounded border border-gray-200">
-                                                        {p.villageId}
-                                                    </span>
-                                                </h4>
-                                                <div className="text-xs text-gray-500">{p.strain} • Planted {p.plantingDate.toLocaleDateString()}</div>
-                                            </div>
-                                            <span className={`text-[10px] font-bold uppercase px-2 py-1 rounded-full whitespace-nowrap ${statusBadge}`}>
-                                                {p.status}
-                                            </span>
-                                        </div>
-
-                                        <div className="my-4 text-center">
-                                            {isReady ? (
-                                                <div className="text-green-600 font-bold text-xl animate-bounce">
-                                                    Ready Now
-                                                </div>
-                                            ) : isTargetMet ? (
-                                                <div className="text-blue-600 font-bold text-lg">
-                                                    Production Goal Met
-                                                </div>
-                                            ) : (
-                                                <div className="flex justify-center items-baseline gap-1">
-                                                    <span className={`text-4xl font-extrabold tracking-tight ${isDelayed ? 'text-gray-500' : 'text-indigo-600'}`}>
-                                                        {p.adjustedDaysRemaining}
-                                                    </span>
-                                                    <span className="text-sm text-gray-500 font-medium">days left</span>
-                                                </div>
-                                            )}
-                                            <div className="text-xs text-gray-400 mt-1">
-                                                Est: {p.predictedDate.toLocaleDateString(undefined, {month:'short', day:'numeric'})}
-                                            </div>
-                                        </div>
-
-                                        <div className="border-t border-gray-100 pt-3 flex justify-between items-center text-xs">
-                                            <div className="flex items-center gap-2">
-                                                <span className={`flex items-center gap-1 ${p.isTemperatureBad ? 'text-red-500 font-bold' : 'text-green-600'}`}>
-                                                    <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M10 2a1 1 0 011 1v1a1 1 0 11-2 0V3a1 1 0 011-1zm4 8a4 4 0 11-8 0 4 4 0 018 0zm-.464 4.95l.707.707a1 1 0 001.414-1.414l-.707-.707a1 1 0 00-1.414 1.414zm2.12-10.607a1 1 0 010 1.414l-.706.707a1 1 0 11-1.414-1.414l.707-.707a1 1 0 011.414 0zM17 11a1 1 0 100-2h-1a1 1 0 100 2h1zm-7 4a1 1 0 011 1v1a1 1 0 11-2 0v-1a1 1 0 011-1zM5.05 6.464A1 1 0 106.465 5.05l-.708-.707a1 1 0 00-1.414 1.414l.707.707zm1.414 8.486l-.707.707a1 1 0 01-1.414-1.414l.707-.707a1 1 0 011.414 1.414zM4 11a1 1 0 100-2H3a1 1 0 000 2h1z" clipRule="evenodd" /></svg>
-                                                    Temp
-                                                </span>
-                                                <span className={`flex items-center gap-1 ${p.isHumidityBad ? 'text-orange-500 font-bold' : 'text-blue-600'}`}>
-                                                     <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clipRule="evenodd" /></svg>
-                                                    Humid
-                                                </span>
-                                            </div>
-                                            
-                                            {isDelayed && (
-                                                <span className="text-red-500 font-bold">
-                                                    +{p.stressFactor} day delay
-                                                </span>
-                                            )}
-                                        </div>
-                                    </div>
-                                    
-                                    <div className="mt-4 flex gap-2 border-t border-gray-100 pt-3">
-                                        <button 
-                                            onClick={() => handleStopMonitoring(p.id, p.villageId)}
-                                            className="flex-1 py-1.5 px-2 bg-white border border-red-200 text-red-600 hover:bg-red-50 text-xs font-medium rounded transition-colors"
-                                        >
-                                            End Batch
-                                        </button>
-                                        <button 
-                                            onClick={handleContinueMonitoring}
-                                            className="flex-1 py-1.5 px-2 bg-gray-50 border border-gray-200 text-gray-600 hover:bg-gray-100 text-xs font-medium rounded transition-colors"
-                                        >
-                                            Continue
-                                        </button>
-                                    </div>
-                                </div>
-                            );
-                        })}
-                    </div>
-                )}
+                </div>
             </div>
 
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            {/* 1️⃣ Overview Panel */}
+            <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+                <div className="px-6 py-4 border-b border-gray-100 flex justify-between items-center bg-gray-50">
+                    <div><h2 className="text-sm font-black text-gray-500 uppercase tracking-widest">Real-time Conditions</h2></div>
+                    <div className="text-right"><div className="text-[10px] font-bold text-gray-400 uppercase">Last Updated</div><div className="text-xs font-mono text-gray-800">{new Date(latest.timestamp).toLocaleTimeString()}</div></div>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-3 divide-y md:divide-y-0 md:divide-x divide-gray-100">
+                    {metrics.map((m) => (
+                        <div key={m.label} className="p-6 text-center group hover:bg-gray-50 transition-colors">
+                            <div className="text-xs font-bold text-gray-400 uppercase tracking-widest mb-2">{m.label}</div>
+                            <div className="text-3xl font-black text-gray-800 mb-1">{m.val} <span className="text-sm text-gray-400 font-medium">{m.unit}</span></div>
+                            <div className="flex justify-center items-center gap-2 mb-2">
+                                <div className={`h-2 w-2 rounded-full ${m.status === 'green' ? 'bg-green-500' : m.status === 'yellow' ? 'bg-yellow-500' : 'bg-red-500'}`}></div>
+                                <span className={`text-[10px] font-bold uppercase ${m.status === 'green' ? 'text-green-600' : m.status === 'yellow' ? 'text-yellow-600' : 'text-red-600'}`}>{m.status === 'green' ? 'Normal' : m.status === 'yellow' ? 'Warning' : 'Action Req'}</span>
+                            </div>
+                            <div className="text-[10px] text-gray-400 bg-gray-100 rounded px-2 py-1 inline-block">Ideal: {m.min} - {m.max}</div>
+                        </div>
+                    ))}
+                </div>
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
                 
-                <div className="bg-white rounded-xl shadow-sm border border-gray-200 h-full">
-                    <div className="px-6 py-4 border-b border-gray-200 bg-gray-50">
-                         <h3 className="text-lg font-bold text-gray-900">Log Sensor Readings</h3>
-                         <p className="text-xs text-gray-500">Manual entry (Simulates IoT device)</p>
+                {/* Left Column: Alerts & AI */}
+                <div className="space-y-8">
+                    
+                    {/* C. External Weather (Linked + Sim) */}
+                    <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-4">
+                        <h3 className="text-xs font-bold text-gray-500 uppercase mb-3 flex items-center gap-2">
+                            <span className="text-xl">🌦️</span> External Weather
+                        </h3>
+                        
+                        {/* Simulation Controls for Logic Testing */}
+                        <div className="bg-gray-50 p-3 rounded-lg mb-3 border border-gray-100">
+                            <div className="text-[9px] font-bold text-gray-400 uppercase mb-2">Simulation Controls (For Alert Testing)</div>
+                            <div className="grid grid-cols-2 gap-2 mb-2">
+                                <div className="flex items-center gap-2">
+                                    <label className="text-[10px] text-gray-500 font-bold">Temp:</label>
+                                    <input type="number" value={outsideTemp} onChange={e=>setOutsideTemp(parseFloat(e.target.value))} className="w-full p-1 text-sm border rounded text-center font-bold" />
+                                    <span className="text-xs font-bold text-gray-400">°C</span>
+                                </div>
+                                <div className="flex items-center gap-2">
+                                    <label className="text-[10px] text-gray-500 font-bold">Humid:</label>
+                                    <input type="number" value={outsideHumidity} onChange={e=>setOutsideHumidity(parseFloat(e.target.value))} className="w-full p-1 text-sm border rounded text-center font-bold" />
+                                    <span className="text-xs font-bold text-gray-400">%</span>
+                                </div>
+                            </div>
+                            <div className="flex items-center gap-2">
+                                <label className="text-[10px] text-gray-500 font-bold">Cond:</label>
+                                <select value={outsideCondition} onChange={e=>setOutsideCondition(e.target.value as any)} className="w-full p-1 text-xs border rounded font-bold">
+                                    <option value="Sunny">Sunny</option><option value="Rain">Rain</option><option value="Cloudy">Cloudy</option><option value="Night">Night</option>
+                                </select>
+                            </div>
+                        </div>
+                        
+                        <div className="flex flex-col items-center justify-center py-2 space-y-3">
+                            <a 
+                                href="https://www.accuweather.com/en/my/malaysia-weather" 
+                                target="_blank" 
+                                rel="noopener noreferrer"
+                                className="w-full bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 font-bold py-2 px-4 rounded-xl flex items-center justify-center gap-2 transition-colors text-xs uppercase tracking-wide"
+                            >
+                                <span>Check Real Weather</span>
+                                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" /></svg>
+                            </a>
+                        </div>
                     </div>
-                    <form onSubmit={handleAddReading} className="p-6 space-y-4">
-                        <div>
-                            <label className="block text-xs font-medium text-gray-700">Temperature (°C)</label>
-                            <input 
-                                type="number" step="0.1" required 
-                                value={tempInput} onChange={e => setTempInput(e.target.value)}
-                                className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
-                                placeholder="Optimal: 20-25"
-                            />
+
+                    {/* A, B, C: Integrated Notifications */}
+                    <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden h-fit">
+                        <div className="px-6 py-4 border-b border-gray-100 bg-red-50 flex justify-between items-center">
+                            <h3 className="font-bold text-red-800 flex items-center gap-2 text-sm uppercase tracking-wide">
+                                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" /></svg>
+                                Live Notifications
+                            </h3>
+                            <span className="bg-red-200 text-red-800 text-[10px] font-black px-2 py-0.5 rounded-full">{notifications.length}</span>
                         </div>
-                        <div>
-                            <label className="block text-xs font-medium text-gray-700">Humidity (%)</label>
-                            <input 
-                                type="number" step="0.1" required 
-                                value={humidityInput} onChange={e => setHumidityInput(e.target.value)}
-                                className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
-                                placeholder="Optimal: >80"
-                            />
+                        <div className="p-0">
+                            {notifications.length === 0 ? (
+                                <div className="p-8 text-center text-green-600 font-medium text-xs flex flex-col items-center">
+                                    <svg className="w-8 h-8 mb-2 opacity-50" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                                    System Nominal.
+                                </div>
+                            ) : (
+                                <div className="divide-y divide-gray-100">
+                                    {notifications.map((note, idx) => (
+                                        <div key={idx} className={`p-4 ${note.urgency === 'Critical' ? 'bg-red-100' : note.type === 'HARVEST' ? 'bg-green-50' : note.type === 'WEATHER' ? 'bg-blue-50' : 'bg-orange-50'}`}>
+                                            <div className="flex justify-between items-start mb-1">
+                                                <span className={`text-[10px] font-black px-2 py-0.5 rounded uppercase ${
+                                                    note.urgency === 'Critical' ? 'bg-red-600 text-white' : 
+                                                    note.urgency === 'High' ? 'bg-orange-500 text-white' : 
+                                                    'bg-gray-200 text-gray-700'
+                                                }`}>
+                                                    {note.urgency || 'Normal'}
+                                                </span>
+                                                <span className="text-[9px] font-bold text-gray-400">{note.type}</span>
+                                            </div>
+                                            <p className={`text-xs font-bold mb-1 ${note.urgency === 'Critical' ? 'text-red-900' : 'text-gray-800'}`}>{note.msg}</p>
+                                            {note.action && (
+                                                <div className="text-[10px] bg-white border border-gray-200 px-2 py-1 rounded inline-block text-gray-600 font-medium shadow-sm">
+                                                    Action: {note.action}
+                                                </div>
+                                            )}
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
                         </div>
-                        <div>
-                            <label className="block text-xs font-medium text-gray-700">Soil Moisture (%)</label>
-                            <input 
-                                type="number" step="0.1" 
-                                value={moistureInput} onChange={e => setMoistureInput(e.target.value)}
-                                className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
-                            />
+                    </div>
+
+                    {/* Automation Panel */}
+                    <div className="bg-slate-800 rounded-xl shadow-lg p-5 text-white">
+                        <h3 className="text-xs font-bold text-slate-400 uppercase mb-3 tracking-widest flex items-center gap-2">
+                            <svg className="w-4 h-4 animate-spin-slow" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
+                            Auto-System Actions
+                        </h3>
+                        <ul className="space-y-2">
+                            {systemActions.length > 0 ? systemActions.map((action, i) => (
+                                <li key={i} className="text-[10px] font-mono text-green-400 bg-slate-700/50 px-2 py-1.5 rounded border border-slate-600 flex items-center gap-2">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-green-500"></span>
+                                    {action}
+                                </li>
+                            )) : (
+                                <li className="text-[10px] text-slate-500 italic">No automated actions currently triggered.</li>
+                            )}
+                        </ul>
+                    </div>
+
+                    {/* 6️⃣ AI Prediction Panel */}
+                    <div className="bg-indigo-900 rounded-xl shadow-xl overflow-hidden text-white relative">
+                        <div className="absolute top-0 right-0 p-3 opacity-10">
+                            <svg className="w-32 h-32" fill="currentColor" viewBox="0 0 24 24"><path d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
                         </div>
-                        <button 
-                            type="submit" 
-                            disabled={isSubmitting}
-                            className={`w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white ${theme?.button || 'bg-indigo-600'} hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-offset-2`}
-                        >
-                            {isSubmitting ? 'Saving...' : 'Update Sensors'}
-                        </button>
-                    </form>
+                        <div className="p-6 relative z-10">
+                            <h3 className="text-sm font-bold text-indigo-300 uppercase tracking-widest mb-4">AI Growth Forecast</h3>
+                            <div className="grid grid-cols-3 gap-2 mb-6 text-center">
+                                <div className="bg-indigo-800/50 rounded-lg p-2"><div className="text-[9px] uppercase text-indigo-300">Temp Trend</div><div className="font-bold text-xs">{aiAnalysis.tempTrend}</div></div>
+                                <div className="bg-indigo-800/50 rounded-lg p-2"><div className="text-[9px] uppercase text-indigo-300">Humidity</div><div className="font-bold text-xs">{aiAnalysis.humidTrend}</div></div>
+                                <div className="bg-indigo-800/50 rounded-lg p-2"><div className="text-[9px] uppercase text-indigo-300">Moisture</div><div className="font-bold text-xs">{aiAnalysis.moistTrend}</div></div>
+                            </div>
+                            <div className="flex justify-between items-end border-t border-indigo-700 pt-4">
+                                <div><div className="text-xs text-indigo-300">Predicted Harvest</div><div className="text-2xl font-black text-white">{aiAnalysis.harvestDays} Days</div></div>
+                                <div className="text-right"><div className="text-xs text-indigo-300">Confidence</div><div className="text-xl font-bold text-green-400">{aiAnalysis.confidence}%</div></div>
+                            </div>
+                            <div className="mt-2 text-[10px] bg-indigo-950/50 py-1 px-2 rounded inline-block text-indigo-200">Risk Level: <span className={aiAnalysis.risk === 'Low' ? 'text-green-400' : 'text-orange-400'}>{aiAnalysis.risk}</span></div>
+                        </div>
+                    </div>
+
                 </div>
 
-                <div className="lg:col-span-2 bg-white rounded-xl shadow-sm border border-gray-200 p-6 flex flex-col justify-between">
-                    <h3 className="text-lg font-bold text-gray-900 mb-6">Historical Trends</h3>
+                {/* Right Column: Data Tables & Entry */}
+                <div className="lg:col-span-2 space-y-8">
                     
-                    {loading ? (
-                        <div className="h-64 flex items-center justify-center text-gray-400">Loading charts...</div>
-                    ) : logs.length === 0 ? (
-                        <div className="h-64 flex items-center justify-center text-gray-400">No data available. Add a reading to start.</div>
-                    ) : (
-                        <div className="space-y-8 flex-1">
-                            <div>
-                                <div className="flex justify-between text-xs text-gray-500 mb-2">
-                                    <span>Temperature Trend (°C)</span>
-                                    <span>Target: 20-26°C</span>
-                                </div>
-                                <div className="h-32 w-full bg-gray-50 rounded-lg border border-gray-100 flex items-end px-2 pt-4 pb-0 space-x-1 sm:space-x-2 relative">
-                                    <div className="absolute left-0 right-0 bottom-[50%] h-[15%] bg-green-500/10 pointer-events-none border-y border-green-500/20 z-0"></div>
-
-                                    {chartData.map((d, i) => (
-                                        <div key={i} className="flex-1 flex flex-col items-center justify-end h-full z-10 group">
-                                            <div 
-                                                className={`w-full max-w-[20px] rounded-t-sm transition-all duration-500 relative ${d.temperature > 28 ? 'bg-red-400' : d.temperature < 20 ? 'bg-blue-300' : 'bg-green-400'}`}
-                                                style={{ height: `${(d.temperature / maxTemp) * 100}%` }}
-                                            >
-                                                <div className="absolute -top-8 left-1/2 -translate-x-1/2 bg-gray-800 text-white text-[10px] py-1 px-2 rounded opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap z-20">
-                                                    {d.temperature}°C<br/>{new Date(d.timestamp).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}
-                                                </div>
-                                            </div>
-                                        </div>
-                                    ))}
-                                </div>
-                            </div>
-
-                            <div>
-                                <div className="flex justify-between text-xs text-gray-500 mb-2">
-                                    <span>Humidity Trend (%)</span>
-                                    <span>Target: &gt;80%</span>
-                                </div>
-                                <div className="h-32 w-full bg-gray-50 rounded-lg border border-gray-100 flex items-end px-2 pt-4 pb-0 space-x-1 sm:space-x-2 relative">
-                                    <div className="absolute left-0 right-0 top-0 h-[20%] bg-blue-500/5 pointer-events-none border-b border-blue-500/20 z-0"></div>
-
-                                    {chartData.map((d, i) => (
-                                        <div key={i} className="flex-1 flex flex-col items-center justify-end h-full z-10 group">
-                                            <div 
-                                                className={`w-full max-w-[20px] rounded-t-sm transition-all duration-500 relative ${d.humidity < 70 ? 'bg-orange-300' : 'bg-blue-400'}`}
-                                                style={{ height: `${(d.humidity / maxHumid) * 100}%` }}
-                                            >
-                                                <div className="absolute -top-8 left-1/2 -translate-x-1/2 bg-gray-800 text-white text-[10px] py-1 px-2 rounded opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap z-20">
-                                                    {d.humidity}%<br/>{new Date(d.timestamp).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}
-                                                </div>
-                                            </div>
-                                        </div>
-                                    ))}
-                                </div>
-                            </div>
+                    {/* Active Batches for this Room */}
+                    <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+                        <div className="bg-gray-50 px-6 py-3 border-b border-gray-100 flex justify-between items-center">
+                            <h3 className="text-xs font-bold text-gray-500 uppercase">Active Batches in {activeRoom}</h3>
+                            <span className="text-[10px] text-gray-400 font-bold uppercase">{batchesInRoom.length} Batch(es)</span>
                         </div>
-                    )}
+                        {batchesInRoom.length === 0 ? (
+                            <div className="p-6 text-center text-sm text-gray-400 italic">No active batches for {assignedStrain} found in this room.</div>
+                        ) : (
+                            <table className="w-full text-xs text-left">
+                                <thead className="text-gray-400 font-bold uppercase bg-white border-b">
+                                    <tr>
+                                        <th className="px-6 py-3">Batch ID</th>
+                                        <th className="px-6 py-3">Plant Date</th>
+                                        <th className="px-6 py-3">Strain</th>
+                                        <th className="px-6 py-3">Est. Harvest Date</th>
+                                        <th className="px-6 py-3 text-center">Status</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {batchesInRoom.map(batch => {
+                                        const cycleDays = SPECIES_CYCLES[batch.mushroomStrain || 'Oyster'] || 30;
+                                        const startDate = new Date(batch.timestamp);
+                                        const harvestDate = new Date(startDate.getTime() + cycleDays * 24 * 60 * 60 * 1000);
+                                        const today = new Date();
+                                        const diffTime = harvestDate.getTime() - today.getTime();
+                                        const daysRemaining = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+                                        
+                                        let statusColor = "bg-green-100 text-green-700";
+                                        let statusText = `${daysRemaining} Days Left`;
+                                        
+                                        if (daysRemaining <= 0) {
+                                            statusColor = "bg-red-100 text-red-700 animate-pulse border border-red-200";
+                                            statusText = "HARVEST NOW";
+                                        } else if (daysRemaining <= 3) {
+                                            statusColor = "bg-orange-100 text-orange-700 border border-orange-200";
+                                            statusText = "Prepare (Soon)";
+                                        }
+
+                                        return (
+                                            <tr key={batch.id} className="hover:bg-gray-50 text-gray-700">
+                                                <td className="px-6 py-3 font-bold">{batch.batchId}</td>
+                                                <td className="px-6 py-3">{startDate.toLocaleDateString()}</td>
+                                                <td className="px-6 py-3">{batch.mushroomStrain}</td>
+                                                <td className="px-6 py-3 font-mono font-medium">
+                                                    {harvestDate.toLocaleDateString()}
+                                                </td>
+                                                <td className="px-6 py-3 text-center">
+                                                    <span className={`px-2 py-1 rounded text-[10px] font-black uppercase ${statusColor}`}>
+                                                        {statusText}
+                                                    </span>
+                                                </td>
+                                            </tr>
+                                        );
+                                    })}
+                                </tbody>
+                            </table>
+                        )}
+                    </div>
+
+                    {/* 7️⃣ Manual Entry Form */}
+                    <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
+                        <h3 className="text-sm font-bold text-gray-900 uppercase mb-4">Log Sensor Reading for {activeRoom}</h3>
+                        <form onSubmit={handleAddReading} className="grid grid-cols-3 md:grid-cols-4 gap-4 items-end">
+                            <div><label className="block text-[10px] font-bold text-gray-400 uppercase mb-1">Temp (°C)</label><input type="number" step="0.1" value={inputTemp} onChange={e=>setInputTemp(e.target.value)} className="w-full p-2 border rounded text-sm" placeholder="24.0" /></div>
+                            <div><label className="block text-[10px] font-bold text-gray-400 uppercase mb-1">Humid (%)</label><input type="number" step="0.1" value={inputHumid} onChange={e=>setInputHumid(e.target.value)} className="w-full p-2 border rounded text-sm" placeholder="85.0" /></div>
+                            <div><label className="block text-[10px] font-bold text-gray-400 uppercase mb-1">Moist (%)</label><input type="number" step="0.1" value={inputMoist} onChange={e=>setInputMoist(e.target.value)} className="w-full p-2 border rounded text-sm" placeholder="65.0" /></div>
+                            <div className="md:col-span-1 col-span-3"><button disabled={isSubmitting} className="w-full bg-slate-900 text-white font-bold py-2 rounded uppercase text-xs hover:bg-black transition-colors">{isSubmitting ? '...' : 'Save'}</button></div>
+                        </form>
+                    </div>
+
+                    {/* 3️⃣ Ideal Conditions Reference (Read-only context) */}
+                    <div className="bg-indigo-50/50 rounded-xl border border-indigo-100 p-4 flex justify-between items-center text-xs">
+                        <span className="font-bold text-indigo-900 uppercase">Target Conditions ({assignedStrain})</span>
+                        <div className="flex gap-4 text-indigo-700">
+                            <span>Temp: <b>{rules.minT}-{rules.maxT}°C</b></span>
+                            <span>Humidity: <b>{rules.minH}-{rules.maxH}%</b></span>
+                            <span>Moisture: <b>{rules.minM}-{rules.maxM}%</b></span>
+                        </div>
+                    </div>
+
+                    {/* 2️⃣ Sensor Data Table */}
+                    <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+                        <div className="px-6 py-4 border-b border-gray-100 bg-gray-50">
+                            <h3 className="text-sm font-bold text-gray-900 uppercase">Room {activeRoom} Data Log</h3>
+                        </div>
+                        <div className="overflow-x-auto max-h-[300px]">
+                            <table className="w-full text-sm text-left">
+                                <thead className="text-xs text-gray-500 uppercase bg-gray-50 sticky top-0">
+                                    <tr>
+                                        <th className="px-6 py-3">Timestamp</th>
+                                        <th className="px-6 py-3">Temp</th>
+                                        <th className="px-6 py-3">Humid</th>
+                                        <th className="px-6 py-3">Moist</th>
+                                        <th className="px-6 py-3">Recorded By</th>
+                                    </tr>
+                                </thead>
+                                <tbody className="divide-y divide-gray-100">
+                                    {roomLogs.length === 0 ? (
+                                        <tr><td colSpan={5} className="px-6 py-8 text-center text-gray-400 italic">No sensor data logged for this room yet.</td></tr>
+                                    ) : (
+                                        roomLogs.map((log) => (
+                                            <tr key={log.id} className="hover:bg-gray-50 transition-colors">
+                                                <td className="px-6 py-3 font-mono text-xs text-gray-500">{new Date(log.timestamp).toLocaleString()}</td>
+                                                <td className="px-6 py-3 font-bold">{log.temperature}°C</td>
+                                                <td className="px-6 py-3">{log.humidity}%</td>
+                                                <td className="px-6 py-3">{log.moisture}%</td>
+                                                <td className="px-6 py-3 text-xs text-gray-400 truncate max-w-[100px]">{log.recordedBy.split('@')[0]}</td>
+                                            </tr>
+                                        ))
+                                    )}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
                 </div>
             </div>
         </div>

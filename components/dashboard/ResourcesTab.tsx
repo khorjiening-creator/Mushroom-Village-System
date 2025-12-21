@@ -14,6 +14,10 @@ interface FirestoreResource {
     lowStockThreshold: number;
     unitCost: number; // Cost per 1 unit (RM), except for 'L' which is per 10 units
     updatedAt: any;
+    // Equipment specific fields
+    condition?: 'Excellent' | 'Good' | 'Fair' | 'Service Due';
+    location?: string;
+    lastServiceDate?: string;
 }
 
 interface InventoryItem {
@@ -31,16 +35,32 @@ interface ResourcesTabProps {
     userEmail: string;
     theme?: any;
     onSuccess?: (msg: string) => void;
-    financialRecords: FinancialRecord[]; 
+    financialRecords: FinancialRecord[];
+    initialPurchaseState?: { active: boolean, itemId?: string };
+    onResetPurchaseState?: () => void;
 }
 
-export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail, theme, onSuccess, financialRecords }) => {
+// Requirements per 1kg of Mushroom Yield (Based on FarmingTab recipes)
+const MATERIAL_REQUIREMENTS: Record<string, number> = {
+    "MAT-573260995": 20,   // Straw (20kg per 1kg yield)
+    "MAT-545594408": 75,   // Water (50+5+20 = 75L per 1kg yield)
+    "MAT-406637503": 0.5,  // Bran (0.5kg per 1kg yield)
+    "MAT-446059102": 0.2,  // Gypsum (0.2kg per 1kg yield)
+    "MAT-282015830": 1,    // Spawn (1kg per 1kg yield)
+};
+
+export const ResourcesTab: React.FC<ResourcesTabProps> = ({ 
+    villageId, userEmail, theme, onSuccess, financialRecords, initialPurchaseState, onResetPurchaseState 
+}) => {
     // --- State ---
     const [resources, setResources] = useState<FirestoreResource[]>([]);
     const [inventory, setInventory] = useState<InventoryItem[]>([]);
     const [harvestLogs, setHarvestLogs] = useState<HarvestLog[]>([]); 
     const [loading, setLoading] = useState(true);
     
+    // Environment Context for Equipment Status
+    const [latestEnvLog, setLatestEnvLog] = useState<{temperature: number, humidity: number} | null>(null);
+
     // Aggregation states for Village C
     const [harvestLogsA, setHarvestLogsA] = useState<HarvestLog[]>([]);
     const [harvestLogsB, setHarvestLogsB] = useState<HarvestLog[]>([]);
@@ -86,9 +106,16 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
     // Confirm Receipt Logic
     const [isConfirmingReceipt, setIsConfirmingReceipt] = useState<string | null>(null);
     const [receivedInputs, setReceivedInputs] = useState<Record<string, string>>({});
+    const [showSupplyHistory, setShowSupplyHistory] = useState(false);
 
     // Notifications State
     const [activeNotification, setActiveNotification] = useState<{title: string, message: string} | null>(null);
+
+    // --- History Drawer State ---
+    const [isHistoryDrawerOpen, setIsHistoryDrawerOpen] = useState(false);
+    const [historyLogs, setHistoryLogs] = useState<any[]>([]);
+    const [historyMaterial, setHistoryMaterial] = useState<FirestoreResource | null>(null);
+    const [loadingHistory, setLoadingHistory] = useState(false);
 
     // --- Helpers ---
     const getResourceColName = (vid: VillageType) => vid === VillageType.A ? 'resourcesA' : vid === VillageType.B ? 'resourcesB' : 'resourcesC';
@@ -101,6 +128,73 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
         if (vid === VillageType.C) return "financialRecords_C";
         return "financialRecords"; 
     };
+
+    const handleViewHistory = async (item: FirestoreResource) => {
+        setHistoryMaterial(item);
+        setIsHistoryDrawerOpen(true);
+        setLoadingHistory(true);
+        setHistoryLogs([]);
+        try {
+            const colName = getResourceColName(villageId);
+            const q = query(
+                collection(db, colName, item.id, "stock_history"),
+                orderBy("timestamp", "desc"),
+                limit(20)
+            );
+            const snap = await getDocs(q);
+            const logs = snap.docs.map(d => ({id: d.id, ...d.data()}));
+            setHistoryLogs(logs);
+        } catch(e) {
+            console.error("Error fetching history", e);
+        } finally {
+            setLoadingHistory(false);
+        }
+    };
+
+    // --- Auto Set Thresholds Logic ---
+    const handleAutoSetThresholds = async () => {
+        const TARGET_YIELD_KG = 30;
+        const collectionName = getResourceColName(villageId);
+        let updatedCount = 0;
+
+        try {
+            await Promise.all(resources.map(async (res) => {
+                const reqPerKg = MATERIAL_REQUIREMENTS[res.id];
+                if (reqPerKg !== undefined) {
+                    const newThreshold = reqPerKg * TARGET_YIELD_KG;
+                    // Update if threshold is less than required or effectively zero
+                    if (res.lowStockThreshold < newThreshold) {
+                        const resRef = doc(db, collectionName, res.id);
+                        await updateDoc(resRef, {
+                            lowStockThreshold: newThreshold,
+                            updatedAt: new Date().toISOString()
+                        });
+                        updatedCount++;
+                    }
+                }
+            }));
+            
+            if (updatedCount > 0) {
+                if (onSuccess) onSuccess(`Safety limits updated for ${updatedCount} items (Target: 30kg yield).`);
+            } else {
+                if (onSuccess) onSuccess("Stock limits already compliant with 30kg yield capacity.");
+            }
+        } catch (e) {
+            console.error("Auto-set thresholds failed", e);
+            alert("Failed to update thresholds.");
+        }
+    };
+
+    // --- Auto Purchase Trigger Effect ---
+    useEffect(() => {
+        if (initialPurchaseState?.active) {
+            setIsPurchaseModalOpen(true);
+            if (initialPurchaseState.itemId) {
+                setPurchaseItemId(initialPurchaseState.itemId);
+            }
+            if (onResetPurchaseState) onResetPurchaseState();
+        }
+    }, [initialPurchaseState]);
 
     // --- Purchase Calculation Logic ---
     useEffect(() => {
@@ -143,6 +237,25 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
             rec.receivedInStock === false &&
             rec.materialId // Must have a linked material
         );
+    }, [activeFinSource]);
+
+    // Track receipts with discrepancies
+    const discrepancyReceipts = useMemo(() => {
+        return activeFinSource.filter(rec => {
+            const hasVariance = rec.orderQty !== undefined && rec.actualReceivedQty !== undefined && rec.orderQty !== rec.actualReceivedQty;
+            const notResolved = !(rec as any).varianceResolved;
+            return rec.category === 'Supplies' && rec.receivedInStock === true && hasVariance && notResolved;
+        });
+    }, [activeFinSource]);
+
+    // History of received supplies
+    const receivedSuppliesHistory = useMemo(() => {
+        return activeFinSource.filter(rec => 
+            rec.category === 'Supplies' && 
+            rec.type === 'EXPENSE' && 
+            rec.receivedInStock === true &&
+            rec.materialId
+        ).sort((a,b) => (b.updatedAt || b.date).localeCompare(a.updatedAt || a.date)).slice(0, 10);
     }, [activeFinSource]);
 
     // Map pending weights to resource ID for the "Pending Received" column
@@ -261,8 +374,16 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
         const unsubRes = onSnapshot(resCol, (snapshot) => {
             const list: FirestoreResource[] = [];
             snapshot.forEach(doc => list.push({ id: doc.id, ...doc.data() } as FirestoreResource));
-            if (list.length === 0 && villageId !== VillageType.C) seedDefaultResources();
-            else setResources(list);
+            
+            // Check if equipment needs seeding (auto-generate requirement)
+            const hasEquipment = list.some(i => i.category === 'Equipment');
+            if (!hasEquipment && list.length > 0 && villageId !== VillageType.C) {
+                seedDefaultResources(list);
+            } else if (list.length === 0 && villageId !== VillageType.C) {
+                seedDefaultResources([]);
+            } else {
+                setResources(list);
+            }
             setLoading(false);
         });
 
@@ -297,7 +418,18 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
                 snapshot.forEach(doc => list.push({ id: doc.id, ...doc.data() } as HarvestLog));
                 setHarvestLogs(list);
             });
-            return () => { unsubRes(); unsubInv(); unsubHarvest(); };
+
+            // Fetch Environment snapshot for Equipment Status
+            const envColName = `environmentLogs_${villageId.replace(/\s/g, '')}`;
+            const qEnv = query(collection(db, envColName), orderBy('timestamp', 'desc'), limit(1));
+            const unsubEnv = onSnapshot(qEnv, (snap) => {
+                if (!snap.empty) {
+                    const d = snap.docs[0].data();
+                    setLatestEnvLog({ temperature: d.temperature, humidity: d.humidity });
+                }
+            });
+
+            return () => { unsubRes(); unsubInv(); unsubHarvest(); unsubEnv(); };
         }
     }, [villageId]);
 
@@ -332,17 +464,30 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
         }
     };
 
-    const seedDefaultResources = async () => {
-        const defaults = [
+    const seedDefaultResources = async (existingList: FirestoreResource[] = []) => {
+        const materialDefaults = [
             { name: "Straw (Substrate)", quantity: 1000, unit: "kg", category: "Input", lowStockThreshold: 200, unitCost: 1.50, materialId: "MAT-573260995" },
             { name: "Spawn (Inoculum)", quantity: 100, unit: "kg", category: "Input", lowStockThreshold: 20, unitCost: 12.00, materialId: "MAT-282015830" },
             { name: "Bran", quantity: 400, unit: "kg", category: "Nutrient", lowStockThreshold: 100, unitCost: 3.50, materialId: "MAT-406637503" },
             { name: "Gypsum (Conditioner)", quantity: 50, unit: "kg", category: "Nutrient", lowStockThreshold: 10, unitCost: 2.00, materialId: "MAT-446059102" },
             { name: "Water Supply Tank", quantity: 5000, unit: "L", category: "Utility", lowStockThreshold: 1000, unitCost: 0.50, materialId: "MAT-545594408" },
         ];
+
+        const equipmentDefaults = [
+            { name: "Inline Duct Fan (High CFM)", quantity: 4, unit: "units", category: "Equipment", lowStockThreshold: 1, unitCost: 350.00, materialId: "EQP-FAN-001", location: "Room A1", condition: "Good" },
+            { name: "Industrial Humidifier", quantity: 2, unit: "units", category: "Equipment", lowStockThreshold: 1, unitCost: 800.00, materialId: "EQP-HUM-001", location: "Room A2", condition: "Excellent" },
+            { name: "Ceramic Heater Bank", quantity: 3, unit: "units", category: "Equipment", lowStockThreshold: 1, unitCost: 120.00, materialId: "EQP-HEAT-001", location: "Room A1", condition: "Fair" },
+            { name: "Evaporative Cooling Pad", quantity: 1, unit: "system", category: "Equipment", lowStockThreshold: 0, unitCost: 1500.00, materialId: "EQP-COOL-001", location: "Intake", condition: "Good" },
+        ];
+
+        const defaults = [...materialDefaults, ...equipmentDefaults];
         const col = collection(db, getResourceColName(villageId));
+        
+        // Only add items that don't exist
         for (const item of defaults) {
-            await setDoc(doc(col, item.materialId), { ...item, updatedAt: new Date().toISOString() });
+            if (!existingList.some(r => r.materialId === item.materialId)) {
+                await setDoc(doc(col, item.materialId), { ...item, updatedAt: new Date().toISOString() });
+            }
         }
     };
 
@@ -476,6 +621,50 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
         }
     };
 
+    const handleResolveVariance = async (rec: FinancialRecord, action: 'REFUND' | 'IGNORE') => {
+        const finColName = getFinancialCollectionName(villageId);
+        const finRef = doc(db, finColName, rec.id);
+        const variance = (rec.orderQty || 0) - (rec.actualReceivedQty || 0);
+        
+        try {
+            if (action === 'REFUND' && variance > 0 && rec.materialId) {
+                // Find resource to get unit cost
+                const res = resources.find(r => r.id === rec.materialId);
+                const factor = res?.unit === 'L' ? 10 : 1;
+                const unitCost = res?.unitCost || 0;
+                const refundAmount = (variance / factor) * unitCost;
+
+                const transactionId = "TXN-REF-" + Date.now().toString().slice(-6);
+                await setDoc(doc(db, finColName, transactionId), {
+                    transactionId,
+                    type: 'INCOME',
+                    category: 'Others', // Refund/Adjustment
+                    amount: refundAmount,
+                    date: new Date().toISOString().split('T')[0],
+                    description: `Refund for variance in Purchase ${rec.transactionId}: ${variance}${res?.unit || ''} missing.`,
+                    recordedBy: userEmail,
+                    villageId,
+                    status: 'COMPLETED', // Assuming immediate credit or tracking
+                    createdAt: new Date().toISOString()
+                });
+                
+                if (onSuccess) onSuccess(`Refund request created for RM${refundAmount.toFixed(2)}`);
+            }
+
+            // Mark as resolved
+            await updateDoc(finRef, {
+                varianceResolved: true,
+                updatedAt: new Date().toISOString()
+            });
+            
+            if (onSuccess && action === 'IGNORE') onSuccess("Variance resolved (ignored).");
+
+        } catch (e) {
+            console.error("Resolution failed", e);
+            alert("Error resolving variance.");
+        }
+    };
+
     const handleConfirmReceipt = async (rec: FinancialRecord) => {
         if (!rec.materialId) return;
         setIsConfirmingReceipt(rec.id);
@@ -517,7 +706,9 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
                 receivedInStock: true,
                 orderQty: orderQty, // Ensure it's explicitly stored if it wasn't before
                 actualReceivedQty: actualQty,
-                updatedAt: new Date().toISOString()
+                updatedAt: new Date().toISOString(),
+                // If perfect match, variance is auto-resolved. If not, it stays unresolved.
+                varianceResolved: actualQty === orderQty 
             });
 
             if (onSuccess) onSuccess(`Stock updated: +${actualQty} received for supply ${rec.transactionId}`);
@@ -535,9 +726,33 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
         }
     };
 
+    const getEquipmentStatus = (item: FirestoreResource) => {
+        if (!latestEnvLog) return 'Idle';
+        
+        const name = item.name.toLowerCase();
+        const t = latestEnvLog.temperature;
+        const h = latestEnvLog.humidity;
+
+        // Auto-generation logic matching Environment Tab
+        if (name.includes('fan') || name.includes('cooling')) {
+            if (t > 30) return 'Active (Auto)';
+        }
+        if (name.includes('humidifier')) {
+            if (h < 80) return 'Active (Auto)';
+        }
+        if (name.includes('heater')) {
+            if (t < 20) return 'Active (Auto)';
+        }
+        
+        return 'Idle';
+    };
+
     const totalProcessedStock = inventory.reduce((acc, item) => acc + (item.quantity || 0), 0);
     const totalAvailableStock = totalProcessedStock + totalCurrentStock;
     const ringClass = theme?.ring || "focus:ring-indigo-500";
+
+    const equipmentList = resources.filter(r => r.category === 'Equipment');
+    const materialList = resources.filter(r => r.category !== 'Equipment');
 
     return (
         <div className="space-y-6 animate-fade-in-up relative">
@@ -623,117 +838,21 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
                 )}
             </div>
 
-            {/* --- Input Material Section (HIDDEN FOR VILLAGE C) --- */}
-            {villageId !== VillageType.C && (
-                <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-                    <div className="px-6 py-4 border-b border-gray-200 bg-gray-50 flex flex-col sm:flex-row justify-between items-start sm:items-center">
-                        <div>
-                            <h2 className="text-lg font-black text-gray-900 tracking-tight">Material Availability (Inputs)</h2>
-                            <p className="text-xs text-gray-400 font-medium">Costing and quantity control for raw supplies.</p>
-                        </div>
-                        <div className="mt-2 sm:mt-0 flex gap-2">
-                            <button onClick={() => { setIsAddMatModalOpen(true); }} className="px-4 py-2.5 bg-white text-gray-700 border border-gray-200 text-xs font-black uppercase rounded-xl shadow-sm hover:bg-gray-50 transition-all flex items-center gap-2">
-                                <svg className="w-4 h-4 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" /></svg>
-                                New Material
-                            </button>
-                            <button onClick={() => { setPurchaseItemId(''); setIsPurchaseModalOpen(true); }} className="px-4 py-2.5 bg-indigo-600 text-white hover:bg-indigo-700 text-xs font-black uppercase rounded-xl shadow-lg transition-all flex items-center gap-2">
-                                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 3h2l.4 2M7 13h10l4-8H5.4M7 13L5.4 5M7 13l-2.293 2.293c-.63.63-.184 1.707.707 1.707H17m0 0a2 2 0 100 4 2 2 0 000-4zm-8 2a2 2 0 11-4 0 2 2 0 014 0z" /></svg>
-                                Purchase
-                            </button>
-                        </div>
-                    </div>
-
-                    <div className="overflow-x-auto">
-                        <table className="min-w-full divide-y divide-gray-100">
-                            <thead className="bg-gray-50/50">
-                                <tr className="text-[10px] font-black text-gray-400 uppercase tracking-widest">
-                                    <th className="px-6 py-4 text-left">Item Details</th>
-                                    <th className="px-6 py-4 text-left">Category</th>
-                                    <th className="px-6 py-4 text-right">Quantity</th>
-                                    <th className="px-6 py-4 text-right">Pending Received</th>
-                                    <th className="px-6 py-4 text-right">Unit Cost (RM)</th>
-                                    <th className="px-6 py-4 text-center">Availability</th>
-                                    <th className="px-6 py-4 text-center">Actions</th>
-                                </tr>
-                            </thead>
-                            <tbody className="bg-white divide-y divide-gray-100">
-                                {loading ? (
-                                    <tr><td colSpan={7} className="px-6 py-12 text-center text-sm text-gray-400 italic">Loading resources...</td></tr>
-                                ) : resources.length === 0 ? (
-                                    <tr><td colSpan={7} className="px-6 py-12 text-center text-sm text-gray-400 italic">No resources tracked for {villageId} yet.</td></tr>
-                                ) : (
-                                    resources.map((item) => {
-                                        const quantity = item.quantity || 0;
-                                        const pending = pendingWeightsByResource[item.id] || 0;
-                                        const unitCost = item.unitCost || 0;
-                                        const isLow = quantity <= item.lowStockThreshold;
-                                        const isCritical = quantity <= (item.lowStockThreshold * 0.2);
-                                        return (
-                                            <tr key={item.id} className="hover:bg-gray-50 transition-colors">
-                                                <td className="px-6 py-5 whitespace-nowrap">
-                                                    <div className="text-sm font-black text-gray-900">{item.name}</div>
-                                                    <div className="text-[10px] text-gray-400 font-bold uppercase tracking-tight">{item.materialId || item.id}</div>
-                                                </td>
-                                                <td className="px-6 py-5 whitespace-nowrap">
-                                                    <span className="px-2.5 py-1 rounded-lg text-[10px] font-black uppercase bg-gray-100 text-gray-500 border border-gray-200">{item.category}</span>
-                                                </td>
-                                                <td className="px-6 py-5 whitespace-nowrap text-sm font-black text-right text-gray-900">
-                                                    {quantity.toLocaleString()} <span className="text-gray-400 font-bold text-[10px] ml-0.5">{item.unit}</span>
-                                                </td>
-                                                <td className="px-6 py-5 whitespace-nowrap text-sm font-black text-right text-orange-600">
-                                                    {pending > 0 ? `+${pending.toLocaleString()} ${item.unit}` : '-'}
-                                                </td>
-                                                <td className="px-6 py-5 whitespace-nowrap text-sm font-bold text-right text-gray-500">
-                                                    {unitCost.toFixed(2)} <span className="text-[9px] text-gray-400">/ {item.unit === 'L' ? '10L' : item.unit}</span>
-                                                </td>
-                                                <td className="px-6 py-5 whitespace-nowrap text-center">
-                                                    {isCritical ? (
-                                                        <span className="px-3 py-1 text-[10px] font-black uppercase rounded-full bg-red-100 text-red-700 border border-red-200 animate-pulse">Critical</span>
-                                                    ) : isLow ? (
-                                                        <span className="px-3 py-1 text-[10px] font-black uppercase rounded-full bg-yellow-100 text-yellow-800 border border-yellow-200">Low Stock</span>
-                                                    ) : (
-                                                        <span className="px-3 py-1 text-[10px] font-black uppercase rounded-full bg-green-100 text-green-800 border border-green-200">OK</span>
-                                                    )}
-                                                </td>
-                                                <td className="px-6 py-5 whitespace-nowrap text-center">
-                                                    <div className="flex justify-center gap-1.5">
-                                                        <button onClick={() => { 
-                                                            setEditItemId(item.id); 
-                                                            setEditItemName(item.name); 
-                                                            setEditItemUnitCost((item.unitCost ?? 0).toString()); 
-                                                            setEditItemCategory(item.category || 'Input');
-                                                            setEditItemUnit(item.unit || 'kg');
-                                                            setIsEditMatModalOpen(true); 
-                                                        }} className="p-1.5 text-blue-600 hover:bg-blue-50 rounded-lg border border-blue-100 transition-all shadow-sm" title="Edit Material Details">
-                                                            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" /></svg>
-                                                        </button>
-                                                        <button onClick={() => { setSelectedItem(item); setTransType('IN'); setIsTransModalOpen(true); }} className="p-1.5 text-green-600 hover:bg-green-50 rounded-lg border border-green-100 transition-all shadow-sm" title="Add Stock (+)">
-                                                            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" /></svg>
-                                                        </button>
-                                                        <button onClick={() => { setSelectedItem(item); setTransType('OUT'); setIsTransModalOpen(true); }} className="p-1.5 text-red-600 hover:bg-red-50 rounded-lg border border-red-100 transition-all shadow-sm" title="Use/Reduce Stock (-)">
-                                                            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 12H4" /></svg>
-                                                        </button>
-                                                    </div>
-                                                </td>
-                                            </tr>
-                                        );
-                                    })
-                                )}
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-            )}
-
             {/* Pending Deliveries Confirmation Section */}
             {villageId !== VillageType.C && pendingReceipts.length > 0 && (
-                <div className="bg-orange-50 rounded-xl border border-orange-100 overflow-hidden animate-fade-in">
-                    <div className="px-6 py-4 border-b border-orange-200 bg-orange-100/50">
-                        <h3 className="text-sm font-black text-orange-900 uppercase tracking-tight flex items-center gap-2">
-                            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4" /></svg>
-                            Confirm Supply Receipts & Track Discrepancies
-                        </h3>
-                        <p className="text-[10px] text-orange-700 font-bold uppercase mt-1">Paid supply orders awaiting warehouse confirmation</p>
+                <div className="bg-orange-50 rounded-xl border border-orange-100 overflow-hidden animate-fade-in shadow-sm">
+                    <div className="px-6 py-4 border-b border-orange-200 bg-orange-100/50 flex justify-between items-center">
+                        <div>
+                            <h3 className="text-sm font-black text-orange-900 uppercase tracking-tight flex items-center gap-2">
+                                <span className="relative flex h-3 w-3">
+                                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-orange-400 opacity-75"></span>
+                                  <span className="relative inline-flex rounded-full h-3 w-3 bg-orange-500"></span>
+                                </span>
+                                Action Required: Confirm Receipts
+                            </h3>
+                            <p className="text-[10px] text-orange-700 font-bold uppercase mt-1">Supplies paid for but not yet marked as 'In Stock'</p>
+                        </div>
+                        <span className="bg-orange-200 text-orange-800 text-xs font-bold px-3 py-1 rounded-full">{pendingReceipts.length} Pending</span>
                     </div>
                     <div className="overflow-x-auto">
                         <table className="min-w-full divide-y divide-orange-100">
@@ -794,14 +913,14 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
                                                 <button 
                                                     onClick={() => handleConfirmReceipt(rec)}
                                                     disabled={isConfirmingReceipt === rec.id}
-                                                    className="px-3 py-1.5 bg-orange-600 text-white text-[10px] font-black uppercase rounded-lg hover:bg-orange-700 shadow-md transition-all flex items-center gap-2 mx-auto disabled:opacity-50"
+                                                    className={`px-3 py-1.5 text-white text-[10px] font-black uppercase rounded-lg shadow-md transition-all flex items-center gap-2 mx-auto disabled:opacity-50 ${hasDiscrepancy ? 'bg-red-600 hover:bg-red-700' : 'bg-orange-600 hover:bg-orange-700'}`}
                                                 >
                                                     {isConfirmingReceipt === rec.id ? (
                                                         <svg className="animate-spin h-3 w-3 text-white" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
                                                     ) : (
                                                         <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" /></svg>
                                                     )}
-                                                    Confirm Received
+                                                    {hasDiscrepancy ? 'Confirm Partial' : 'Confirm Received'}
                                                 </button>
                                             </td>
                                         </tr>
@@ -813,238 +932,243 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
                 </div>
             )}
 
-            {/* --- Output Inventory Table --- */}
-            <div className="bg-indigo-50 rounded-3xl shadow-sm border border-indigo-100 overflow-hidden">
-                <div className="px-8 py-6 border-b border-indigo-100 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
-                    <div>
-                        <h2 className="text-xl font-black text-indigo-900 tracking-tight">Available Mushroom Inventory</h2>
-                        <p className="text-xs text-indigo-500 font-bold uppercase tracking-widest mt-1">
-                            {villageId === VillageType.C ? 'Aggregated Hub View (All Production Villages)' : 'Synced with Sales & Harvest Registry'}
-                        </p>
+            {/* Discrepancy Resolution Table */}
+            {discrepancyReceipts.length > 0 && (
+                <div className="bg-red-50 rounded-xl border border-red-100 overflow-hidden animate-fade-in shadow-sm">
+                    <div className="px-6 py-4 border-b border-red-200 bg-red-100/50 flex justify-between items-center">
+                        <div>
+                            <h3 className="text-sm font-black text-red-900 uppercase tracking-tight flex items-center gap-2">
+                                <svg className="w-4 h-4 text-red-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" /></svg>
+                                Delivery Discrepancies
+                            </h3>
+                            <p className="text-[10px] text-red-700 font-bold uppercase mt-1">Items received with quantity variance - Action required</p>
+                        </div>
                     </div>
-                    <div className="flex bg-white/50 p-1 rounded-xl border border-indigo-100">
-                        <span className="px-4 py-1 text-[10px] font-black text-indigo-700 uppercase">Valuation: Actual weight x Mkt Price</span>
+                    <div className="overflow-x-auto">
+                        <table className="min-w-full divide-y divide-red-100">
+                            <thead className="bg-red-50/50">
+                                <tr className="text-[9px] font-black text-red-600 uppercase tracking-widest">
+                                    <th className="px-6 py-3 text-left">Ref ID</th>
+                                    <th className="px-6 py-3 text-left">Material</th>
+                                    <th className="px-6 py-3 text-right">Ordered</th>
+                                    <th className="px-6 py-3 text-right">Received</th>
+                                    <th className="px-6 py-3 text-right">Missing</th>
+                                    <th className="px-6 py-3 text-center">Resolution</th>
+                                </tr>
+                            </thead>
+                            <tbody className="divide-y divide-red-100">
+                                {discrepancyReceipts.map(rec => {
+                                    const resource = resources.find(r => r.id === rec.materialId);
+                                    const ordered = rec.orderQty || 0;
+                                    const received = rec.actualReceivedQty || 0;
+                                    const variance = ordered - received;
+                                    
+                                    return (
+                                        <tr key={rec.id} className="hover:bg-red-100/30 transition-colors">
+                                            <td className="px-6 py-4 whitespace-nowrap text-[10px] font-mono font-bold text-red-900">{rec.transactionId}</td>
+                                            <td className="px-6 py-4 whitespace-nowrap text-xs font-bold text-gray-700">{resource?.name}</td>
+                                            <td className="px-6 py-4 whitespace-nowrap text-sm text-right text-gray-500">{ordered}</td>
+                                            <td className="px-6 py-4 whitespace-nowrap text-sm text-right text-gray-800">{received}</td>
+                                            <td className="px-6 py-4 whitespace-nowrap text-sm text-right font-black text-red-600">-{variance.toFixed(2)}</td>
+                                            <td className="px-6 py-4 whitespace-nowrap text-center">
+                                                <div className="flex gap-2 justify-center">
+                                                    <button onClick={() => handleResolveVariance(rec, 'REFUND')} className="px-3 py-1 bg-green-600 text-white text-[10px] font-bold rounded shadow hover:bg-green-700">Claim Refund</button>
+                                                    <button onClick={() => handleResolveVariance(rec, 'IGNORE')} className="px-3 py-1 bg-gray-400 text-white text-[10px] font-bold rounded shadow hover:bg-gray-500">Ignore</button>
+                                                </div>
+                                            </td>
+                                        </tr>
+                                    );
+                                })}
+                            </tbody>
+                        </table>
                     </div>
                 </div>
-                
-                <div className="overflow-x-auto">
-                    <table className="min-w-full divide-y divide-indigo-100">
-                        <thead className="bg-indigo-100/30">
-                            <tr className="text-[10px] font-black text-indigo-600 uppercase tracking-widest">
-                                <th className="px-8 py-5 text-left">Batch Details</th>
-                                <th className="px-8 py-5 text-left">Strain</th>
-                                <th className="px-8 py-5 text-right">Harvested</th>
-                                <th className="px-8 py-5 text-right">Sold</th>
-                                <th className="px-8 py-5 text-right">Current Stock (kg)</th>
-                                <th className="px-8 py-5 text-center">Status</th>
-                            </tr>
-                        </thead>
-                        <tbody className="bg-white/40 divide-y divide-indigo-100">
-                            {processedOutputInventory.length === 0 ? (
-                                <tr><td colSpan={6} className="px-8 py-20 text-center text-sm text-indigo-300 italic font-bold tracking-tight uppercase">No Harvestable Assets Found</td></tr>
-                            ) : (
-                                processedOutputInventory.map((item) => (
-                                    <tr key={item.batchId} className="hover:bg-indigo-50/50 transition-colors">
-                                        <td className="px-8 py-5 whitespace-nowrap text-sm font-black text-indigo-900">{item.batchId}</td>
-                                        <td className="px-8 py-5 whitespace-nowrap">
-                                            <span className="bg-indigo-100 text-indigo-800 px-3 py-1 rounded-full text-[10px] font-black uppercase border border-indigo-200">
-                                                {item.strain}
-                                            </span>
-                                        </td>
-                                        <td className="px-8 py-5 text-sm text-right font-bold text-gray-400">{(item.totalHarvest || 0).toFixed(1)}</td>
-                                        <td className="px-8 py-5 text-sm text-right font-black text-rose-500">-{(item.soldWeight || 0).toFixed(1)}</td>
-                                        <td className="px-8 py-5 text-sm font-black text-right text-indigo-900">
-                                            {(item.remainingWeight || 0).toFixed(1)} kg
-                                        </td>
-                                        <td className="px-8 py-5 text-center">
-                                            {item.remainingWeight > 0 ? (
-                                                <span className="px-3 py-1 rounded-full text-[10px] font-black uppercase bg-emerald-100 text-emerald-700 border border-emerald-200">Available</span>
-                                            ) : (
-                                                <span className="px-3 py-1 rounded-full text-[10px] font-black uppercase bg-gray-100 text-gray-400 border border-gray-200">Depleted</span>
-                                            )}
-                                        </td>
+            )}
+
+            {/* --- Input Material Section (HIDDEN FOR VILLAGE C) --- */}
+            {villageId !== VillageType.C && (
+                <>
+                    <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+                        <div className="px-6 py-4 border-b border-gray-200 bg-gray-50 flex flex-col sm:flex-row justify-between items-start sm:items-center">
+                            <div>
+                                <h2 className="text-lg font-black text-gray-900 tracking-tight">Material Availability (Inputs)</h2>
+                                <p className="text-xs text-gray-400 font-medium">Costing and quantity control for raw supplies.</p>
+                            </div>
+                            <div className="mt-2 sm:mt-0 flex gap-2">
+                                <button onClick={handleAutoSetThresholds} className="px-4 py-2.5 bg-orange-50 text-orange-600 border border-orange-200 text-xs font-black uppercase rounded-xl shadow-sm hover:bg-orange-100 transition-all flex items-center gap-2">
+                                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                                    Enforce Safe Limits (30kg)
+                                </button>
+                                <button onClick={() => setShowSupplyHistory(!showSupplyHistory)} className="px-4 py-2.5 bg-white text-blue-600 border border-blue-200 text-xs font-black uppercase rounded-xl shadow-sm hover:bg-blue-50 transition-all flex items-center gap-2">
+                                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                                    {showSupplyHistory ? 'Hide History' : 'Supply History'}
+                                </button>
+                                <button onClick={() => { setIsAddMatModalOpen(true); }} className="px-4 py-2.5 bg-white text-gray-700 border border-gray-200 text-xs font-black uppercase rounded-xl shadow-sm hover:bg-gray-50 transition-all flex items-center gap-2">
+                                    <svg className="w-4 h-4 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" /></svg>
+                                    New Material
+                                </button>
+                                <button onClick={() => { setPurchaseItemId(''); setIsPurchaseModalOpen(true); }} className="px-4 py-2.5 bg-indigo-600 text-white hover:bg-indigo-700 text-xs font-black uppercase rounded-xl shadow-lg transition-all flex items-center gap-2">
+                                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 3h2l.4 2M7 13h10l4-8H5.4M7 13L5.4 5M7 13l-2.293 2.293c-.63.63-.184 1.707.707 1.707H17m0 0a2 2 0 100 4 2 2 0 000-4zm-8 2a2 2 0 11-4 0 2 2 0 014 0z" /></svg>
+                                    Purchase
+                                </button>
+                            </div>
+                        </div>
+
+                        {showSupplyHistory && (
+                            <div className="bg-slate-50 border-b border-gray-200 p-4 animate-fade-in">
+                                <h4 className="text-xs font-bold text-gray-500 uppercase mb-3 ml-2">Recent Confirmed Arrivals</h4>
+                                <div className="overflow-x-auto">
+                                    <table className="min-w-full divide-y divide-gray-200 text-xs bg-white rounded-lg border border-gray-200 shadow-sm">
+                                        <thead className="bg-gray-100">
+                                            <tr><th className="px-4 py-2 text-left text-gray-500">Date Received</th><th className="px-4 py-2 text-left text-gray-500">Transaction ID</th><th className="px-4 py-2 text-left text-gray-500">Item</th><th className="px-4 py-2 text-right text-gray-500">Qty Received</th><th className="px-4 py-2 text-right text-gray-500">Cost</th></tr>
+                                        </thead>
+                                        <tbody className="divide-y divide-gray-100">
+                                            {receivedSuppliesHistory.map(rec => {
+                                                const res = resources.find(r => r.id === rec.materialId);
+                                                return (
+                                                    <tr key={rec.id} className="hover:bg-gray-50">
+                                                        <td className="px-4 py-2 text-gray-500">{new Date(rec.updatedAt || rec.date).toLocaleDateString()}</td>
+                                                        <td className="px-4 py-2 font-mono">{rec.transactionId}</td>
+                                                        <td className="px-4 py-2 font-bold">{res?.name || 'Unknown'}</td>
+                                                        <td className="px-4 py-2 text-right text-green-600 font-bold">+{rec.actualReceivedQty || rec.orderQty} {res?.unit}</td>
+                                                        <td className="px-4 py-2 text-right">RM{rec.amount.toFixed(2)}</td>
+                                                    </tr>
+                                                );
+                                            })}
+                                            {receivedSuppliesHistory.length === 0 && <tr><td colSpan={5} className="text-center py-4 text-gray-400 italic">No history available</td></tr>}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        )}
+
+                        <div className="overflow-x-auto">
+                            <table className="min-w-full divide-y divide-gray-100">
+                                <thead className="bg-gray-50/50">
+                                    <tr className="text-[10px] font-black text-gray-400 uppercase tracking-widest">
+                                        <th className="px-6 py-4 text-left">Item Details</th>
+                                        <th className="px-6 py-4 text-left">Category</th>
+                                        <th className="px-6 py-4 text-right">Quantity</th>
+                                        <th className="px-6 py-4 text-right">Pending Received</th>
+                                        <th className="px-6 py-4 text-right">Unit Cost (RM)</th>
+                                        <th className="px-6 py-4 text-center">Availability</th>
+                                        <th className="px-6 py-4 text-center">Low Stock Limit</th>
                                     </tr>
-                                ))
-                            )}
-                        </tbody>
-                    </table>
-                </div>
-                {processedOutputInventory.length > 0 && (
-                    <div className="bg-indigo-100/50 px-8 py-6 flex justify-end items-center gap-4">
-                        <span className="text-xs font-black text-indigo-600 uppercase tracking-widest">Total Facility Supply:</span>
-                        <span className="text-3xl font-black text-indigo-900 tracking-tighter">{(totalCurrentStock || 0).toFixed(1)} <span className="text-sm">kg</span></span>
-                    </div>
-                )}
-            </div>
-
-            {/* --- Stock Transaction Modal --- */}
-            {isTransModalOpen && selectedItem && (
-                <div className="fixed inset-0 z-50 overflow-y-auto" role="dialog">
-                    <div className="flex items-end justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:block sm:p-0">
-                        <div className="fixed inset-0 bg-gray-900/60 backdrop-blur-sm transition-opacity" onClick={() => setIsTransModalOpen(false)}></div>
-                        <span className="hidden sm:inline-block sm:align-middle sm:h-screen">&#8203;</span>
-                        <div className="inline-block align-bottom bg-white rounded-3xl px-8 pt-6 pb-8 text-left overflow-hidden shadow-2xl transform transition-all sm:my-8 sm:align-middle sm:max-w-md sm:w-full animate-fade-in-up border border-gray-100">
-                            <div>
-                                <div className={`mx-auto flex items-center justify-center h-16 w-16 rounded-2xl shadow-inner ${transType === 'IN' ? 'bg-green-50' : 'bg-red-50'}`}>
-                                    {transType === 'IN' ? (
-                                        <svg className="h-8 w-8 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 6v6m0 0v6m0-6h6m-6 0H6" /></svg>
+                                </thead>
+                                <tbody className="bg-white divide-y divide-gray-100">
+                                    {loading ? (
+                                        <tr><td colSpan={7} className="px-6 py-12 text-center text-sm text-gray-400 italic">Loading resources...</td></tr>
+                                    ) : materialList.length === 0 ? (
+                                        <tr><td colSpan={7} className="px-6 py-12 text-center text-sm text-gray-400 italic">No resources tracked for {villageId} yet.</td></tr>
                                     ) : (
-                                        <svg className="h-8 w-8 text-red-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M20 12H4" /></svg>
+                                        materialList.map((item) => {
+                                            const quantity = item.quantity || 0;
+                                            const pending = pendingWeightsByResource[item.id] || 0;
+                                            const unitCost = item.unitCost || 0;
+                                            const isLow = quantity <= item.lowStockThreshold;
+                                            const isCritical = quantity <= (item.lowStockThreshold * 0.2);
+                                            return (
+                                                <tr key={item.id} className="hover:bg-gray-50 transition-colors">
+                                                    <td className="px-6 py-5 whitespace-nowrap cursor-pointer group" onClick={() => handleViewHistory(item)}>
+                                                        <div className="text-sm font-black text-gray-900 group-hover:text-indigo-600 transition-colors flex items-center gap-2">
+                                                            {item.name}
+                                                            <svg className="w-4 h-4 text-gray-300 group-hover:text-indigo-400 opacity-0 group-hover:opacity-100 transition-all" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" /></svg>
+                                                        </div>
+                                                        <div className="text-[10px] text-gray-400 font-bold uppercase tracking-tight">{item.materialId || item.id}</div>
+                                                    </td>
+                                                    <td className="px-6 py-5 whitespace-nowrap">
+                                                        <span className="px-2.5 py-1 rounded-lg text-[10px] font-black uppercase bg-gray-100 text-gray-500 border border-gray-200">{item.category}</span>
+                                                    </td>
+                                                    <td className="px-6 py-5 whitespace-nowrap text-sm font-black text-right text-gray-900">
+                                                        {quantity.toLocaleString()} <span className="text-gray-400 font-bold text-[10px] ml-0.5">{item.unit}</span>
+                                                    </td>
+                                                    <td className="px-6 py-5 whitespace-nowrap text-sm font-black text-right text-orange-600">
+                                                        {pending > 0 ? `+${pending.toLocaleString()} ${item.unit}` : '-'}
+                                                    </td>
+                                                    <td className="px-6 py-5 whitespace-nowrap text-sm font-bold text-right text-gray-500">
+                                                        {unitCost.toFixed(2)} <span className="text-[9px] text-gray-400">/ {item.unit === 'L' ? '10L' : item.unit}</span>
+                                                    </td>
+                                                    <td className="px-6 py-5 whitespace-nowrap text-center">
+                                                        {isCritical ? (
+                                                            <span className="px-3 py-1 text-[10px] font-black uppercase rounded-full bg-red-100 text-red-700 border border-red-200 animate-pulse">Critical</span>
+                                                        ) : isLow ? (
+                                                            <span className="px-3 py-1 text-[10px] font-black uppercase rounded-full bg-yellow-100 text-yellow-800 border border-yellow-200">Low Stock</span>
+                                                        ) : (
+                                                            <span className="px-3 py-1 text-[10px] font-black uppercase rounded-full bg-green-100 text-green-800 border border-green-200">OK</span>
+                                                        )}
+                                                    </td>
+                                                    <td className="px-6 py-5 whitespace-nowrap text-center text-xs font-bold text-gray-500">
+                                                        {item.lowStockThreshold} {item.unit}
+                                                    </td>
+                                                </tr>
+                                            );
+                                        })
                                     )}
-                                </div>
-                                <div className="mt-5 text-center">
-                                    <h3 className="text-xl font-black text-gray-900 tracking-tight">
-                                        {transType === 'IN' ? 'Restock Item' : 'Deduct Usage'}
-                                    </h3>
-                                    <p className="text-xs font-bold text-gray-400 uppercase tracking-widest mt-1">{selectedItem.name}</p>
-                                    
-                                    <form onSubmit={handleTransaction} className="mt-8 text-left space-y-5">
-                                        <div>
-                                            <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1.5">Adjustment Qty ({selectedItem.unit})</label>
-                                            <input type="number" step="any" required min="0.01" value={transQty} onChange={(e) => setTransQty(e.target.value)} className={`block w-full border-gray-200 bg-gray-50 rounded-xl px-4 py-3 text-sm font-black focus:ring-2 ${ringClass} focus:bg-white transition-all`} placeholder="0.00" />
-                                        </div>
-                                        <div>
-                                            <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1.5">Note / Reason</label>
-                                            <input type="text" value={transReason} onChange={(e) => setTransReason(e.target.value)} placeholder={transType === 'IN' ? "Standard Restock" : "Production Run #123"} className={`block w-full border-gray-200 bg-gray-50 rounded-xl px-4 py-3 text-sm font-bold focus:ring-2 ${ringClass} focus:bg-white transition-all`} />
-                                        </div>
-                                        <div className="flex gap-3 mt-4">
-                                            <button type="button" onClick={() => setIsTransModalOpen(false)} className="flex-1 bg-white border border-gray-200 text-xs font-black uppercase py-3.5 rounded-xl hover:bg-gray-50 transition-all">Cancel</button>
-                                            <button type="submit" className={`flex-1 py-3.5 rounded-xl text-xs font-black uppercase text-white shadow-lg transition-all ${transType === 'IN' ? 'bg-green-600 hover:bg-green-700' : 'bg-red-600 hover:bg-red-700'}`}>Confirm Update</button>
-                                        </div>
-                                    </form>
-                                </div>
-                            </div>
+                                </tbody>
+                            </table>
                         </div>
                     </div>
-                </div>
-            )}
-            
-            {/* --- Add New Material Modal --- */}
-            {isAddMatModalOpen && (
-                <div className="fixed inset-0 z-50 overflow-y-auto" role="dialog">
-                     <div className="flex items-end justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:block sm:p-0">
-                        <div className="fixed inset-0 bg-gray-900/60 backdrop-blur-sm" onClick={() => setIsAddMatModalOpen(false)}></div>
-                        <span className="hidden sm:inline-block sm:align-middle sm:h-screen">&#8203;</span>
-                        <div className="inline-block align-bottom bg-white rounded-3xl px-8 pt-6 pb-8 text-left overflow-hidden shadow-2xl transform transition-all sm:my-8 sm:align-middle sm:max-w-md sm:w-full border border-gray-100 animate-fade-in-up">
-                            <div>
-                                <div className="mx-auto flex items-center justify-center h-16 w-16 rounded-2xl bg-indigo-50 shadow-inner">
-                                     <svg className="w-8 h-8 text-indigo-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 9v3m0 0v3m0-3h3m-3 0H9m12 0a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
-                                </div>
-                                <div className="mt-5 text-center">
-                                    <h3 className="text-xl font-black text-gray-900 tracking-tight">Catalog New Material</h3>
-                                    <p className="text-xs font-bold text-gray-400 uppercase tracking-widest mt-1">Resource Costing & Inventory Registry</p>
-                                    
-                                    <form onSubmit={handleAddMaterial} className="mt-8 text-left space-y-4">
-                                        <div>
-                                            <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1.5">Display Name</label>
-                                            <input type="text" required value={newMatName} onChange={(e) => setNewMatName(e.target.value)} className="block w-full border-gray-200 bg-gray-50 rounded-xl px-4 py-3 text-sm font-black focus:ring-2 focus:ring-indigo-500 focus:bg-white transition-all" placeholder="e.g. Lime Powder" />
-                                        </div>
-                                        
-                                        <div className="grid grid-cols-2 gap-4">
-                                            <div>
-                                                <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1.5">Category</label>
-                                                <select value={newMatCategory} onChange={(e) => setNewMatCategory(e.target.value)} className="block w-full border-gray-200 bg-gray-50 rounded-xl px-4 py-3 text-sm font-black focus:ring-2 focus:ring-indigo-500 bg-white transition-all">
-                                                    <option value="Input">Input</option>
-                                                    <option value="Utility">Utility</option>
-                                                    <option value="Nutrient">Nutrient</option>
-                                                    <option value="Others">Others</option>
-                                                </select>
-                                            </div>
-                                            <div>
-                                                <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1.5">Base Unit</label>
-                                                <select value={newMatUnit} onChange={(e) => setNewMatUnit(e.target.value)} className="block w-full border-gray-200 bg-gray-50 rounded-xl px-4 py-3 text-sm font-black focus:ring-2 focus:ring-indigo-500 bg-white transition-all">
-                                                    <option value="kg">kg</option>
-                                                    <option value="L">L</option>
-                                                    <option value="units">units</option>
-                                                    <option value="pack">pack</option>
-                                                </select>
-                                            </div>
-                                        </div>
-                                        
-                                        <div className="grid grid-cols-3 gap-3">
-                                            <div className="col-span-1">
-                                                <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1.5">
-                                                    Unit Cost (RM {newMatUnit === 'L' ? 'per 10L' : `per ${newMatUnit}`})
-                                                </label>
-                                                <input type="number" step="any" min="0" value={newMatUnitCost} onChange={(e) => setNewMatUnitCost(e.target.value)} className="block w-full border-gray-200 bg-gray-50 rounded-xl px-4 py-3 text-sm font-black focus:ring-2 focus:ring-indigo-500 transition-all" placeholder="0.00" />
-                                            </div>
-                                            <div className="col-span-1">
-                                                <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1.5">Initial Qty</label>
-                                                <input type="number" step="any" min="0" value={newMatQty} onChange={(e) => setNewMatQty(e.target.value)} className="block w-full border-gray-200 bg-gray-50 rounded-xl px-4 py-3 text-sm font-black focus:ring-2 focus:ring-indigo-500 transition-all" placeholder="0" />
-                                            </div>
-                                            <div className="col-span-1">
-                                                <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1.5">Low Level</label>
-                                                <input type="number" step="any" min="0" value={newMatThreshold} onChange={(e) => setNewMatThreshold(e.target.value)} className="block w-full border-gray-200 bg-gray-50 rounded-xl px-4 py-3 text-sm font-black focus:ring-2 focus:ring-indigo-500 transition-all" placeholder="20" />
-                                            </div>
-                                        </div>
-                                        
-                                        <div className="mt-6 flex gap-3">
-                                            <button type="button" onClick={() => setIsAddMatModalOpen(false)} className="flex-1 bg-white border border-gray-200 text-xs font-black uppercase py-4 rounded-xl hover:bg-gray-50 transition-all">Cancel</button>
-                                            <button type="submit" className="flex-1 bg-indigo-600 text-white hover:bg-indigo-700 text-xs font-black uppercase py-4 rounded-xl shadow-lg transition-all">Create Item</button>
-                                        </div>
-                                    </form>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            )}
 
-            {/* --- Edit Material Modal --- */}
-            {isEditMatModalOpen && (
-                <div className="fixed inset-0 z-50 overflow-y-auto" role="dialog">
-                     <div className="flex items-end justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:block sm:p-0">
-                        <div className="fixed inset-0 bg-gray-900/60 backdrop-blur-sm" onClick={() => setIsEditMatModalOpen(false)}></div>
-                        <span className="hidden sm:inline-block sm:align-middle sm:h-screen">&#8203;</span>
-                        <div className="inline-block align-bottom bg-white rounded-3xl px-8 pt-6 pb-8 text-left overflow-hidden shadow-2xl transform transition-all sm:my-8 sm:align-middle sm:max-w-md sm:w-full border border-gray-100 animate-fade-in-up">
+                    {/* Equipment Table */}
+                    <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden mt-6">
+                        <div className="px-6 py-4 border-b border-gray-200 bg-gray-50 flex justify-between items-center">
                             <div>
-                                <div className="mx-auto flex items-center justify-center h-16 w-16 rounded-2xl bg-blue-50 shadow-inner">
-                                     <svg className="w-8 h-8 text-blue-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" /></svg>
-                                </div>
-                                <div className="mt-5 text-center">
-                                    <h3 className="text-xl font-black text-gray-900 tracking-tight">Edit Material Details</h3>
-                                    <p className="text-xs font-bold text-gray-400 uppercase tracking-widest mt-1">{editItemName}</p>
-                                    
-                                    <form onSubmit={handleUpdateDetails} className="mt-8 text-left space-y-4">
-                                        <div className="grid grid-cols-2 gap-4">
-                                            <div>
-                                                <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1.5">Category</label>
-                                                <select value={editItemCategory} onChange={(e) => setEditItemCategory(e.target.value)} className="block w-full border-gray-200 bg-gray-50 rounded-xl px-4 py-3 text-sm font-black focus:ring-2 focus:ring-blue-500 bg-white transition-all">
-                                                    <option value="Input">Input</option>
-                                                    <option value="Utility">Utility</option>
-                                                    <option value="Nutrient">Nutrient</option>
-                                                    <option value="Others">Others</option>
-                                                </select>
-                                            </div>
-                                            <div>
-                                                <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1.5">Base Unit</label>
-                                                <select value={editItemUnit} onChange={(e) => setEditItemUnit(e.target.value)} className="block w-full border-gray-200 bg-gray-50 rounded-xl px-4 py-3 text-sm font-black focus:ring-2 focus:ring-blue-500 bg-white transition-all">
-                                                    <option value="kg">kg</option>
-                                                    <option value="L">L</option>
-                                                    <option value="units">units</option>
-                                                    <option value="pack">pack</option>
-                                                </select>
-                                            </div>
-                                        </div>
-                                        <div>
-                                            <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1.5">
-                                                Unit Cost (RM {editItemUnit === 'L' ? 'per 10L' : `per ${editItemUnit}`})
-                                            </label>
-                                            <input type="number" step="any" min="0" required value={editItemUnitCost} onChange={(e) => setEditItemUnitCost(e.target.value)} className="block w-full border-gray-200 bg-gray-50 rounded-xl px-4 py-3 text-sm font-black focus:ring-2 focus:ring-blue-500 focus:bg-white transition-all" placeholder="0.00" />
-                                        </div>
-                                        
-                                        <div className="mt-6 flex gap-3">
-                                            <button type="button" onClick={() => setIsEditMatModalOpen(false)} className="flex-1 bg-white border border-gray-300 text-xs font-black uppercase py-4 rounded-xl hover:bg-gray-50 transition-all">Cancel</button>
-                                            <button type="submit" disabled={isUpdatingDetails} className="flex-1 bg-blue-600 text-white hover:bg-blue-700 text-xs font-black uppercase py-4 rounded-xl shadow-lg transition-all">
-                                                {isUpdatingDetails ? 'Updating...' : 'Save Changes'}
-                                            </button>
-                                        </div>
-                                    </form>
-                                </div>
+                                <h2 className="text-lg font-black text-gray-900 tracking-tight">Facility Equipment & Hardware</h2>
+                                <p className="text-xs text-gray-400 font-medium">Active environmental control systems.</p>
+                            </div>
+                            <div className="text-[10px] font-bold uppercase text-gray-400 bg-gray-100 px-3 py-1 rounded-full">
+                                System Status: {latestEnvLog ? `Monitoring (${latestEnvLog.temperature}°C / ${latestEnvLog.humidity}%)` : 'Syncing...'}
                             </div>
                         </div>
+                        <div className="overflow-x-auto">
+                            <table className="min-w-full divide-y divide-gray-100">
+                                <thead className="bg-gray-50/50">
+                                    <tr className="text-[10px] font-black text-gray-400 uppercase tracking-widest">
+                                        <th className="px-6 py-4 text-left">Equipment Name</th>
+                                        <th className="px-6 py-4 text-left">Location / Room</th>
+                                        <th className="px-6 py-4 text-center">Operational Status</th>
+                                        <th className="px-6 py-4 text-center">Condition</th>
+                                        <th className="px-6 py-4 text-right">Quantity</th>
+                                    </tr>
+                                </thead>
+                                <tbody className="bg-white divide-y divide-gray-100">
+                                    {equipmentList.length === 0 ? (
+                                        <tr><td colSpan={5} className="px-6 py-12 text-center text-sm text-gray-400 italic">No equipment logged.</td></tr>
+                                    ) : (
+                                        equipmentList.map((item) => {
+                                            const status = getEquipmentStatus(item);
+                                            const isActive = status.includes('Active');
+                                            return (
+                                                <tr key={item.id} className="hover:bg-gray-50 transition-colors">
+                                                    <td className="px-6 py-5 whitespace-nowrap">
+                                                        <div className="text-sm font-black text-gray-900">{item.name}</div>
+                                                        <div className="text-[10px] text-gray-400 font-bold uppercase tracking-tight">{item.materialId || item.id}</div>
+                                                    </td>
+                                                    <td className="px-6 py-5 whitespace-nowrap text-xs font-bold text-gray-600">
+                                                        {item.location || 'Unassigned'}
+                                                    </td>
+                                                    <td className="px-6 py-5 whitespace-nowrap text-center">
+                                                        <span className={`px-3 py-1 rounded-full text-[10px] font-black uppercase ${isActive ? 'bg-green-100 text-green-700 animate-pulse' : 'bg-gray-100 text-gray-500'}`}>
+                                                            {status}
+                                                        </span>
+                                                    </td>
+                                                    <td className="px-6 py-5 whitespace-nowrap text-center">
+                                                        <span className={`text-[10px] font-bold ${item.condition === 'Excellent' || item.condition === 'Good' ? 'text-green-600' : 'text-orange-500'}`}>
+                                                            {item.condition || 'Unknown'}
+                                                        </span>
+                                                    </td>
+                                                    <td className="px-6 py-5 whitespace-nowrap text-sm font-black text-right text-gray-900">
+                                                        {item.quantity} <span className="text-gray-400 font-bold text-[10px]">{item.unit}</span>
+                                                    </td>
+                                                </tr>
+                                            );
+                                        })
+                                    )}
+                                </tbody>
+                            </table>
+                        </div>
                     </div>
-                </div>
+                </>
             )}
 
             {/* --- Purchase Supplies Modal --- */}
@@ -1064,7 +1188,10 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
                                     
                                     <form onSubmit={handlePurchaseRequest} className="mt-8 text-left space-y-4">
                                         <div>
-                                            <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1.5">Material to Restock</label>
+                                            <div className="flex justify-between items-center mb-1.5">
+                                                <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest">Material to Restock</label>
+                                                <button type="button" onClick={() => { setIsPurchaseModalOpen(false); setIsAddMatModalOpen(true); }} className="text-[10px] font-bold text-indigo-600 hover:underline">Create New?</button>
+                                            </div>
                                             <select value={purchaseItemId} onChange={(e) => setPurchaseItemId(e.target.value)} required className="block w-full border-gray-200 bg-gray-50 rounded-xl px-4 py-3 text-sm font-black focus:ring-2 focus:ring-indigo-500 bg-white transition-all">
                                                 <option value="">-- Select Resource --</option>
                                                 {resources.map(r => (
@@ -1093,6 +1220,255 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({ villageId, userEmail
                                     </form>
                                 </div>
                             </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* --- Add Material Modal --- */}
+            {isAddMatModalOpen && (
+                <div className="fixed inset-0 z-50 overflow-y-auto" role="dialog">
+                    <div className="flex items-end justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:block sm:p-0">
+                        <div className="fixed inset-0 bg-gray-900/60 backdrop-blur-sm" onClick={() => setIsAddMatModalOpen(false)}></div>
+                        <span className="hidden sm:inline-block sm:align-middle sm:h-screen">&#8203;</span>
+                        <div className="inline-block align-bottom bg-white rounded-3xl px-8 pt-6 pb-8 text-left overflow-hidden shadow-2xl transform transition-all sm:my-8 sm:align-middle sm:max-w-md sm:w-full border border-gray-100 animate-fade-in-up">
+                            <div>
+                                <h3 className="text-xl font-black text-gray-900 tracking-tight mb-1">Register New Material</h3>
+                                <p className="text-xs font-bold text-gray-400 uppercase tracking-widest mb-6">Add a new item to inventory tracking</p>
+                                
+                                <form onSubmit={handleAddMaterial} className="space-y-4">
+                                    <div>
+                                        <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1.5">Material Name</label>
+                                        <input type="text" required value={newMatName} onChange={(e) => setNewMatName(e.target.value)} className="block w-full border-gray-200 bg-gray-50 rounded-xl px-4 py-3 text-sm font-bold focus:ring-2 focus:ring-green-500 transition-all" placeholder="e.g. Bio-Substrate X" />
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-4">
+                                        <div>
+                                            <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1.5">Category</label>
+                                            <select value={newMatCategory} onChange={(e) => setNewMatCategory(e.target.value)} className="block w-full border-gray-200 bg-gray-50 rounded-xl px-4 py-3 text-sm font-bold focus:ring-2 focus:ring-green-500 transition-all">
+                                                <option value="Input">Input</option>
+                                                <option value="Nutrient">Nutrient</option>
+                                                <option value="Utility">Utility</option>
+                                                {/* Equipment option removed as requested for manual entry */}
+                                            </select>
+                                        </div>
+                                        <div>
+                                            <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1.5">Unit</label>
+                                            <select value={newMatUnit} onChange={(e) => setNewMatUnit(e.target.value)} className="block w-full border-gray-200 bg-gray-50 rounded-xl px-4 py-3 text-sm font-bold focus:ring-2 focus:ring-green-500 transition-all">
+                                                <option value="kg">kg</option>
+                                                <option value="L">L</option>
+                                                <option value="units">units</option>
+                                                <option value="packs">packs</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                    <div className="grid grid-cols-3 gap-3">
+                                        <div>
+                                            <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1.5">Initial Qty</label>
+                                            <input type="number" step="any" value={newMatQty} onChange={(e) => setNewMatQty(e.target.value)} className="block w-full border-gray-200 bg-gray-50 rounded-xl px-3 py-3 text-sm font-bold focus:ring-2 focus:ring-green-500 transition-all" placeholder="0" />
+                                        </div>
+                                        <div>
+                                            <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1.5">Low Alert</label>
+                                            <input type="number" step="any" value={newMatThreshold} onChange={(e) => setNewMatThreshold(e.target.value)} className="block w-full border-gray-200 bg-gray-50 rounded-xl px-3 py-3 text-sm font-bold focus:ring-2 focus:ring-green-500 transition-all" placeholder="Min" />
+                                        </div>
+                                        <div>
+                                            <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1.5">Cost/Unit</label>
+                                            <input type="number" step="0.01" value={newMatUnitCost} onChange={(e) => setNewMatUnitCost(e.target.value)} className="block w-full border-gray-200 bg-gray-50 rounded-xl px-3 py-3 text-sm font-bold focus:ring-2 focus:ring-green-500 transition-all" placeholder="RM" />
+                                        </div>
+                                    </div>
+                                    
+                                    <div className="mt-6 flex gap-3">
+                                        <button type="button" onClick={() => setIsAddMatModalOpen(false)} className="flex-1 bg-white border border-gray-300 text-xs font-black uppercase py-4 rounded-xl hover:bg-gray-50 transition-all">Cancel</button>
+                                        <button type="submit" className="flex-1 bg-green-600 text-white hover:bg-green-700 text-xs font-black uppercase py-4 rounded-xl shadow-lg transition-all">Save Material</button>
+                                    </div>
+                                </form>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* --- Edit Material Modal --- */}
+            {isEditMatModalOpen && (
+                <div className="fixed inset-0 z-50 overflow-y-auto" role="dialog">
+                    <div className="flex items-end justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:block sm:p-0">
+                        <div className="fixed inset-0 bg-gray-900/60 backdrop-blur-sm" onClick={() => setIsEditMatModalOpen(false)}></div>
+                        <span className="hidden sm:inline-block sm:align-middle sm:h-screen">&#8203;</span>
+                        <div className="inline-block align-bottom bg-white rounded-3xl px-8 pt-6 pb-8 text-left overflow-hidden shadow-2xl transform transition-all sm:my-8 sm:align-middle sm:max-w-md sm:w-full border border-gray-100 animate-fade-in-up">
+                            <div>
+                                <h3 className="text-xl font-black text-gray-900 tracking-tight mb-1">Update Details: {editItemName}</h3>
+                                <p className="text-xs font-bold text-gray-400 uppercase tracking-widest mb-6">Modify static material properties</p>
+                                
+                                <form onSubmit={handleUpdateDetails} className="space-y-4">
+                                    <div className="grid grid-cols-2 gap-4">
+                                        <div>
+                                            <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1.5">Category</label>
+                                            <select value={editItemCategory} onChange={(e) => setEditItemCategory(e.target.value)} className="block w-full border-gray-200 bg-gray-50 rounded-xl px-4 py-3 text-sm font-bold focus:ring-2 focus:ring-blue-500 transition-all">
+                                                <option value="Input">Input</option>
+                                                <option value="Nutrient">Nutrient</option>
+                                                <option value="Utility">Utility</option>
+                                                <option value="Equipment">Equipment</option>
+                                            </select>
+                                        </div>
+                                        <div>
+                                            <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1.5">Unit</label>
+                                            <select value={editItemUnit} onChange={(e) => setEditItemUnit(e.target.value)} className="block w-full border-gray-200 bg-gray-50 rounded-xl px-4 py-3 text-sm font-bold focus:ring-2 focus:ring-blue-500 transition-all">
+                                                <option value="kg">kg</option>
+                                                <option value="L">L</option>
+                                                <option value="units">units</option>
+                                                <option value="packs">packs</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1.5">Cost per Unit (RM)</label>
+                                        <input type="number" step="0.01" value={editItemUnitCost} onChange={(e) => setEditItemUnitCost(e.target.value)} className="block w-full border-gray-200 bg-gray-50 rounded-xl px-4 py-3 text-sm font-bold focus:ring-2 focus:ring-blue-500 transition-all" />
+                                    </div>
+                                    
+                                    <div className="mt-6 flex gap-3">
+                                        <button type="button" onClick={() => setIsEditMatModalOpen(false)} className="flex-1 bg-white border border-gray-300 text-xs font-black uppercase py-4 rounded-xl hover:bg-gray-50 transition-all">Cancel</button>
+                                        <button type="submit" disabled={isUpdatingDetails} className="flex-1 bg-blue-600 text-white hover:bg-blue-700 text-xs font-black uppercase py-4 rounded-xl shadow-lg transition-all disabled:opacity-50">
+                                            {isUpdatingDetails ? 'Saving...' : 'Update Details'}
+                                        </button>
+                                    </div>
+                                </form>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* --- Manual Transaction Modal --- */}
+            {isTransModalOpen && selectedItem && (
+                <div className="fixed inset-0 z-50 overflow-y-auto" role="dialog">
+                    <div className="flex items-end justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:block sm:p-0">
+                        <div className="fixed inset-0 bg-gray-900/60 backdrop-blur-sm" onClick={() => setIsTransModalOpen(false)}></div>
+                        <span className="hidden sm:inline-block sm:align-middle sm:h-screen">&#8203;</span>
+                        <div className="inline-block align-bottom bg-white rounded-3xl px-8 pt-6 pb-8 text-left overflow-hidden shadow-2xl transform transition-all sm:my-8 sm:align-middle sm:max-w-md sm:w-full border border-gray-100 animate-fade-in-up">
+                            <div>
+                                <h3 className="text-xl font-black text-gray-900 tracking-tight mb-1">Stock Adjustment</h3>
+                                <p className="text-xs font-bold text-gray-400 uppercase tracking-widest mb-6">
+                                    {transType === 'IN' ? 'Add Stock (No Cost Log)' : 'Reduce Stock (Usage/Loss)'} - {selectedItem.name}
+                                </p>
+                                
+                                <form onSubmit={handleTransaction} className="space-y-4">
+                                    <div className="flex bg-gray-100 p-1 rounded-xl mb-4">
+                                        <button type="button" onClick={() => setTransType('IN')} className={`flex-1 py-2 text-xs font-black uppercase rounded-lg transition-all ${transType === 'IN' ? 'bg-white shadow text-green-600' : 'text-gray-400 hover:text-gray-600'}`}>Stock In (+)</button>
+                                        <button type="button" onClick={() => setTransType('OUT')} className={`flex-1 py-2 text-xs font-black uppercase rounded-lg transition-all ${transType === 'OUT' ? 'bg-white shadow text-red-600' : 'text-gray-400 hover:text-gray-600'}`}>Stock Out (-)</button>
+                                    </div>
+
+                                    <div>
+                                        <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1.5">Quantity ({selectedItem.unit})</label>
+                                        <input type="number" step="any" required min="0.01" value={transQty} onChange={(e) => setTransQty(e.target.value)} className="block w-full border-gray-200 bg-gray-50 rounded-xl px-4 py-3 text-sm font-bold focus:ring-2 focus:ring-gray-500 transition-all" placeholder="0.00" />
+                                    </div>
+                                    <div>
+                                        <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1.5">Reason</label>
+                                        <input type="text" value={transReason} onChange={(e) => setTransReason(e.target.value)} className="block w-full border-gray-200 bg-gray-50 rounded-xl px-4 py-3 text-sm font-bold focus:ring-2 focus:ring-gray-500 transition-all" placeholder={transType === 'IN' ? "e.g. Found extra stock" : "e.g. Spillage, Usage"} />
+                                    </div>
+                                    
+                                    <div className="mt-6 flex gap-3">
+                                        <button type="button" onClick={() => setIsTransModalOpen(false)} className="flex-1 bg-white border border-gray-300 text-xs font-black uppercase py-4 rounded-xl hover:bg-gray-50 transition-all">Cancel</button>
+                                        <button type="submit" className={`flex-1 text-white text-xs font-black uppercase py-4 rounded-xl shadow-lg transition-all ${transType === 'IN' ? 'bg-green-600 hover:bg-green-700' : 'bg-red-600 hover:bg-red-700'}`}>
+                                            Confirm {transType === 'IN' ? 'Add' : 'Deduct'}
+                                        </button>
+                                    </div>
+                                </form>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* --- Material History Drawer --- */}
+            {isHistoryDrawerOpen && historyMaterial && (
+                <div className="fixed inset-0 z-[60] flex justify-end">
+                    <div className="absolute inset-0 bg-black/30 backdrop-blur-sm" onClick={() => setIsHistoryDrawerOpen(false)}></div>
+                    <div className="relative bg-white w-96 h-full shadow-2xl flex flex-col animate-slide-in-right transform transition-transform duration-300 ease-in-out">
+                        <div className="p-6 border-b border-gray-100 flex justify-between items-start bg-gray-50">
+                            <div>
+                                <h3 className="text-xl font-black text-gray-900">{historyMaterial.name}</h3>
+                                <p className="text-xs text-gray-500 font-bold uppercase mt-1">Usage & Stock History</p>
+                            </div>
+                            <button onClick={() => setIsHistoryDrawerOpen(false)} className="text-gray-400 hover:text-gray-600 bg-white rounded-full p-1 shadow-sm border border-gray-200">
+                                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                            </button>
+                        </div>
+                        
+                        <div className="flex-1 overflow-y-auto p-6 space-y-6">
+                            {loadingHistory ? (
+                                <div className="text-center py-10 text-gray-400 text-sm italic">Loading records...</div>
+                            ) : historyLogs.length === 0 ? (
+                                <div className="text-center py-10 text-gray-400 text-sm italic">No history records found.</div>
+                            ) : (
+                                <>
+                                    <div>
+                                        <h4 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4">Recent Deductions (Usage)</h4>
+                                        <div className="space-y-4">
+                                            {historyLogs.filter(l => l.type === 'OUT').slice(0, 5).map(log => {
+                                                // Try to parse reason for Batch ID and Activity
+                                                // Format: "Auto-Deduction: Activity Name (Batch ID)"
+                                                let activity = "Manual Usage";
+                                                let batchId = "-";
+                                                
+                                                const match = log.reason && log.reason.match(/Auto-Deduction:\s*(.*?)\s*\(Batch\s*(.*?)\)/);
+                                                if (match) {
+                                                    activity = match[1];
+                                                    batchId = match[2];
+                                                } else {
+                                                    activity = log.reason || "Unspecified";
+                                                }
+
+                                                return (
+                                                    <div key={log.id} className="relative pl-4 border-l-2 border-red-200">
+                                                        <div className="absolute -left-[5px] top-0 w-2.5 h-2.5 rounded-full bg-red-500 ring-2 ring-white"></div>
+                                                        <div className="flex justify-between items-start">
+                                                            <div>
+                                                                <div className="text-sm font-bold text-gray-800">{activity}</div>
+                                                                {batchId !== '-' && <div className="text-xs text-indigo-600 font-mono font-medium mt-0.5">Batch: {batchId}</div>}
+                                                            </div>
+                                                            <div className="text-right">
+                                                                <div className="text-sm font-black text-red-600">-{log.quantity} <span className="text-[10px] text-gray-400">{historyMaterial.unit}</span></div>
+                                                            </div>
+                                                        </div>
+                                                        <div className="mt-2 text-[10px] text-gray-400 flex justify-between">
+                                                            <span>{new Date(log.timestamp).toLocaleString()}</span>
+                                                            <span>By {log.user && log.user.split('@')[0]}</span>
+                                                        </div>
+                                                    </div>
+                                                );
+                                            })}
+                                            {historyLogs.filter(l => l.type === 'OUT').length === 0 && (
+                                                <p className="text-xs text-gray-400 italic">No recent usage recorded.</p>
+                                            )}
+                                        </div>
+                                    </div>
+
+                                    <div className="pt-6 border-t border-gray-100">
+                                        <h4 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4">Stock Replenishment (In)</h4>
+                                        <div className="space-y-4">
+                                            {historyLogs.filter(l => l.type === 'IN').slice(0, 5).map(log => (
+                                                <div key={log.id} className="relative pl-4 border-l-2 border-green-200">
+                                                    <div className="absolute -left-[5px] top-0 w-2.5 h-2.5 rounded-full bg-green-500 ring-2 ring-white"></div>
+                                                    <div className="flex justify-between items-start">
+                                                        <div className="text-sm font-bold text-gray-800">{log.reason || 'Restock'}</div>
+                                                        <div className="text-sm font-black text-green-600">+{log.quantity} <span className="text-[10px] text-gray-400">{historyMaterial.unit}</span></div>
+                                                    </div>
+                                                    <div className="mt-1 text-[10px] text-gray-400">
+                                                        {new Date(log.timestamp).toLocaleDateString()} • By {log.user && log.user.split('@')[0]}
+                                                    </div>
+                                                </div>
+                                            ))}
+                                            {historyLogs.filter(l => l.type === 'IN').length === 0 && (
+                                                <p className="text-xs text-gray-400 italic">No recent restocks.</p>
+                                            )}
+                                        </div>
+                                    </div>
+                                </>
+                            )}
+                        </div>
+                        <div className="p-4 bg-gray-50 border-t border-gray-200 text-center">
+                            <button onClick={() => { setIsHistoryDrawerOpen(false); setSelectedItem(historyMaterial); setIsTransModalOpen(true); }} className="w-full py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-bold uppercase shadow-sm">
+                                Adjust Stock Manually
+                            </button>
                         </div>
                     </div>
                 </div>

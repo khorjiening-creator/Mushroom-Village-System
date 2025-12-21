@@ -36,7 +36,16 @@ export const MUSHROOM_PRICES: Record<string, number> = {
     'Shiitake Mushroom': 45,
     'Shiitake': 45,
     'Lion’s Mane': 50,
-    "Lion's Mane": 50
+    "Lion's Mane": 50,
+    'King Oyster': 15 // Fallback/Extra
+};
+
+// Defined Room Mapping rules
+export const MUSHROOM_ROOM_MAPPING: Record<string, string[]> = {
+    'Oyster': ['A1', 'A2', 'A3'],
+    'Shiitake': ['B1', 'B2', 'B3'],
+    'Button': ['C1', 'C2'],
+    "Lion's Mane": ['D1', 'D2']
 };
 
 export const JOB_ROLES = [

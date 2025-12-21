@@ -32,6 +32,7 @@ import { ProcessingFloor } from './dashboard/ProcessingFloor';
 import { Packaging } from './dashboard/Packaging';
 import { InventoryDelivery } from './dashboard/InventoryDelivery';
 import { Reports } from './dashboard/Reports';
+import { ProductionAnalysisTab } from './dashboard/ProductionAnalysisTab';
 import { TransactionModal } from './TransactionModal';
 import { SettleModal } from './SettleModal';
 
@@ -85,7 +86,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ villageId, userEmail, user
   const theme = COLOR_THEMES[village.color as keyof typeof COLOR_THEMES] || COLOR_THEMES.slate;
 
   // View State
-  const [activeTab, setActiveTab] = useState<'overview' | 'farming' | 'environment' | 'resources' | 'financial' | 'processing' | 'packaging' | 'inventory' | 'reports' | 'registry'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'farming' | 'environment' | 'resources' | 'financial' | 'processing' | 'packaging' | 'inventory' | 'reports' | 'registry' | 'analysis'>('overview');
   const [logisticsSubFilter, setLogisticsSubFilter] = useState<'ALL' | 'SCHEDULED' | 'OUT_FOR_DELIVERY' | 'DELIVERED' | 'FAILED'>('ALL');
   const [notification, setNotification] = useState<{message: string, type: 'success' | 'error'} | null>(null);
 
@@ -104,6 +105,9 @@ export const Dashboard: React.FC<DashboardProps> = ({ villageId, userEmail, user
   const [lowStockItems, setLowStockItems] = useState<any[]>([]);
   const [showGlobalLowStockAlert, setShowGlobalLowStockAlert] = useState(false);
   const [hasNotifiedThisSession, setHasNotifiedThisSession] = useState(false);
+  
+  // Auto-Purchase Trigger
+  const [triggerPurchase, setTriggerPurchase] = useState<{ active: boolean, itemId?: string }>({ active: false });
 
   // Modal State
   const [showTransModal, setShowTransModal] = useState(false);
@@ -117,6 +121,10 @@ export const Dashboard: React.FC<DashboardProps> = ({ villageId, userEmail, user
   const [chartFilter, setChartFilter] = useState<'DAILY' | 'WEEKLY' | 'MONTHLY' | 'YEARLY'>('MONTHLY');
 
   const isFinance = userRole === 'finance';
+
+  // --- Helpers for Financial Collections ---
+  const getIncomeCollection = (vid: VillageType) => vid === VillageType.A ? 'income_A' : vid === VillageType.B ? 'income_B' : 'income_C';
+  const getExpenseCollection = (vid: VillageType) => vid === VillageType.A ? 'expenses_A' : vid === VillageType.B ? 'expenses_B' : 'expenses_C';
 
   // --- Real-time Listeners (Unified) ---
   useEffect(() => {
@@ -178,10 +186,23 @@ export const Dashboard: React.FC<DashboardProps> = ({ villageId, userEmail, user
 
   const fetchFinancialRecords = async () => {
     try {
-      const colName = villageId === VillageType.A ? "financialRecords_A" : villageId === VillageType.B ? "financialRecords_B" : "financialRecords_C";
-      const q = query(collection(db, colName), limit(300));
-      const snapshot = await getDocs(q);
-      const data = snapshot.docs.map(doc => ({id: doc.id, ...doc.data()} as FinancialRecord));
+      const incomeCol = getIncomeCollection(villageId);
+      const expenseCol = getExpenseCollection(villageId);
+      const oldCol = villageId === VillageType.A ? "financialRecords_A" : villageId === VillageType.B ? "financialRecords_B" : "financialRecords_C";
+
+      // Parallel Fetch
+      const [incSnap, expSnap, oldSnap] = await Promise.all([
+          getDocs(query(collection(db, incomeCol), limit(200))),
+          getDocs(query(collection(db, expenseCol), limit(200))),
+          getDocs(query(collection(db, oldCol), limit(100))) // Legacy support
+      ]);
+
+      const data: FinancialRecord[] = [];
+      // Tag records with their source collection to handle legacy data correctly during updates
+      incSnap.forEach(doc => data.push({id: doc.id, ...doc.data(), _path: incomeCol} as any));
+      expSnap.forEach(doc => data.push({id: doc.id, ...doc.data(), _path: expenseCol} as any));
+      oldSnap.forEach(doc => data.push({id: doc.id, ...doc.data(), _path: oldCol} as any));
+
       data.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
       setFinancialRecords(data);
     } catch (error) { console.error("Financial fetch error:", error); }
@@ -196,7 +217,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ villageId, userEmail, user
          const actSnap = await getDocs(query(collection(db, colName), orderBy("timestamp", "desc"), limit(5)));
          setFarmingLogs(actSnap.docs.map(doc => ({ id: doc.id, ...doc.data() } as ActivityLog)));
 
-         const harvSnap = await getDocs(query(collection(db, harvestCollection), orderBy("timestamp", "desc"), limit(50)));
+         const harvSnap = await getDocs(query(collection(db, harvestCollection), orderBy("timestamp", "desc"), limit(5)));
          setHarvestLogs(harvSnap.docs.map(doc => ({ id: doc.id, ...doc.data() } as HarvestLog)));
      } catch (e) { console.log("Production data fetch error", e); }
   };
@@ -216,14 +237,61 @@ export const Dashboard: React.FC<DashboardProps> = ({ villageId, userEmail, user
     const pending = financialRecords.filter(r => r.status === 'PENDING');
     const totalRevenue = completed.filter(r => r.type === 'INCOME').reduce((acc, c) => acc + c.amount, 0);
     const totalExpenses = completed.filter(r => r.type === 'EXPENSE').reduce((acc, c) => acc + c.amount, 0);
-    const chartData: any[] = []; // Simplified for merge
+    
+    // Aggregating Chart Data based on current filter
+    const chartMap = new Map<string, { income: number, expense: number, label: string }>();
+    const sortedForChart = [...financialRecords].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+
+    sortedForChart.forEach(rec => {
+        if (rec.status === 'PENDING') return;
+
+        const date = new Date(rec.date);
+        let key = '';
+        let label = '';
+
+        if (chartFilter === 'DAILY') {
+            key = date.toISOString().split('T')[0];
+            label = `${date.getDate()}/${date.getMonth() + 1}`;
+        } else if (chartFilter === 'WEEKLY') {
+            const firstDay = new Date(date.setDate(date.getDate() - date.getDay()));
+            key = firstDay.toISOString().split('T')[0];
+            label = `Wk ${firstDay.getDate()}/${firstDay.getMonth() + 1}`;
+        } else if (chartFilter === 'MONTHLY') {
+            key = `${date.getFullYear()}-${date.getMonth()}`;
+            label = date.toLocaleDateString('default', { month: 'short', year: '2-digit' });
+        } else {
+            key = `${date.getFullYear()}`;
+            label = `${date.getFullYear()}`;
+        }
+
+        if (!chartMap.has(key)) chartMap.set(key, { income: 0, expense: 0, label });
+        const entry = chartMap.get(key)!;
+        
+        if (rec.type === 'INCOME') entry.income += rec.amount;
+        else entry.expense += rec.amount;
+    });
+
+    const chartData = Array.from(chartMap.values());
+    const maxChartValue = Math.max(...chartData.map(d => Math.max(d.income, d.expense)), 100);
+
     return { 
         totalRevenue, totalExpenses, netCashFlow: totalRevenue - totalExpenses, 
         totalReceivables: pending.filter(r => r.type === 'INCOME').reduce((acc, c) => acc + c.amount, 0), 
         totalPayables: pending.filter(r => r.type === 'EXPENSE').reduce((acc, c) => acc + c.amount, 0), 
         receivables: pending.filter(r => r.type === 'INCOME'), payables: pending.filter(r => r.type === 'EXPENSE'), 
-        chartData, maxChartValue: 100
+        chartData, maxChartValue
     };
+  }, [financialRecords, chartFilter]);
+
+  // Track pending supply receipts (Paid but not marked as received)
+  const pendingReceiptsCount = useMemo(() => {
+    return financialRecords.filter(rec => 
+        rec.category === 'Supplies' && 
+        rec.type === 'EXPENSE' && 
+        rec.status === 'COMPLETED' && 
+        rec.receivedInStock === false && 
+        rec.materialId // Only count items that are linked to resources
+    ).length;
   }, [financialRecords]);
 
   const navigateToLogistics = (filter: 'SCHEDULED' | 'OUT_FOR_DELIVERY' | 'DELIVERED' | 'FAILED') => {
@@ -234,7 +302,17 @@ export const Dashboard: React.FC<DashboardProps> = ({ villageId, userEmail, user
   const handleDeleteLog = async (collectionName: string, logId: string, e?: any) => {
     if (!window.confirm("Are you sure?")) return;
     try {
-        await deleteDoc(doc(db, collectionName, logId));
+        // Since we split collections, try deleting from both Income and Expense if strictly financial
+        if (collectionName.includes('financialRecords')) {
+             const incCol = getIncomeCollection(villageId);
+             const expCol = getExpenseCollection(villageId);
+             try { await deleteDoc(doc(db, incCol, logId)); } catch {}
+             try { await deleteDoc(doc(db, expCol, logId)); } catch {}
+             // Also try old collection just in case
+             try { await deleteDoc(doc(db, collectionName, logId)); } catch {}
+        } else {
+             await deleteDoc(doc(db, collectionName, logId));
+        }
         fetchData();
     } catch (error) { console.error("Deletion Failed:", error); }
   };
@@ -253,14 +331,26 @@ export const Dashboard: React.FC<DashboardProps> = ({ villageId, userEmail, user
 
   const handleSaveTransaction = async (data: Partial<FinancialRecord>) => {
       setIsSubmittingTrans(true);
-      const colName = villageId === VillageType.A ? "financialRecords_A" : villageId === VillageType.B ? "financialRecords_B" : "financialRecords_C";
+      
+      const targetCol = data.type === 'INCOME' ? getIncomeCollection(villageId) : getExpenseCollection(villageId);
+
       try {
           if (editingTransaction?.id) {
-              await updateDoc(doc(db, colName, editingTransaction.id), { ...data });
+              const currentPath = (editingTransaction as any)._path;
+              
+              // Handle potential legacy migration or type change
+              if (currentPath && currentPath !== targetCol) {
+                  // Move record to correct new collection
+                  await deleteDoc(doc(db, currentPath, editingTransaction.id));
+                  const transactionId = editingTransaction.transactionId || "TXN-" + Date.now();
+                  await setDoc(doc(db, targetCol, editingTransaction.id), { ...data, transactionId });
+              } else {
+                  await updateDoc(doc(db, targetCol, editingTransaction.id), { ...data });
+              }
               showNotification("Transaction updated", "success");
           } else {
               const transactionId = "TXN-" + Date.now().toString().slice(-6);
-              await setDoc(doc(db, colName, transactionId), { ...data, transactionId });
+              await addDoc(collection(db, targetCol), { ...data, transactionId });
               showNotification("Transaction added", "success");
           }
           setShowTransModal(false);
@@ -271,12 +361,15 @@ export const Dashboard: React.FC<DashboardProps> = ({ villageId, userEmail, user
   const handleSettleTransaction = async (amount: number, date: string, method: string, notes: string, attachmentName?: string) => {
       if (!settleTransaction?.id) return;
       setIsSettling(true);
-      const colName = villageId === VillageType.A ? "financialRecords_A" : villageId === VillageType.B ? "financialRecords_B" : "financialRecords_C";
+      
+      // Determine correct collection path: use _path if available (legacy support), otherwise infer from type
+      const targetCol = (settleTransaction as any)._path || (settleTransaction.type === 'INCOME' ? getIncomeCollection(villageId) : getExpenseCollection(villageId));
+      
       try {
           // Track received status for supply goods specifically when payment is finalized
           const isSupplies = settleTransaction.category === 'Supplies' && settleTransaction.type === 'EXPENSE';
           
-          await updateDoc(doc(db, colName, settleTransaction.id), { 
+          await updateDoc(doc(db, targetCol, settleTransaction.id), { 
             status: 'COMPLETED', 
             paymentMethod: method, 
             settledDate: date,
@@ -300,7 +393,11 @@ export const Dashboard: React.FC<DashboardProps> = ({ villageId, userEmail, user
           <GlobalLowStockAlert 
             items={lowStockItems} 
             onClose={() => setShowGlobalLowStockAlert(false)} 
-            onAction={() => { setActiveTab('resources'); setShowGlobalLowStockAlert(false); }}
+            onAction={() => { 
+                setActiveTab('resources'); 
+                setShowGlobalLowStockAlert(false);
+                setTriggerPurchase({ active: true, itemId: lowStockItems[0]?.id });
+            }}
           />
       )}
 
@@ -334,6 +431,9 @@ export const Dashboard: React.FC<DashboardProps> = ({ villageId, userEmail, user
                     <>
                         <button onClick={() => setActiveTab('farming')} className={`${activeTab === 'farming' ? `border-green-500 text-green-600` : 'border-transparent text-gray-500'} whitespace-nowrap py-4 px-1 border-b-2 font-bold text-sm transition-colors`}>Farming</button>
                         <button onClick={() => setActiveTab('environment')} className={`${activeTab === 'environment' ? `border-green-500 text-green-600` : 'border-transparent text-gray-500'} whitespace-nowrap py-4 px-1 border-b-2 font-bold text-sm transition-colors`}>Environment</button>
+                        {(userRole === 'admin' || userRole === 'finance') && (
+                            <button onClick={() => setActiveTab('analysis')} className={`${activeTab === 'analysis' ? `border-green-500 text-green-600` : 'border-transparent text-gray-500'} whitespace-nowrap py-4 px-1 border-b-2 font-bold text-sm transition-colors`}>Analysis</button>
+                        )}
                     </>
                 )}
 
@@ -349,6 +449,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ villageId, userEmail, user
                 <button onClick={() => setActiveTab('resources')} className={`${activeTab === 'resources' ? `border-indigo-500 text-indigo-600` : 'border-transparent text-gray-500'} whitespace-nowrap py-4 px-1 border-b-2 font-bold text-sm transition-colors relative`}>
                     Resources
                     {lowStockItems.length > 0 && <span className="absolute -top-1 -right-2 bg-red-500 text-white text-[8px] font-black px-1.5 py-0.5 rounded-full ring-2 ring-white">!</span>}
+                    {pendingReceiptsCount > 0 && <span className="absolute -top-1 -right-8 bg-blue-500 text-white text-[9px] font-bold px-1.5 py-0.5 rounded-full ring-2 ring-white flex items-center shadow-sm" title="Items awaiting confirmation">+{pendingReceiptsCount}</span>}
                 </button>
                 
                 {(isFinance || isAdmin) && (
@@ -405,8 +506,19 @@ export const Dashboard: React.FC<DashboardProps> = ({ villageId, userEmail, user
             )}
             
             {activeTab === 'farming' && <FarmingTab villageId={villageId} userEmail={userEmail} theme={theme} farmingLogs={farmingLogs} onActivityLogged={fetchProductionData} onSuccess={(msg) => showNotification(msg, 'success')} onError={(msg) => showNotification(msg, 'error')} />}
-            {activeTab === 'environment' && <EnvironmentTab villageId={villageId} userEmail={userEmail} theme={theme} onSuccess={(msg) => showNotification(msg, 'success')} onError={(msg) => showNotification(msg, 'error')} />}
-            {activeTab === 'resources' && <ResourcesTab villageId={villageId} userEmail={userEmail} theme={theme} onSuccess={(msg) => showNotification(msg, 'success')} financialRecords={financialRecords} />}
+            {activeTab === 'environment' && <EnvironmentTab villageId={villageId} userEmail={userEmail} theme={theme} onSuccess={(msg) => showNotification(msg, 'success')} onError={(msg) => showNotification(msg, 'error')} setActiveTab={setActiveTab} />}
+            {activeTab === 'analysis' && (userRole === 'admin' || userRole === 'finance') && <ProductionAnalysisTab villageId={villageId} userEmail={userEmail} />}
+            {activeTab === 'resources' && (
+                <ResourcesTab 
+                    villageId={villageId} 
+                    userEmail={userEmail} 
+                    theme={theme} 
+                    onSuccess={(msg) => showNotification(msg, 'success')} 
+                    financialRecords={financialRecords}
+                    initialPurchaseState={triggerPurchase}
+                    onResetPurchaseState={() => setTriggerPurchase({ active: false })}
+                />
+            )}
             
             {activeTab === 'processing' && <ProcessingFloor villageId={villageId} userEmail={userEmail} theme={theme} processingLogs={processingLogs} onRefresh={fetchData} handleDeleteLog={handleDeleteLog} handleClearQueue={handleClearQueue} />}
             {activeTab === 'packaging' && <Packaging villageId={villageId} userEmail={userEmail} theme={theme} processingLogs={processingLogs} onRefresh={fetchData} />}
@@ -438,7 +550,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ villageId, userEmail, user
                         <div className="bg-gray-50 rounded-2xl border overflow-hidden">
                             <table className="min-w-full divide-y divide-gray-200">
                                 <thead className="bg-gray-100">
-                                    <tr><th className="px-6 py-3 text-left text-[10px] font-bold uppercase text-gray-500">Time</th><th className="px-6 py-3 text-left text-[10px] font-bold uppercase text-gray-500">Action</th><th className="px-6 py-3 text-left text-[10px] font-bold uppercase text-gray-500">User</th></tr>
+                                    <tr><th className="px-6 py-3 text-left text-[10px] font-bold uppercase text-gray-500">Time</th><th className="px-6 py-3 text-left text-xs font-bold uppercase text-gray-500">Action</th><th className="px-6 py-3 text-left text-[10px] font-bold uppercase text-gray-500">User</th></tr>
                                 </thead>
                                 <tbody className="divide-y divide-gray-100">
                                     {auditLogs.slice(0, 10).map(log => (
@@ -462,8 +574,10 @@ export const Dashboard: React.FC<DashboardProps> = ({ villageId, userEmail, user
           onClose={() => { setShowTransModal(false); setEditingTransaction(null); }}
           onSave={handleSaveTransaction}
           onDelete={(isFinance || isAdmin) ? async () => { 
-              const col = villageId === VillageType.C ? "financialRecords_C" : villageId === VillageType.A ? "financialRecords_A" : "financialRecords_B";
-              await handleDeleteLog(col, editingTransaction!.id); 
+              // Handle deletion via the main handler to respect collection splitting
+              // Pass the specific collection name for legacy support in deletion logic
+              const legacyCol = villageId === VillageType.C ? "financialRecords_C" : villageId === VillageType.A ? "financialRecords_A" : "financialRecords_B";
+              handleDeleteLog(legacyCol, editingTransaction!.id);
               setShowTransModal(false);
           } : undefined}
           initialData={editingTransaction}
