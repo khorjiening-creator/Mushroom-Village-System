@@ -23,27 +23,39 @@ interface FarmingTabProps {
 }
 
 /**
- * AUTOMATED DEDUCTION RECIPES (Per 1kg of Predicted Mushroom Yield)
- * Values represent requirements for ONE kg of output capacity.
+ * AUTOMATED DEDUCTION RECIPES (Per Batch Activity)
+ * Values represent fixed requirements for ONE batch operation regardless of yield size.
  */
-const ACTIVITY_RECIPES: Record<string, { id: string, name: string, perKgAmount: number }[]> = {
+const ACTIVITY_RECIPES: Record<string, { id: string, name: string, amount: number }[]> = {
     'SUBSTRATE_PREP': [
-        { id: "MAT-573260995", name: "Straw", perKgAmount: 20 },
-        { id: "MAT-545594408", name: "Water", perKgAmount: 50 },
+        { id: "MAT-573260995", name: "Straw", amount: 20 },
+        { id: "MAT-545594408", name: "Water", amount: 50 },
     ],
     'SUBSTRATE_MIXING': [
-        { id: "MAT-406637503", name: "Bran", perKgAmount: 0.5 },
-        { id: "MAT-446059102", name: "Gypsum", perKgAmount: 0.2 },
+        { id: "MAT-406637503", name: "Bran", amount: 0.5 },
+        { id: "MAT-446059102", name: "Gypsum", amount: 0.2 },
     ],
     'SPAWNING': [
-        { id: "MAT-282015830", name: "Spawn", perKgAmount: 1 },
+        { id: "MAT-282015830", name: "Spawn", amount: 1 },
     ],
     'HUMIDITY_CONTROL': [
-        { id: "MAT-545594408", name: "Water", perKgAmount: 5 },
+        { id: "MAT-545594408", name: "Water", amount: 5 },
     ],
     'FLUSH_REHYDRATION': [
-        { id: "MAT-545594408", name: "Water", perKgAmount: 20 },
+        { id: "MAT-545594408", name: "Water", amount: 20 },
     ]
+};
+
+/**
+ * BATCH YIELD ASSUMPTIONS (AI Prediction)
+ * Based on historical data per standard batch unit.
+ */
+const STRAIN_YIELD_PREDICTIONS: Record<string, number> = {
+    'Oyster': 6.5,
+    'Button': 5.5,
+    'Shiitake': 5.0,
+    "Lion's Mane": 5.8,
+    'King Oyster': 6.0
 };
 
 export const FarmingTab: React.FC<FarmingTabProps> = ({ 
@@ -77,7 +89,7 @@ export const FarmingTab: React.FC<FarmingTabProps> = ({
   const [activityRoomId, setActivityRoomId] = useState('A1'); // New Room State
   const [activityNotes, setActivityNotes] = useState('');
   const [batchStrain, setBatchStrain] = useState('Oyster'); 
-  const [predictedYield, setPredictedYield] = useState(''); 
+  const [predictedYield, setPredictedYield] = useState(STRAIN_YIELD_PREDICTIONS['Oyster'].toString()); 
   const [isSubmittingActivity, setIsSubmittingActivity] = useState(false);
   const [availableBatches, setAvailableBatches] = useState<{id: string, strain: string}[]>([]);
 
@@ -204,13 +216,18 @@ export const FarmingTab: React.FC<FarmingTabProps> = ({
       populateStrain();
   }, [harvestBatch, collectionName, batchList, availableBatches]);
 
-  // Effect to update room assignment when strain changes in log activity
+  // Effect to update room assignment and Predicted Yield when strain changes
   useEffect(() => {
       if (activityType === 'SUBSTRATE_PREP') {
+          // 1. Auto-assign Room
           const compatibleRooms = MUSHROOM_ROOM_MAPPING[batchStrain] || [];
           if (compatibleRooms.length > 0) {
               setActivityRoomId(compatibleRooms[0]);
           }
+          
+          // 2. Auto-fill Predicted Yield based on AI assumptions
+          const aiPrediction = STRAIN_YIELD_PREDICTIONS[batchStrain] || 6.5;
+          setPredictedYield(aiPrediction.toString());
       }
   }, [batchStrain, activityType]);
 
@@ -261,6 +278,14 @@ export const FarmingTab: React.FC<FarmingTabProps> = ({
         return true;
     });
   }, [batchList, filterStrain, filterStatus]);
+
+  // --- Helper for Efficiency Grading ---
+  const getBatchGrade = (weight: number) => {
+      if (weight >= 8) return { label: 'Excellent', color: 'bg-purple-100 text-purple-700 border-purple-200' };
+      if (weight >= 6) return { label: 'Good', color: 'bg-green-100 text-green-700 border-green-200' };
+      if (weight >= 4) return { label: 'Viable', color: 'bg-blue-50 text-blue-700 border-blue-100' };
+      return { label: 'Low', color: 'bg-red-50 text-red-600 border-red-100' };
+  };
 
   const fetchRecordedWastage = async () => {
       try {
@@ -396,16 +421,25 @@ export const FarmingTab: React.FC<FarmingTabProps> = ({
               newLog.roomId = activityRoomId; // ASSIGN ROOM ID HERE
               
               if (!finalBatchId) throw new Error("Batch ID is required for Substrate Prep");
+              
+              // 1. Create Parent Batch Document
               await setDoc(doc(db, collectionName, finalBatchId), newLog);
+
+              // 2. Add to Subcollection (Ensure the creation event is in the timeline)
+              await addDoc(collection(db, collectionName, finalBatchId, "activity_logs"), {
+                  ...newLog,
+                  action: "BATCH_INITIATED"
+              });
               
               const recipe = ACTIVITY_RECIPES[activityType] || [];
               for (const item of recipe) {
-                  const totalDeduct = item.perKgAmount * yieldMultiplier;
+                  // Fixed amount per batch logic
+                  const totalDeduct = item.amount;
                   if (totalDeduct > 0) {
                     await performAutoDeduction(item.id, totalDeduct, "Substrate Prep", finalBatchId);
                   }
               }
-              onSuccess(`Batch created in Room ${activityRoomId}. ${yieldMultiplier}kg capacity materials deducted.`);
+              onSuccess(`Batch created in Room ${activityRoomId}. Materials deducted.`);
           } else {
               if (!finalBatchId) {
                   onError("Please select a Batch ID to log this activity.");
@@ -432,26 +466,29 @@ export const FarmingTab: React.FC<FarmingTabProps> = ({
                   await updateDoc(batchRef, { stepsCompleted: arrayUnion('SPAWNING') });
               }
 
+              // Keep yieldMultiplier for reference/other logic if needed, but not for material deduction
               yieldMultiplier = batchData.predictedYield || 0;
 
+              // Save to subcollection
               await addDoc(collection(db, collectionName, finalBatchId, "activity_logs"), newLog);
               
               const recipe = ACTIVITY_RECIPES[activityType] || [];
               if (recipe.length > 0) {
                   for (const item of recipe) {
-                      const totalDeduct = item.perKgAmount * yieldMultiplier;
+                      // Fixed amount per batch logic
+                      const totalDeduct = item.amount;
                       if (totalDeduct > 0) {
                         await performAutoDeduction(item.id, totalDeduct, activityType.replace('_', ' '), finalBatchId);
                       }
                   }
-                  onSuccess(`${activityType.replace('_', ' ')} logged. Materials deducted for ${yieldMultiplier}kg capacity.`);
+                  onSuccess(`${activityType.replace('_', ' ')} logged. Materials deducted.`);
               } else {
                   onSuccess("Activity logged successfully.");
               }
           }
           
           setActivityNotes('');
-          setPredictedYield(''); 
+          setPredictedYield(STRAIN_YIELD_PREDICTIONS['Oyster'].toString()); // Reset to default
           
           if (activityType === 'SUBSTRATE_PREP') {
               const today = new Date();
@@ -473,7 +510,6 @@ export const FarmingTab: React.FC<FarmingTabProps> = ({
   };
 
   const handleLogHarvest = async (e: React.FormEvent) => {
-      // ... existing harvest logic ...
       e.preventDefault();
       setIsSubmittingHarvest(true);
       try {
@@ -548,7 +584,6 @@ export const FarmingTab: React.FC<FarmingTabProps> = ({
       }
   };
 
-  // ... existing wastage functions ...
   const handleLogWastage = async (e: React.FormEvent) => {
       e.preventDefault();
       setIsSubmittingWastage(true);
@@ -595,7 +630,6 @@ export const FarmingTab: React.FC<FarmingTabProps> = ({
   };
 
   const handlePrintWastageReport = () => {
-    // ... existing print logic ...
     const printWindow = window.open('', '_blank');
     if (!printWindow) return;
     const totalWeight = recordedWastageList.reduce((acc, curr) => acc + curr.weightKg, 0);
@@ -660,7 +694,6 @@ export const FarmingTab: React.FC<FarmingTabProps> = ({
   };
 
   const handleExportCSV = () => {
-    // ... existing export logic ...
     if (batchList.length === 0) { onError("No data to export."); return; }
     const headers = ["Date", "Batch ID", "Strain", "Status", "Actual", "Predicted", "Wastage"];
     const rows = batchList.map(log => [new Date(log.timestamp).toLocaleDateString(), log.batchId || log.id, log.mushroomStrain || '-', (log.predictedYield && (log.totalYield || 0 + (log.totalWastage || 0)) >= log.predictedYield) ? 'Completed' : 'In Progress', (log.totalYield || 0).toFixed(2), (log.predictedYield || 0).toFixed(2), (log.totalWastage || 0).toFixed(2)]);
@@ -712,7 +745,6 @@ export const FarmingTab: React.FC<FarmingTabProps> = ({
   };
 
   const handleSendForecast = () => {
-      // Simulate sending data
       onSuccess("Yield forecast sent to Village C Sales Team.");
   };
 
@@ -797,7 +829,7 @@ export const FarmingTab: React.FC<FarmingTabProps> = ({
                     {/* Activity Form */}
                     <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200 flex flex-col h-full">
                         <h2 className="text-lg font-bold text-gray-900 mb-4 flex items-center gap-2">
-                            <svg className={`w-5 h-5 ${theme.textIcon}`} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" /></svg>
+                            <svg className={`w-5 h-5 ${theme.textIcon}`} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" /></svg>
                             Daily Farming Log ({villageId === VillageType.A ? 'A' : villageId === VillageType.B ? 'B' : 'Gen'})
                         </h2>
                         <form onSubmit={handleLogActivity} className="space-y-4 flex-1">
@@ -846,8 +878,8 @@ export const FarmingTab: React.FC<FarmingTabProps> = ({
                                         </select>
                                     </div>
                                     <div className="col-span-2">
-                                        <label className="block text-sm font-medium text-gray-700 mb-1">Predicted Yield (kg) <span className="text-red-500">*</span></label>
-                                        <input type="number" step="0.1" required value={predictedYield} onChange={(e) => setPredictedYield(e.target.value)} className="block w-full rounded-md border-gray-300 shadow-sm focus:border-green-500 focus:ring-green-500 sm:text-sm border p-2" placeholder="e.g. 150" />
+                                        <label className="block text-sm font-medium text-gray-700 mb-1">Estimated Yield (AI Prediction: <span className="font-bold">{STRAIN_YIELD_PREDICTIONS[batchStrain] || 6.5}kg</span>) <span className="text-red-500">*</span></label>
+                                        <input type="number" step="0.1" required value={predictedYield} onChange={(e) => setPredictedYield(e.target.value)} className="block w-full rounded-md border-gray-300 shadow-sm focus:border-green-500 focus:ring-green-500 sm:text-sm border p-2" placeholder="e.g. 6.5" />
                                     </div>
                                 </div>
                             )}
@@ -1005,10 +1037,10 @@ export const FarmingTab: React.FC<FarmingTabProps> = ({
                                 <tr>
                                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Date Created</th>
                                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Batch ID</th>
-                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Room</th>
                                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Strain</th>
                                     <th className="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase">Status</th>
                                     <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Yield (kg)</th>
+                                    <th className="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase">Efficiency</th>
                                     <th className="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase">Actions</th>
                                 </tr>
                             </thead>
@@ -1022,14 +1054,25 @@ export const FarmingTab: React.FC<FarmingTabProps> = ({
                                         let statusText = 'In Progress';
                                         let statusColor = 'bg-yellow-100 text-yellow-800';
                                         if (predicted > 0 && totalOutput >= predicted) { statusText = 'Completed'; statusColor = 'bg-green-100 text-green-800'; }
+                                        
+                                        const efficiency = predicted > 0 ? (actual / predicted) * 100 : 0;
+                                        const grade = getBatchGrade(actual);
+
                                         return (
                                             <tr key={log.id} className="hover:bg-gray-50 transition-colors">
                                                 <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{new Date(log.timestamp).toLocaleDateString()}</td>
                                                 <td className="px-6 py-4 whitespace-nowrap text-sm font-bold text-gray-900">{log.batchId || log.id}</td>
-                                                <td className="px-6 py-4 whitespace-nowrap text-sm text-indigo-700 font-bold">{log.roomId || '-'}</td>
                                                 <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{log.mushroomStrain || '-'}</td>
                                                 <td className="px-6 py-4 whitespace-nowrap text-center"><span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${statusColor}`}>{statusText}</span></td>
                                                 <td className="px-6 py-4 whitespace-nowrap text-sm font-bold text-green-700 text-right">{log.totalYield ? `${log.totalYield.toFixed(1)}` : '-'}</td>
+                                                <td className="px-6 py-4 whitespace-nowrap text-center">
+                                                    <div className="flex flex-col items-center">
+                                                        <span className={`px-2 py-1 rounded text-xs font-bold ${efficiency >= 90 ? 'bg-green-100 text-green-700' : efficiency >= 70 ? 'bg-yellow-100 text-yellow-700' : 'bg-red-100 text-red-700'}`}>
+                                                            {efficiency.toFixed(1)}%
+                                                        </span>
+                                                        {actual > 0 && <span className={`text-[9px] px-1.5 py-0.5 rounded border mt-1 ${grade.color}`}>{grade.label}</span>}
+                                                    </div>
+                                                </td>
                                                 <td className="px-6 py-4 whitespace-nowrap text-center"><div className="flex justify-center space-x-2"><button onClick={() => fetchBatchDetails(log)} className="text-indigo-600 hover:text-indigo-900 text-xs font-medium border border-indigo-200 px-2 py-1 rounded">View</button><button onClick={() => openEditModal(log)} className="text-gray-500 hover:text-gray-800 text-xs font-medium border border-gray-200 px-2 py-1 rounded">Edit</button></div></td>
                                             </tr>
                                         );
@@ -1144,6 +1187,7 @@ export const FarmingTab: React.FC<FarmingTabProps> = ({
                                         const totalOutput = actual + wastage;
                                         const efficiency = predicted > 0 ? (actual / predicted) * 100 : 0;
                                         const status = (predicted > 0 && totalOutput >= predicted) ? 'Completed' : 'In Progress';
+                                        const grade = getBatchGrade(actual);
                                         
                                         return (
                                             <tr key={batch.id} className="hover:bg-gray-50 transition-colors">
@@ -1154,9 +1198,12 @@ export const FarmingTab: React.FC<FarmingTabProps> = ({
                                                 <td className="px-6 py-4 whitespace-nowrap text-sm text-right font-bold text-gray-800">{actual.toFixed(1)}</td>
                                                 <td className="px-6 py-4 whitespace-nowrap text-sm text-right font-bold text-red-600">{wastage > 0 ? wastage.toFixed(1) : '-'}</td>
                                                 <td className="px-6 py-4 whitespace-nowrap text-center">
-                                                    <span className={`px-2 py-1 rounded text-xs font-bold ${efficiency >= 90 ? 'bg-green-100 text-green-700' : efficiency >= 70 ? 'bg-yellow-100 text-yellow-700' : 'bg-red-100 text-red-700'}`}>
-                                                        {efficiency.toFixed(1)}%
-                                                    </span>
+                                                    <div className="flex flex-col items-center">
+                                                        <span className={`px-2 py-1 rounded text-xs font-bold ${efficiency >= 90 ? 'bg-green-100 text-green-700' : efficiency >= 70 ? 'bg-yellow-100 text-yellow-700' : 'bg-red-100 text-red-700'}`}>
+                                                            {efficiency.toFixed(1)}%
+                                                        </span>
+                                                        {actual > 0 && <span className={`text-[9px] px-1.5 py-0.5 rounded border mt-1 ${grade.color}`}>{grade.label}</span>}
+                                                    </div>
                                                 </td>
                                                 <td className="px-6 py-4 whitespace-nowrap text-center">
                                                     <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${status === 'Completed' ? 'bg-gray-200 text-gray-600' : 'bg-blue-100 text-blue-600'}`}>

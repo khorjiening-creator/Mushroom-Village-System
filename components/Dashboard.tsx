@@ -205,6 +205,26 @@ export const Dashboard: React.FC<DashboardProps> = ({ villageId, userEmail, user
 
       data.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
       setFinancialRecords(data);
+
+      // Automatic Capital Generation if Ledger is Empty (For Village A & B)
+      if ((villageId === VillageType.A || villageId === VillageType.B) && data.length === 0) {
+          const initialCapital = {
+              transactionId: "TXN-INIT-CAP",
+              type: 'INCOME' as const,
+              category: 'Investment',
+              amount: 50000,
+              date: new Date().toISOString().split('T')[0],
+              description: "Initial Operating Capital Injection",
+              recordedBy: "System",
+              villageId: villageId,
+              status: 'COMPLETED' as const,
+              createdAt: new Date().toISOString()
+          };
+          // Add directly to DB and State to avoid re-fetch cycle
+          await addDoc(collection(db, incomeCol), initialCapital);
+          setFinancialRecords([initialCapital as FinancialRecord]); // Set initial state
+      }
+
     } catch (error) { console.error("Financial fetch error:", error); }
   };
 
@@ -382,6 +402,34 @@ export const Dashboard: React.FC<DashboardProps> = ({ villageId, userEmail, user
       } catch (error) { showNotification("Failed to settle", "error"); } finally { setIsSettling(false); }
   };
 
+  const handleInjectCapital = async () => {
+      if (!confirm("Inject RM 10,000 capital? This will be recorded as Investment Income.")) return;
+      
+      const colId = getIncomeCollection(villageId);
+      const amount = 10000;
+      const newRecord = {
+          transactionId: "TXN-INJ-" + Date.now().toString().slice(-6),
+          type: 'INCOME' as const,
+          category: 'Investment',
+          amount: amount,
+          date: new Date().toISOString().split('T')[0],
+          description: "Emergency Capital Injection",
+          recordedBy: userEmail,
+          villageId: villageId,
+          status: 'COMPLETED' as const,
+          createdAt: new Date().toISOString()
+      };
+      
+      try {
+          await addDoc(collection(db, colId), newRecord);
+          fetchFinancialRecords();
+          showNotification(`Successfully injected RM${amount.toLocaleString()} capital.`, 'success');
+      } catch (error) {
+          console.error("Injection failed", error);
+          showNotification("Failed to inject capital.", 'error');
+      }
+  };
+
   const openEditTransModal = (rec: FinancialRecord) => { setEditingTransaction(rec); setShowTransModal(true); };
   const openSettleTransModal = (rec: FinancialRecord) => { setSettleTransaction(rec); setShowSettleModal(true); };
 
@@ -429,8 +477,12 @@ export const Dashboard: React.FC<DashboardProps> = ({ villageId, userEmail, user
                 
                 {village.role === VillageRole.FARMING && (
                     <>
-                        <button onClick={() => setActiveTab('farming')} className={`${activeTab === 'farming' ? `border-green-500 text-green-600` : 'border-transparent text-gray-500'} whitespace-nowrap py-4 px-1 border-b-2 font-bold text-sm transition-colors`}>Farming</button>
-                        <button onClick={() => setActiveTab('environment')} className={`${activeTab === 'environment' ? `border-green-500 text-green-600` : 'border-transparent text-gray-500'} whitespace-nowrap py-4 px-1 border-b-2 font-bold text-sm transition-colors`}>Environment</button>
+                        {userRole !== 'finance' && (
+                            <>
+                                <button onClick={() => setActiveTab('farming')} className={`${activeTab === 'farming' ? `border-green-500 text-green-600` : 'border-transparent text-gray-500'} whitespace-nowrap py-4 px-1 border-b-2 font-bold text-sm transition-colors`}>Farming</button>
+                                <button onClick={() => setActiveTab('environment')} className={`${activeTab === 'environment' ? `border-green-500 text-green-600` : 'border-transparent text-gray-500'} whitespace-nowrap py-4 px-1 border-b-2 font-bold text-sm transition-colors`}>Environment</button>
+                            </>
+                        )}
                         {(userRole === 'admin' || userRole === 'finance') && (
                             <button onClick={() => setActiveTab('analysis')} className={`${activeTab === 'analysis' ? `border-green-500 text-green-600` : 'border-transparent text-gray-500'} whitespace-nowrap py-4 px-1 border-b-2 font-bold text-sm transition-colors`}>Analysis</button>
                         )}
@@ -446,11 +498,13 @@ export const Dashboard: React.FC<DashboardProps> = ({ villageId, userEmail, user
                     </>
                 )}
 
-                <button onClick={() => setActiveTab('resources')} className={`${activeTab === 'resources' ? `border-indigo-500 text-indigo-600` : 'border-transparent text-gray-500'} whitespace-nowrap py-4 px-1 border-b-2 font-bold text-sm transition-colors relative`}>
-                    Resources
-                    {lowStockItems.length > 0 && <span className="absolute -top-1 -right-2 bg-red-500 text-white text-[8px] font-black px-1.5 py-0.5 rounded-full ring-2 ring-white">!</span>}
-                    {pendingReceiptsCount > 0 && <span className="absolute -top-1 -right-8 bg-blue-500 text-white text-[9px] font-bold px-1.5 py-0.5 rounded-full ring-2 ring-white flex items-center shadow-sm" title="Items awaiting confirmation">+{pendingReceiptsCount}</span>}
-                </button>
+                {userRole !== 'finance' && (
+                    <button onClick={() => setActiveTab('resources')} className={`${activeTab === 'resources' ? `border-indigo-500 text-indigo-600` : 'border-transparent text-gray-500'} whitespace-nowrap py-4 px-1 border-b-2 font-bold text-sm transition-colors relative`}>
+                        Resources
+                        {lowStockItems.length > 0 && <span className="absolute -top-1 -right-2 bg-red-500 text-white text-[8px] font-black px-1.5 py-0.5 rounded-full ring-2 ring-white">!</span>}
+                        {pendingReceiptsCount > 0 && <span className="absolute -top-1 -right-8 bg-blue-500 text-white text-[9px] font-bold px-1.5 py-0.5 rounded-full ring-2 ring-white flex items-center shadow-sm" title="Items awaiting confirmation">+{pendingReceiptsCount}</span>}
+                    </button>
+                )}
                 
                 {(isFinance || isAdmin) && (
                     <button onClick={() => setActiveTab('financial')} className={`${activeTab === 'financial' ? `border-indigo-500 text-indigo-600` : 'border-transparent text-gray-500'} whitespace-nowrap py-4 px-1 border-b-2 font-bold text-sm transition-colors`}>Financials</button>
@@ -468,8 +522,10 @@ export const Dashboard: React.FC<DashboardProps> = ({ villageId, userEmail, user
                         villageId={villageId} 
                         userName={userName || 'User'} 
                         theme={theme} 
+                        userRole={userRole}
                         isFinance={isFinance}
                         financeOverviewData={financeOverviewData}
+                        financialRecords={financialRecords}
                         setActiveTab={setActiveTab}
                         openEditTransModal={openEditTransModal}
                         chartFilter={chartFilter}
@@ -532,6 +588,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ villageId, userEmail, user
                     onEditRecord={openEditTransModal}
                     onDeleteRecord={(id) => handleDeleteLog(villageId === VillageType.C ? "financialRecords_C" : villageId === VillageType.A ? "financialRecords_A" : "financialRecords_B", id)}
                     onSettleRecord={openSettleTransModal}
+                    onInjectCapital={handleInjectCapital}
                     userRole={userRole}
                     theme={theme}
                     financeOverviewData={financeOverviewData}

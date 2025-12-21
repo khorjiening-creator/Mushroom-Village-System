@@ -133,7 +133,7 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userE
                 villageId
             });
             if (onSuccess) onSuccess(`Sensor reading logged for ${activeRoom}.`);
-            setInputTemp(''); setInputHumid(''); setInputMoist('');
+            // Inputs are kept populated with defaults for next quick entry
         } catch (err) { console.error(err); if (onError) onError("Failed to save reading."); } finally { setIsSubmitting(false); }
     };
 
@@ -171,6 +171,20 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userE
     }
 
     const rules = IDEAL_CONDITIONS[assignedStrain] || IDEAL_CONDITIONS['Oyster'];
+
+    // Auto-set default values for Log Sensor Reading based on Ideal Target
+    useEffect(() => {
+        if (rules) {
+            // Calculate averages/targets
+            const targetTemp = (rules.minT + rules.maxT) / 2;
+            const targetHumid = (rules.minH + rules.maxH) / 2;
+            const targetMoist = (rules.minM + rules.maxM) / 2;
+            
+            setInputTemp(targetTemp.toFixed(1));
+            setInputHumid(targetHumid.toFixed(1));
+            setInputMoist(targetMoist.toFixed(1));
+        }
+    }, [activeRoom, assignedStrain]);
 
     // 1️⃣ Notification & Automation Logic Engine (Updated with Outside Impact Rules)
     useEffect(() => {
@@ -275,12 +289,12 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userE
                 
                 if (daysRemaining <= 3) {
                     let urgency: 'Normal' | 'High' | 'Critical' = 'Normal';
-                    let msg = `Harvest Alert: Batch ${batch.batchId} ready in ${daysRemaining} days.`;
+                    let msg = `Batch ${batch.batchId} (${batch.mushroomStrain}) ready in ${daysRemaining} days.`;
                     
                     if (daysRemaining === 1) {
                         urgency = 'High';
                         msg = `URGENT: Batch ${batch.batchId} harvest due TOMORROW.`;
-                    } else if (daysRemaining === 0) {
+                    } else if (daysRemaining <= 0) {
                         urgency = 'Critical';
                         msg = `CRITICAL: HARVEST TODAY - Batch ${batch.batchId}.`;
                     }
@@ -351,11 +365,43 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userE
         { label: 'Substrate Moisture', unit: '%', val: latest.moisture, min: rules.minM, max: rules.maxM, status: getStatus(latest.moisture, rules.minM, rules.maxM) },
     ];
 
+    const harvestNotifications = notifications.filter(n => n.type === 'HARVEST');
+
     if (loading) return <div className="p-10 text-center animate-pulse">Loading environmental data...</div>;
 
     return (
         <div className="space-y-8 animate-fade-in-up">
             
+            {/* Harvest Alert Banner */}
+            {harvestNotifications.length > 0 && (
+                <div className="bg-gradient-to-r from-orange-50 to-orange-100 border-l-4 border-orange-500 p-4 rounded-r-xl shadow-sm animate-fade-in-down">
+                    <div className="flex items-start">
+                        <div className="flex-shrink-0">
+                            <svg className="h-5 w-5 text-orange-600 animate-pulse" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                            </svg>
+                        </div>
+                        <div className="ml-3 w-full">
+                            <h3 className="text-sm font-bold text-orange-800 uppercase tracking-wide">Harvest Action Required</h3>
+                            <div className="mt-2 space-y-2">
+                                {harvestNotifications.map((alert, i) => (
+                                    <div key={i} className="flex justify-between items-center bg-white/60 p-2 rounded-lg border border-orange-200">
+                                        <span className="text-xs text-orange-900 font-medium">
+                                            {alert.msg}
+                                        </span>
+                                        {setActiveTab && (
+                                            <button onClick={() => setActiveTab('farming')} className="text-[10px] bg-orange-600 text-white px-2 py-1 rounded hover:bg-orange-700 transition-colors uppercase font-bold shadow-sm">
+                                                Log Harvest
+                                            </button>
+                                        )}
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+
             {/* Room Selector Header */}
             <div className="flex flex-col sm:flex-row justify-between items-center gap-4 bg-white p-4 rounded-xl border border-gray-200 shadow-sm">
                 <div className="flex items-center gap-3">
@@ -453,6 +499,17 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userE
                         </div>
                         
                         <div className="flex flex-col items-center justify-center py-2 space-y-3">
+                            {(outsideTemp > 30 || outsideHumidity > 85) && setActiveTab && (
+                                <button
+                                    onClick={() => setActiveTab('resources')}
+                                    className="w-full bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-4 rounded-xl flex items-center justify-center gap-2 transition-colors text-xs uppercase tracking-wide animate-pulse"
+                                >
+                                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                                    </svg>
+                                    High Risk: Adjust Equipment
+                                </button>
+                            )}
                             <a 
                                 href="https://www.accuweather.com/en/my/malaysia-weather" 
                                 target="_blank" 
@@ -499,6 +556,19 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userE
                                                 <div className="text-[10px] bg-white border border-gray-200 px-2 py-1 rounded inline-block text-gray-600 font-medium shadow-sm">
                                                     Action: {note.action}
                                                 </div>
+                                            )}
+                                            
+                                            {/* Action Button for Non-Harvest Risks */}
+                                            {note.type !== 'HARVEST' && setActiveTab && (
+                                                <button 
+                                                    onClick={() => setActiveTab('resources')}
+                                                    className="mt-2 w-full py-1 bg-white border border-gray-300 rounded text-[10px] font-bold uppercase text-gray-600 hover:bg-gray-50 flex items-center justify-center gap-1 transition-colors"
+                                                >
+                                                    <svg className="w-3 h-3 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4" />
+                                                    </svg>
+                                                    Verify Equipment Status
+                                                </button>
                                             )}
                                         </div>
                                     ))}
