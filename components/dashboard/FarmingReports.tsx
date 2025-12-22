@@ -1,6 +1,5 @@
-
 import React, { useState, useEffect, useMemo } from 'react';
-import { collection, query, getDocs, where } from 'firebase/firestore';
+import { collection, query, getDocs, where, addDoc } from 'firebase/firestore';
 import { db } from '../../services/firebase';
 import { ActivityLog, VillageType } from '../../types';
 
@@ -96,8 +95,37 @@ export const FarmingReports: React.FC<FarmingReportsProps> = ({
     }, [dailyProductionData, productionPeriod, monthlyStats]);
 
     // Handlers
-    const handleSendForecast = () => {
-        onSuccess("Yield forecast sent to Village C Sales Team.");
+    const handleSendForecast = async () => {
+        try {
+            // Filter for active batches that have a prediction
+            const activeBatches = batchList.filter(b => {
+                const totalOutput = (b.totalYield || 0) + (b.totalWastage || 0);
+                const isCompleted = b.batchStatus === 'COMPLETED' || (b.predictedYield > 0 && totalOutput >= b.predictedYield);
+                return !isCompleted && b.predictedYield > 0;
+            });
+
+            if (activeBatches.length === 0) {
+                onError("No active batches with predictions to forecast.");
+                return;
+            }
+
+            const promises = activeBatches.map(batch => {
+                return addDoc(collection(db, "yield_forecasts"), {
+                    villageId,
+                    batchId: batch.batchId || batch.id,
+                    strain: batch.mushroomStrain || 'Unknown',
+                    predictedQty: batch.predictedYield,
+                    currentYield: batch.totalYield || 0,
+                    timestamp: new Date().toISOString()
+                });
+            });
+
+            await Promise.all(promises);
+            onSuccess(`Yield forecast for ${activeBatches.length} batches sent to Village C.`);
+        } catch (e) {
+            console.error("Forecast error", e);
+            onError("Failed to send forecast data.");
+        }
     };
 
     const handlePrintProductionReport = () => {
@@ -151,6 +179,48 @@ export const FarmingReports: React.FC<FarmingReportsProps> = ({
                         <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z" /></svg>
                         Print Report
                     </button>
+                </div>
+            </div>
+
+            {/* New Prediction Card */}
+            <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
+                <h3 className="text-sm font-bold text-gray-800 uppercase mb-4 flex items-center gap-2">
+                    <svg className="w-4 h-4 text-blue-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" /></svg>
+                    Batch Yield Predictions
+                </h3>
+                <div className="overflow-x-auto">
+                    <table className="min-w-full text-xs text-left">
+                        <thead className="bg-gray-50 uppercase font-bold text-gray-500">
+                            <tr>
+                                <th className="px-6 py-3">Batch ID</th>
+                                <th className="px-6 py-3">Strain</th>
+                                <th className="px-6 py-3 text-right">Predicted Yield</th>
+                                <th className="px-6 py-3 text-right">Current Harvest</th>
+                                <th className="px-6 py-3 text-center">Remaining Est.</th>
+                            </tr>
+                        </thead>
+                        <tbody className="divide-y divide-gray-100">
+                            {batchList.filter(b => b.predictedYield > 0).length === 0 ? (
+                                <tr><td colSpan={5} className="px-6 py-4 text-center text-gray-400 italic">No prediction data available. Log a Substrate Prep activity to generate predictions.</td></tr>
+                            ) : (
+                                batchList.filter(b => b.predictedYield > 0).map(b => {
+                                    const current = b.totalYield || 0;
+                                    const remaining = Math.max(0, b.predictedYield - current);
+                                    return (
+                                        <tr key={b.id} className="hover:bg-gray-50">
+                                            <td className="px-6 py-3 font-bold text-gray-700">{b.batchId || b.id}</td>
+                                            <td className="px-6 py-3">{b.mushroomStrain}</td>
+                                            <td className="px-6 py-3 text-right font-mono text-blue-600">{b.predictedYield.toFixed(1)} kg</td>
+                                            <td className="px-6 py-3 text-right">{current.toFixed(1)} kg</td>
+                                            <td className="px-6 py-3 text-center font-bold text-gray-500">
+                                                {remaining > 0 ? `${remaining.toFixed(1)} kg` : 'Target Met'}
+                                            </td>
+                                        </tr>
+                                    );
+                                })
+                            )}
+                        </tbody>
+                    </table>
                 </div>
             </div>
 

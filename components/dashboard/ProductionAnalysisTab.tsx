@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useMemo } from 'react';
 import { collection, query, orderBy, getDocs, where, limit } from 'firebase/firestore';
 import { db } from '../../services/firebase';
@@ -146,6 +145,14 @@ export const ProductionAnalysisTab: React.FC<ProductionAnalysisTabProps> = ({ vi
         return { totalCost, totalYield, avgEff };
     }, [batches]);
 
+    const formatActivityName = (name: string) => {
+        if (!name) return 'Unknown';
+        return name
+            .replace(/_/g, ' ')
+            .toLowerCase()
+            .replace(/\b\w/g, s => s.toUpperCase());
+    };
+
     if (loading) return <div className="p-10 text-center text-gray-400 animate-pulse">Analyzing production data...</div>;
 
     return (
@@ -245,7 +252,7 @@ export const ProductionAnalysisTab: React.FC<ProductionAnalysisTabProps> = ({ vi
                                                                 ) : (
                                                                     batch.breakdown.map((item, i) => (
                                                                         <tr key={i} className="border-b last:border-0 hover:bg-gray-50">
-                                                                            <td className="p-2 font-bold text-gray-700">{item.activity}</td>
+                                                                            <td className="p-2 font-bold text-gray-700">{formatActivityName(item.activity)}</td>
                                                                             <td className="p-2 text-gray-600">{item.material}</td>
                                                                             <td className="p-2 text-right">{item.qty} <span className="text-[9px] text-gray-400">{item.unit}</span></td>
                                                                             <td className="p-2 text-right text-gray-500">RM{item.unitCost.toFixed(2)}</td>

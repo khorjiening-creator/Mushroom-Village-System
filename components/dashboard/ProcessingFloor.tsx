@@ -1,6 +1,5 @@
-
 import React, { useState, useEffect } from 'react';
-import { collection, addDoc, doc, updateDoc } from '@firebase/firestore';
+import { collection, addDoc, doc, updateDoc, onSnapshot, query, where } from '@firebase/firestore';
 import { db } from '../../services/firebase';
 import { ProcessingLog, VillageType, DisposalEntry } from '../../types';
 import { 
@@ -33,6 +32,10 @@ export const ProcessingFloor: React.FC<Props> = ({
 }) => {
     const [subTab, setSubTab] = useState<'intake' | 'qc' | 'grading' | 'rejection' | 'cleaning'>('intake');
     const [selectedBatch, setSelectedBatch] = useState<ProcessingLog | null>(null);
+
+    // Pending Shipments Logic
+    const [pendingShipments, setPendingShipments] = useState<any[]>([]);
+    const [selectedShipmentId, setSelectedShipmentId] = useState<string | null>(null);
 
     // Intake States
     const [intakeDate, setIntakeDate] = useState(new Date().toISOString().split('T')[0]);
@@ -67,6 +70,18 @@ export const ProcessingFloor: React.FC<Props> = ({
     const [cleaningStaff, setCleaningStaff] = useState<string[]>(["Alice Worker"]);
     const [isCleaningComplete, setIsCleaningComplete] = useState(false);
 
+    // Fetch Pending Shipments
+    useEffect(() => {
+        if (villageId === VillageType.C) {
+            const q = query(collection(db, "pending_shipments"), where("status", "==", "PENDING"));
+            const unsubscribe = onSnapshot(q, (snapshot) => {
+                const shipments = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                setPendingShipments(shipments);
+            });
+            return () => unsubscribe();
+        }
+    }, [villageId]);
+
     const getTaskCount = (tab: string) => {
         switch(tab) {
             case 'qc': return processingLogs.filter(l => l.currentStep === 2).length;
@@ -77,20 +92,50 @@ export const ProcessingFloor: React.FC<Props> = ({
         }
     };
 
+    const handleSelectShipment = (shipment: any) => {
+        setSelectedShipmentId(shipment.id);
+        setIntakeSource(shipment.sourceVillage);
+        setIntakeVariety(shipment.strain);
+        setIntakeStatedQty(shipment.weight.toString());
+        setIntakeActualQty(shipment.weight.toString()); // Auto-fill actual with stated initially
+        
+        // Auto set time if available
+        if (shipment.timestamp) {
+            const d = new Date(shipment.timestamp);
+            setIntakeDate(d.toISOString().split('T')[0]);
+            setIntakeTime(d.toTimeString().slice(0, 5));
+        }
+    };
+
     const handleIntakeSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
         setIsIntakeSubmitting(true);
         try {
             const timestamp = `${intakeDate}T${intakeTime}:00.000`;
             const intakeDateObj = new Date(timestamp);
-            const batchId = `B${villageId === VillageType.A ? 'A' : villageId === VillageType.B ? 'B' : 'C'}-${Date.now().toString().slice(-6)}`;
+            
+            // Use batch ID from shipment if linked, else generate
+            let batchId = `B${villageId === VillageType.A ? 'A' : villageId === VillageType.B ? 'B' : 'C'}-${Date.now().toString().slice(-6)}`;
+            
+            if (selectedShipmentId) {
+                const shipment = pendingShipments.find(s => s.id === selectedShipmentId);
+                if (shipment && shipment.batchId) batchId = shipment.batchId;
+                
+                // Mark shipment as received
+                await updateDoc(doc(db, "pending_shipments", selectedShipmentId), {
+                    status: 'RECEIVED',
+                    receivedAt: new Date().toISOString(),
+                    receivedBy: userEmail
+                });
+            }
+
             const stated = parseFloat(intakeStatedQty);
             const actual = parseFloat(intakeActualQty);
             
             const packagingDueTime = new Date(intakeDateObj.getTime() + 2 * 3600000).toISOString();
 
             const newLog: Omit<ProcessingLog, 'id'> = {
-                batchId, harvestId: 'MANUAL_ENTRY', sourceVillage: intakeSource, mushroomType: intakeVariety,
+                batchId, harvestId: selectedShipmentId || 'MANUAL_ENTRY', sourceVillage: intakeSource, mushroomType: intakeVariety,
                 statedWeight: stated, actualWeight: actual, variance: stated - actual,
                 receivedBy: intakeStaff.join(', '), intakeTimestamp: intakeDateObj.toISOString(),
                 packagingDueTime,
@@ -99,7 +144,11 @@ export const ProcessingFloor: React.FC<Props> = ({
             };
             await addDoc(collection(db, "processing_logs"), newLog);
             await addDoc(collection(db, "Intake_logs"), { ...newLog, recordedBy: userEmail });
-            onRefresh(); setIntakeStatedQty(''); setIntakeActualQty('');
+            
+            onRefresh(); 
+            setIntakeStatedQty(''); 
+            setIntakeActualQty('');
+            setSelectedShipmentId(null); // Reset selection
         } catch (err) { console.error(err); } finally { setIsIntakeSubmitting(false); }
     };
 
@@ -235,7 +284,6 @@ export const ProcessingFloor: React.FC<Props> = ({
         : 0;
 
     // Filter out READY_FOR_PACKAGING because that is shown in Packaging Tab
-    // Fix: Removed redundant status comparison that TS flagged as unintentional due to no type overlap
     const sortedTrackerLogs = [...processingLogs]
         .filter(l => l.status === 'IN_PROGRESS')
         .sort((a, b) => new Date(a.packagingDueTime).getTime() - new Date(b.packagingDueTime).getTime());
@@ -289,30 +337,57 @@ export const ProcessingFloor: React.FC<Props> = ({
 
             {subTab === 'intake' ? (
                 <div className="grid md:grid-cols-2 gap-8">
-                    <form onSubmit={handleIntakeSubmit} className="space-y-4 bg-white p-6 rounded-xl border border-gray-100 shadow-sm">
-                        <div className="grid grid-cols-2 gap-4">
-                            <div><label className="block text-[10px] font-bold text-gray-400 uppercase">Date</label><input type="date" value={intakeDate} onChange={e=>setIntakeDate(e.target.value)} className="w-full p-2 border rounded" required /></div>
-                            <div><label className="block text-[10px] font-bold text-gray-400 uppercase">Time</label><input type="time" value={intakeTime} onChange={e=>setIntakeTime(e.target.value)} className="w-full p-2 border rounded" required /></div>
-                        </div>
-                        <div className="grid grid-cols-2 gap-4">
-                            <div><label className="block text-[10px] font-bold text-gray-400 uppercase">Source</label><select value={intakeSource} onChange={e=>setIntakeSource(e.target.value)} className="w-full p-2 border rounded bg-white"><option value="Village A">Village A</option><option value="Village B">Village B</option></select></div>
-                            <div><label className="block text-[10px] font-bold text-gray-400 uppercase">Variety</label><select value={intakeVariety} onChange={e=>setIntakeVariety(e.target.value)} className="w-full p-2 border rounded bg-white">{MUSHROOM_VARIETIES.map(v=><option key={v} value={v}>{v}</option>)}</select></div>
-                        </div>
-                        <div className="grid grid-cols-2 gap-4">
-                            <div><label className="block text-[10px] font-bold text-gray-400 uppercase">Stated (kg)</label><input type="number" step="0.01" value={intakeStatedQty} onChange={e=>setIntakeStatedQty(e.target.value)} className="w-full p-2 border rounded" required /></div>
-                            <div><label className="block text-[10px] font-bold text-gray-400 uppercase">Actual (kg)</label><input type="number" step="0.01" value={intakeActualQty} onChange={e=>setIntakeActualQty(e.target.value)} className="w-full p-2 border rounded" required /></div>
-                        </div>
-                        <div className="flex justify-between items-center bg-gray-50 p-3 rounded-lg">
-                            <div className={`text-xs font-bold ${parseFloat(intakeActualQty)-parseFloat(intakeStatedQty) !== 0 ? 'text-orange-600' : 'text-green-600'}`}>
-                                Variance: {(parseFloat(intakeStatedQty)-parseFloat(intakeActualQty)).toFixed(2)} kg
+                    <div className="space-y-4">
+                        {/* Pending Shipments Slicer */}
+                        {pendingShipments.length > 0 && (
+                            <div className="bg-blue-50 p-4 rounded-xl border border-blue-100">
+                                <h3 className="text-xs font-bold text-blue-800 uppercase mb-3 tracking-widest flex items-center gap-2">
+                                    <span className="w-2 h-2 rounded-full bg-blue-500 animate-pulse"></span>
+                                    Pending Inbound Shipments
+                                </h3>
+                                <div className="flex gap-2 overflow-x-auto pb-2 scrollbar-thin scrollbar-thumb-blue-200">
+                                    {pendingShipments.map(s => (
+                                        <button 
+                                            key={s.id} 
+                                            onClick={() => handleSelectShipment(s)}
+                                            className={`min-w-[140px] p-3 rounded-lg border text-left transition-all ${selectedShipmentId === s.id ? 'bg-white border-blue-500 shadow-md ring-2 ring-blue-200' : 'bg-white border-blue-100 hover:border-blue-300'}`}
+                                        >
+                                            <div className="text-[10px] font-bold text-gray-500 uppercase">{s.sourceVillage}</div>
+                                            <div className="font-black text-sm text-gray-800 mb-1">{s.batchId}</div>
+                                            <div className="text-xs font-bold text-blue-600">{s.weight}kg <span className="text-gray-400 font-normal">({s.strain})</span></div>
+                                        </button>
+                                    ))}
+                                </div>
                             </div>
-                            <div className="text-[10px] font-bold text-gray-400 uppercase">
-                                Due: {new Date(new Date(`${intakeDate}T${intakeTime}`).getTime() + 2 * 3600000).toLocaleString([], {month: 'short', day: 'numeric', hour: '2-digit', minute:'2-digit'})}
+                        )}
+
+                        <form onSubmit={handleIntakeSubmit} className="bg-white p-6 rounded-xl border border-gray-100 shadow-sm space-y-4">
+                            <div className="grid grid-cols-2 gap-4">
+                                <div><label className="block text-[10px] font-bold text-gray-400 uppercase">Date</label><input type="date" value={intakeDate} onChange={e=>setIntakeDate(e.target.value)} className="w-full p-2 border rounded" required /></div>
+                                <div><label className="block text-[10px] font-bold text-gray-400 uppercase">Time</label><input type="time" value={intakeTime} onChange={e=>setIntakeTime(e.target.value)} className="w-full p-2 border rounded" required /></div>
                             </div>
-                        </div>
-                        <StaffMultiSelect selected={intakeStaff} onChange={setIntakeStaff} label="Receiving Team" />
-                        <button type="submit" disabled={isIntakeSubmitting} className={`w-full py-3 rounded-lg font-bold ${theme.button}`}>Log Intake shipment</button>
-                    </form>
+                            <div className="grid grid-cols-2 gap-4">
+                                <div><label className="block text-[10px] font-bold text-gray-400 uppercase">Source</label><select value={intakeSource} onChange={e=>setIntakeSource(e.target.value)} className="w-full p-2 border rounded bg-white"><option value="Village A">Village A</option><option value="Village B">Village B</option></select></div>
+                                <div><label className="block text-[10px] font-bold text-gray-400 uppercase">Variety</label><select value={intakeVariety} onChange={e=>setIntakeVariety(e.target.value)} className="w-full p-2 border rounded bg-white">{MUSHROOM_VARIETIES.map(v=><option key={v} value={v}>{v}</option>)}</select></div>
+                            </div>
+                            <div className="grid grid-cols-2 gap-4">
+                                <div><label className="block text-[10px] font-bold text-gray-400 uppercase">Stated (kg)</label><input type="number" step="0.01" value={intakeStatedQty} onChange={e=>setIntakeStatedQty(e.target.value)} className="w-full p-2 border rounded" required /></div>
+                                <div><label className="block text-[10px] font-bold text-gray-400 uppercase">Actual (kg)</label><input type="number" step="0.01" value={intakeActualQty} onChange={e=>setIntakeActualQty(e.target.value)} className="w-full p-2 border rounded" required /></div>
+                            </div>
+                            <div className="flex justify-between items-center bg-gray-50 p-3 rounded-lg">
+                                <div className={`text-xs font-bold ${parseFloat(intakeActualQty)-parseFloat(intakeStatedQty) !== 0 ? 'text-orange-600' : 'text-green-600'}`}>
+                                    Variance: {(parseFloat(intakeStatedQty)-parseFloat(intakeActualQty)).toFixed(2)} kg
+                                </div>
+                                <div className="text-[10px] font-bold text-gray-400 uppercase">
+                                    Due: {new Date(new Date(`${intakeDate}T${intakeTime}`).getTime() + 2 * 3600000).toLocaleString([], {month: 'short', day: 'numeric', hour: '2-digit', minute:'2-digit'})}
+                                </div>
+                            </div>
+                            <StaffMultiSelect selected={intakeStaff} onChange={setIntakeStaff} label="Receiving Team" />
+                            <button type="submit" disabled={isIntakeSubmitting} className={`w-full py-3 rounded-lg font-bold ${theme.button}`}>
+                                {selectedShipmentId ? 'Receive & Log Shipment' : 'Log Manual Intake'}
+                            </button>
+                        </form>
+                    </div>
                     <div className="bg-gray-50 p-6 rounded-xl border border-gray-200">
                         <h3 className="text-xs font-bold text-gray-400 uppercase mb-4 tracking-widest">Recent Activities</h3>
                         <div className="space-y-2">

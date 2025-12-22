@@ -64,7 +64,7 @@ export const StaffMultiSelect: React.FC<{
     selected: string[];
     onChange: (selected: string[]) => void;
     label: string;
-}> = ({ selected, onChange, label }) => {
+}> = ({ selected = [], onChange, label }) => {
     const toggleStaff = (name: string) => {
         if (selected.includes(name)) {
             onChange(selected.filter(s => s !== name));

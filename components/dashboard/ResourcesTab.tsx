@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useMemo } from 'react';
 import { collection, onSnapshot, doc, updateDoc, addDoc, setDoc, query, where, getDocs, increment, Timestamp, orderBy, limit } from 'firebase/firestore';
 import { db } from '../../services/firebase';
@@ -761,7 +760,7 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({
                                             <button type="button" className="bg-indigo-700 rounded-md text-indigo-200 hover:text-white focus:outline-none" onClick={() => setIsHistoryDrawerOpen(false)}>
                                                 <span className="sr-only">Close panel</span>
                                                 <svg className="h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
+                                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
                                                 </svg>
                                             </button>
                                         </div>
@@ -993,7 +992,7 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({
                                 <h2 className="text-lg font-black text-gray-900 tracking-tight">Material Availability (Inputs)</h2>
                                 <p className="text-xs text-gray-400 font-medium">Costing and quantity control for raw supplies.</p>
                             </div>
-                            <div className="mt-2 sm:mt-0 flex gap-2">
+                            <div className="mt-2 sm:mt-0 flex gap-2 flex-wrap">
                                 <button onClick={handleAutoSetThresholds} className="px-4 py-2.5 bg-orange-50 text-orange-600 border border-orange-200 text-xs font-black uppercase rounded-xl shadow-sm hover:bg-orange-100 transition-all flex items-center gap-2">
                                     Enforce Safe Limits (30kg)
                                 </button>
@@ -1067,7 +1066,7 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({
                                                     <td className="px-6 py-5 whitespace-nowrap cursor-pointer group" onClick={() => handleViewHistory(item)}>
                                                         <div className="text-sm font-black text-gray-900 group-hover:text-indigo-600 transition-colors flex items-center gap-2">
                                                             {item.name}
-                                                            <svg className="w-4 h-4 text-gray-300 group-hover:text-indigo-400 opacity-0 group-hover:opacity-100 transition-all" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" /></svg>
+                                                            <svg className="w-4 h-4 text-gray-300 group-hover:text-indigo-400 opacity-0 group-hover:opacity-100 transition-all" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 00-2-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" /></svg>
                                                         </div>
                                                         <div className="text-[10px] text-gray-400 font-bold uppercase tracking-tight">{item.materialId || item.id}</div>
                                                     </td>

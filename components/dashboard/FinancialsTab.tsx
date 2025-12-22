@@ -394,13 +394,13 @@ export const FinancialsTab: React.FC<FinancialsTabProps> = ({
 
                     {showOverview && (
                         <div className="p-6 space-y-6 animate-fade-in">
-                            <div className="h-48 w-full flex items-end justify-between gap-2 overflow-x-auto pb-4">
+                            <div className="h-48 w-full flex justify-between gap-2 overflow-x-auto pb-4">
                                 {financeOverviewData.chartData.length === 0 ? (
                                     <div className="w-full h-full flex items-center justify-center text-gray-400 text-sm italic">No data recorded for this view</div>
                                 ) : (
                                     financeOverviewData.chartData.map((d: any) => (
-                                        <div key={d.label} className="flex flex-col items-center flex-1 group min-w-[40px]">
-                                            <div className="relative w-full h-full flex items-end justify-center gap-1">
+                                        <div key={d.label} className="flex flex-col items-center flex-1 group min-w-[40px] h-full">
+                                            <div className="relative w-full flex-1 flex items-end justify-center gap-1">
                                                 <div 
                                                     className="w-full bg-emerald-500 rounded-t-sm transition-all duration-300 group-hover:bg-emerald-400 relative"
                                                     style={{ height: `${Math.max((d.income / (financeOverviewData.maxChartValue || 100)) * 100, 2)}%` }}

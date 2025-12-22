@@ -157,7 +157,8 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userE
             const qNotif = query(collection(db, "system_notifications"), where("villageId", "==", villageId), where("read", "==", false));
             const notifSnap = await getDocs(qNotif);
             notifSnap.forEach(async (d) => {
-                if (d.data().message.includes(activeRoom)) {
+                const msg = d.data().message;
+                if (msg && typeof msg === 'string' && msg.includes(activeRoom)) {
                     await updateDoc(doc(db, "system_notifications", d.id), { read: true });
                 }
             });

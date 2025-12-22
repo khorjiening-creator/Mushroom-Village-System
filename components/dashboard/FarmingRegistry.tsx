@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useMemo } from 'react';
 import { addDoc, collection, query, orderBy, limit, getDocs, setDoc, doc, updateDoc, increment, getDoc, arrayUnion } from 'firebase/firestore';
 import { db } from '../../services/firebase';
@@ -26,10 +25,11 @@ interface FarmingRegistryProps {
 
 const AVAILABLE_ROOMS = Object.values(MUSHROOM_ROOM_MAPPING).flat().sort();
 
+// EXACT RECIPE DEFINITION FOR AUTOMATIC DEDUCTION
 const ACTIVITY_RECIPES: Record<string, { id: string, name: string, amount: number }[]> = {
     'SUBSTRATE_PREP': [
-        { id: "MAT-573260995", name: "Straw", amount: 20 },
-        { id: "MAT-545594408", name: "Water", amount: 50 },
+        { id: "MAT-573260995", name: "Straw", amount: 20 }, // 20kg Straw per batch
+        { id: "MAT-545594408", name: "Water", amount: 50 }, // 50L Water per batch
     ],
     'SUBSTRATE_MIXING': [
         { id: "MAT-406637503", name: "Bran", amount: 0.5 },
@@ -134,11 +134,13 @@ export const FarmingRegistry: React.FC<FarmingRegistryProps> = ({
                 costForAmount = amount * unitCost;
             }
 
+            // Execute deduction
             await updateDoc(resRef, {
                 quantity: increment(-amount),
                 updatedAt: new Date().toISOString()
             });
 
+            // Log stock history
             await addDoc(collection(db, resCol, materialId, "stock_history"), {
                 type: 'OUT', 
                 quantity: amount,
@@ -147,6 +149,7 @@ export const FarmingRegistry: React.FC<FarmingRegistryProps> = ({
                 timestamp: new Date().toISOString()
             });
 
+            // Log batch cost
             if (batchId) {
                 const batchCostRef = collection(db, collectionName, batchId, "batch_costs");
                 await addDoc(batchCostRef, {
@@ -275,25 +278,18 @@ export const FarmingRegistry: React.FC<FarmingRegistryProps> = ({
     // Derived: Filtered Batches for specific Activity Type Dropdown
     const eligibleBatchesForActivity = useMemo(() => {
         return batchList.filter(b => {
-            // Filter out fully completed/archived batches
             if (b.batchStatus === 'COMPLETED') return false;
-            
             const steps = b.stepsCompleted || [];
             
-            // Logic: Only show batches that need this specific step
             if (activityType === 'SUBSTRATE_MIXING') {
-                // Must have done Prep, but NOT Mixing yet
                 return steps.includes('SUBSTRATE_PREP') && !steps.includes('SUBSTRATE_MIXING');
             }
             if (activityType === 'SPAWNING') {
-                // Must have done Mixing, but NOT Spawning yet
                 return steps.includes('SUBSTRATE_MIXING') && !steps.includes('SPAWNING');
             }
-            // For Maintenance activities, usually need Spawning done
             if (['HUMIDITY_CONTROL', 'FLUSH_REHYDRATION', 'OTHER'].includes(activityType)) {
                 return steps.includes('SPAWNING');
             }
-            
             return true;
         });
     }, [batchList, activityType]);
@@ -356,6 +352,8 @@ export const FarmingRegistry: React.FC<FarmingRegistryProps> = ({
                     timestamp: new Date().toISOString()
                 });
                 
+                // --- AUTOMATIC RESOURCE DEDUCTION LOGIC ---
+                // Defined in ACTIVITY_RECIPES at top: Straw 20, Water 50
                 const recipe = ACTIVITY_RECIPES[activityType] || [];
                 for (const item of recipe) {
                     const totalDeduct = item.amount;
@@ -363,12 +361,12 @@ export const FarmingRegistry: React.FC<FarmingRegistryProps> = ({
                       await performAutoDeduction(item.id, totalDeduct, "Substrate Prep", finalBatchId);
                     }
                 }
+                // -------------------------------------------
                 
-                // Trigger global prompt instead of local state
                 if (triggerEnvPrompt) {
                     triggerEnvPrompt({ batchId: finalBatchId, room: activityRoomId });
                 }
-                onSuccess(`Batch created. Material deducted.`);
+                onSuccess(`Batch created. Materials automatically deducted (Straw -20kg, Water -50L).`);
 
             } else {
                 if (!finalBatchId) {
@@ -454,8 +452,25 @@ export const FarmingRegistry: React.FC<FarmingRegistryProps> = ({
             await setDoc(harvestDocRef, { batchId: harvestBatch, strain: harvestStrain, totalYield: increment(weight), lastRecordedBy: userEmail, timestamp, villageId }, { merge: true });
             
             if (harvestBatch) {
-                await updateDoc(doc(db, collectionName, harvestBatch), { totalYield: increment(weight) });
+                const batchRef = doc(db, collectionName, harvestBatch);
+                await updateDoc(batchRef, { totalYield: increment(weight) });
                 await addDoc(collection(db, collectionName, harvestBatch, "activity_logs"), { type: 'HARVEST', details: `Harvested ${weight}kg of ${harvestStrain}`, userEmail, timestamp, villageId, batchId: harvestBatch, totalYield: weight });
+            
+                // --- AUTO COMPLETION CHECK ---
+                const batchSnap = await getDoc(batchRef);
+                if (batchSnap.exists()) {
+                    const bData = batchSnap.data();
+                    const totalYield = bData.totalYield || 0;
+                    const totalWastage = bData.totalWastage || 0;
+                    const predicted = bData.predictedYield || 0;
+                    
+                    if (predicted > 0 && (totalYield + totalWastage) >= predicted) {
+                        await updateDoc(batchRef, { batchStatus: 'COMPLETED' });
+                        onSuccess(`Harvest recorded. Batch ${harvestBatch} marked COMPLETED (Target Yield Met).`);
+                    } else {
+                        onSuccess(`Harvest recorded. Batch remains active.`);
+                    }
+                }
             }
   
             const pricePerKg = MUSHROOM_PRICES[harvestStrain] || 10;
@@ -479,31 +494,20 @@ export const FarmingRegistry: React.FC<FarmingRegistryProps> = ({
             };
             await setDoc(doc(db, finColName, transactionId), saleRecord);
   
-            const packagingDueTime = new Date(new Date().getTime() + 2 * 3600000).toISOString();
-            
-            const processingIntake: Omit<ProcessingLog, 'id'> = {
-                batchId: harvestBatch, 
-                harvestId: harvestBatch,
+            // --- NEW: Pending Shipment to Village C (Instead of auto-intake) ---
+            await addDoc(collection(db, "pending_shipments"), {
+                batchId: harvestBatch,
                 sourceVillage: villageId,
-                mushroomType: harvestStrain,
-                statedWeight: weight,
-                actualWeight: weight, 
-                variance: 0,
-                receivedBy: 'Village Hub Automation',
-                intakeTimestamp: timestamp,
-                packagingDueTime,
-                status: 'IN_PROGRESS',
-                currentStep: 2, 
-                villageId: VillageType.C,
+                strain: harvestStrain,
+                weight: weight,
                 timestamp: timestamp,
-                hasImageEvidence: false
-            };
-            
-            await addDoc(collection(db, "processing_logs"), processingIntake);
+                status: 'PENDING'
+            });
+            // -------------------------------------------------------------------
   
             setHarvestBatch('');
             setHarvestWeight('');
-            onSuccess(`Harvest recorded. RM${totalSaleAmount.toFixed(2)} sale generated & synced to Village C Hub.`);
+            // onSuccess handled above based on completion status
             onRefresh();
         } catch (error: any) {
             console.error("Error logging harvest", error);

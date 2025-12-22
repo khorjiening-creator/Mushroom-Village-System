@@ -103,7 +103,8 @@ function App() {
               jobTitle: 'Unassigned',
               role: 'admin', // Try Admin first
               villageId: selectedVillage,
-              createdAt: timestamp
+              createdAt: timestamp,
+              staffId: 'TEMP-' + Math.floor(Math.random() * 1000)
           };
 
           try {
@@ -193,6 +194,7 @@ function App() {
         userName={userProfile.name}
         userRole={userProfile.role}
         isAdmin={isAdmin}
+        staffId={userProfile.staffId || 'N/A'}
       />
     );
   }

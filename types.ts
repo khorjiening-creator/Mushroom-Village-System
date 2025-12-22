@@ -10,7 +10,7 @@ export enum VillageRole {
   PROCESSING = 'PROCESSING'
 }
 
-export type UserRole = 'admin' | 'user' | 'finance';
+export type UserRole = 'admin' | 'user' | 'finance' | 'sales';
 
 export interface VillageConfig {
   id: VillageType;
@@ -33,6 +33,7 @@ export interface UserProfile {
   email: string;
   jobTitle: string;
   role: UserRole;
+  staffId?: string; // Added staffId field
   password?: string;
   villageId: VillageType;
   createdAt: string;
@@ -253,4 +254,51 @@ export interface PackagingLogData {
 // Added missing DeliveryLogData alias for reporting
 export interface DeliveryLogData extends DeliveryRecord {
   timestamp: string;
+}
+
+// Product interface for Sales
+export interface Product {
+    id: string;
+    name: string;
+    category: string;
+    grade?: string;
+    unitPrice: number;
+    stock: number;
+    unit: string;
+    villageId?: VillageType;
+    lastLandedCost?: number;
+}
+
+export interface Customer {
+    id: string;
+    name: string;
+    email: string;
+    phone: string;
+    type: 'WHOLESALE' | 'RETAIL' | 'LOCAL';
+    loyaltyPoints: number;
+    totalSpent: number;
+    lastPurchaseDate?: string;
+}
+
+export interface CartItem {
+    productId: string;
+    name: string;
+    quantity: number;
+    unitPrice: number;
+    landedCost?: number;
+}
+
+export interface Sale {
+    id: string;
+    customerId: string;
+    customerName: string;
+    items: CartItem[];
+    totalAmount: number;
+    totalLandedCost?: number;
+    paymentMethod: string;
+    status: 'COMPLETED' | 'PENDING' | 'CANCELLED';
+    channel: 'LOCAL_MARKET' | 'WHOLESALER' | 'ONLINE';
+    recordedBy: string;
+    timestamp: string;
+    villageId: VillageType;
 }

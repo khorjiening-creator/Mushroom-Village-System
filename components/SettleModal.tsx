@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useRef } from 'react';
 import { FinancialRecord } from '../types';
 
@@ -22,6 +21,7 @@ export const SettleModal: React.FC<SettleModalProps> = ({
 
   useEffect(() => {
     if (record) {
+      // Merged logic: Ensure amount defaults to 0 if undefined, and reset attachments
       setAmount((record.amount ?? 0).toString());
       setDate(new Date().toISOString().split('T')[0]);
       setMethod('Cash');
@@ -49,54 +49,51 @@ export const SettleModal: React.FC<SettleModalProps> = ({
   return (
     <div className="fixed inset-0 z-50 overflow-y-auto" aria-labelledby="modal-title" role="dialog" aria-modal="true">
         <div className="flex items-end justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:block sm:p-0">
-            <div className="fixed inset-0 bg-gray-500 bg-opacity-75 transition-opacity" aria-hidden="true" onClick={onClose}></div>
-            <span className="hidden sm:inline-block sm:align-middle sm:h-screen" aria-hidden="true">&#8203;</span>
-            <div className="inline-block align-bottom bg-white rounded-lg px-4 pt-5 pb-4 text-left overflow-hidden shadow-xl transform transition-all sm:my-8 sm:align-middle sm:max-w-md sm:w-full sm:p-6 animate-fade-in-up">
-                <div>
-                     <div className={`mx-auto flex items-center justify-center h-12 w-12 rounded-full mb-4 ${isIncome ? 'bg-green-100' : 'bg-orange-100'}`}>
-                        {isIncome ? (
-                            <svg className="h-6 w-6 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-                            </svg>
-                        ) : (
-                            <svg className="h-6 w-6 text-orange-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                            </svg>
-                        )}
-                     </div>
-                     <h3 className="text-lg leading-6 font-bold text-gray-900 text-center">
-                         {isIncome ? 'Confirm Receipt' : 'Settle Payment'}
-                     </h3>
-                     <p className="text-sm text-gray-500 text-center mt-1">
-                         Mark <span className="font-mono font-medium">{record.transactionId}</span> as {isIncome ? 'received' : 'paid'}.
-                     </p>
+            <div className="fixed inset-0 bg-gray-500 bg-opacity-75 transition-opacity" onClick={onClose}></div>
 
-                     <form onSubmit={handleSubmit} className="mt-5 space-y-4">
-                         <div>
-                             <label className="block text-sm font-medium text-gray-700 mb-1">
-                                 {isIncome ? 'Amount Received (RM)' : 'Payment Amount (RM)'}
-                             </label>
-                             <input 
-                                type="number" 
-                                step="0.01" 
-                                required 
-                                value={amount} 
-                                onChange={e => setAmount(e.target.value)} 
-                                className="w-full border border-gray-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500" 
-                             />
+            <div className="inline-block align-bottom bg-white rounded-2xl text-left overflow-hidden shadow-xl transform transition-all sm:my-8 sm:align-middle sm:max-w-lg sm:w-full">
+                <div className="bg-white px-6 py-6">
+                    <div className="flex justify-between items-center mb-6">
+                        <h3 className="text-xl font-black text-gray-900 uppercase tracking-tight">
+                            {isIncome ? 'Settle Receivable' : 'Settle Payable'}
+                        </h3>
+                        <button onClick={onClose} className="text-gray-400 hover:text-gray-500">
+                            <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                            </svg>
+                        </button>
+                    </div>
+
+                     <form onSubmit={handleSubmit} className="space-y-4">
+                         <div className="bg-gray-50 p-4 rounded-xl border border-gray-100 mb-4">
+                             <p className="text-xs font-bold text-gray-500 uppercase mb-1">Original Record</p>
+                             <p className="text-sm font-black text-gray-900">{record.description}</p>
+                             <p className="text-lg font-black text-indigo-600">RM{record.amount.toLocaleString()}</p>
                          </div>
-                         <div>
-                             <label className="block text-sm font-medium text-gray-700 mb-1">
-                                 {isIncome ? 'Date Received' : 'Payment Date'}
-                             </label>
-                             <input 
-                                type="date" 
-                                required 
-                                value={date} 
-                                onChange={e => setDate(e.target.value)} 
-                                className="w-full border border-gray-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500" 
-                             />
+
+                         <div className="grid grid-cols-2 gap-4">
+                             <div>
+                                 <label className="block text-sm font-medium text-gray-700 mb-1">Final Amount</label>
+                                 <input 
+                                    type="number" 
+                                    required 
+                                    value={amount} 
+                                    onChange={e => setAmount(e.target.value)} 
+                                    className="w-full border border-gray-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500" 
+                                 />
+                             </div>
+                             <div>
+                                 <label className="block text-sm font-medium text-gray-700 mb-1">Date Settled</label>
+                                 <input 
+                                    type="date" 
+                                    required 
+                                    value={date} 
+                                    onChange={e => setDate(e.target.value)} 
+                                    className="w-full border border-gray-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500" 
+                                 />
+                             </div>
                          </div>
+
                          <div>
                              <label className="block text-sm font-medium text-gray-700 mb-1">Payment Method</label>
                              <select 
@@ -105,38 +102,30 @@ export const SettleModal: React.FC<SettleModalProps> = ({
                                 className="w-full border border-gray-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
                              >
                                  <option value="Cash">Cash</option>
-                                 <option value="Bank Transfer">Bank Transfer</option>
-                                 <option value="Cheque">Cheque</option>
+                                 <option value="Online Banking">Online Banking</option>
                                  <option value="E-Wallet">E-Wallet</option>
+                                 <option value="Cheque">Cheque</option>
                              </select>
                          </div>
 
-                         <div className="pt-2">
-                            <label className="block text-sm font-medium text-gray-700 mb-1 flex items-center gap-2">
-                                <svg className="w-4 h-4 text-indigo-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
-                                </svg>
-                                {isIncome ? 'Proof of Receipt (optional)' : 'Proof of Payment (Invoice/Receipt)'}
-                            </label>
-                            <div className="flex items-center gap-2">
-                                <button 
-                                    type="button" 
-                                    onClick={() => fileInputRef.current?.click()}
-                                    className="px-3 py-1.5 bg-white border border-gray-300 rounded-lg text-xs font-bold text-gray-700 hover:bg-indigo-50 transition-all shadow-sm"
-                                >
-                                    {attachmentName ? 'Change File' : 'Upload File'}
-                                </button>
-                                <input 
-                                    type="file" 
-                                    ref={fileInputRef} 
-                                    className="hidden" 
-                                    onChange={handleFileChange}
-                                    accept=".pdf,.jpg,.jpeg,.png"
-                                />
-                                <span className="text-[10px] text-gray-500 truncate max-w-[150px]">
-                                    {attachmentName || 'No file selected'}
-                                </span>
-                            </div>
+                         {/* Integrated Attachment Section */}
+                         <div>
+                             <label className="block text-sm font-medium text-gray-700 mb-1">Proof of Payment / Receipt</label>
+                             <div 
+                                onClick={() => fileInputRef.current?.click()}
+                                className="mt-1 flex justify-center px-6 pt-5 pb-6 border-2 border-gray-300 border-dashed rounded-lg cursor-pointer hover:border-indigo-400 transition-colors"
+                             >
+                                 <div className="space-y-1 text-center">
+                                     <svg className="mx-auto h-10 w-10 text-gray-400" stroke="currentColor" fill="none" viewBox="0 0 48 48">
+                                         <path d="M28 8H12a4 4 0 00-4 4v20m32-12v8m0 0v8a4 4 0 01-4 4H12a4 4 0 01-4-4v-4m32-4l-3.172-3.172a4 4 0 00-5.656 0L28 28M8 32l9.172-9.172a4 4 0 015.656 0L28 28m0 0l4 4m4-24h8m-4-4v8m-12 4h.02" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                                     </svg>
+                                     <div className="text-sm text-gray-600">
+                                         <span className="text-indigo-600 font-bold">Upload a file</span>
+                                     </div>
+                                     <p className="text-xs text-gray-500">{attachmentName || 'PNG, JPG up to 10MB'}</p>
+                                 </div>
+                                 <input ref={fileInputRef} type="file" className="hidden" onChange={handleFileChange} accept="image/*,.pdf" />
+                             </div>
                          </div>
 
                          <div>
@@ -146,7 +135,7 @@ export const SettleModal: React.FC<SettleModalProps> = ({
                                 onChange={e => setNotes(e.target.value)} 
                                 rows={2} 
                                 className="w-full border border-gray-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500" 
-                                placeholder="Reference ID, details, etc."
+                                placeholder="Reference ID, customer details, etc."
                              />
                          </div>
 
