@@ -1,8 +1,8 @@
 
 import React, { useState, useEffect, useMemo } from 'react';
-import { collection, query, orderBy, limit, onSnapshot, addDoc, getDocs, where } from 'firebase/firestore';
+import { collection, query, orderBy, limit, onSnapshot, addDoc, getDocs, where, doc, updateDoc, getDoc } from 'firebase/firestore';
 import { db } from '../../services/firebase';
-import { VillageType, ActivityLog } from '../../types';
+import { ActivityLog, VillageType } from '../../types';
 import { MUSHROOM_ROOM_MAPPING } from '../../constants';
 
 interface EnvironmentTabProps {
@@ -40,6 +40,8 @@ const SPECIES_CYCLES: Record<string, number> = {
     'Unknown': 30
 };
 
+const EQUIPMENT_TYPES = ['Exhaust Fan', 'Humidifier', 'Air Cooler', 'Heater'] as const;
+
 export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userEmail, theme, onSuccess, onError, setActiveTab }) => {
     const [logs, setLogs] = useState<ExtendedEnvLog[]>([]);
     const [loading, setLoading] = useState(true);
@@ -59,14 +61,29 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userE
     const [inputMoist, setInputMoist] = useState('');
     const [isSubmitting, setIsSubmitting] = useState(false);
 
-    // Automation Status State
-    const [fanActive, setFanActive] = useState(false);
-    const [coolingActive, setCoolingActive] = useState(false);
-    const [humidifierActive, setHumidifierActive] = useState(false);
-
-    // Notifications State
+    // Notifications & Equipment State
     const [notifications, setNotifications] = useState<{type: 'HARVEST'|'RISK'|'WEATHER'|'SYSTEM', msg: string, action?: string, urgency?: 'Normal'|'High'|'Critical'}[]>([]);
-    const [systemActions, setSystemActions] = useState<string[]>([]);
+    const [equipmentState, setEquipmentState] = useState<Record<string, boolean>>({});
+
+    // Fetch Equipment Status for Active Room
+    useEffect(() => {
+        if (villageId === VillageType.C) return;
+        const resColName = villageId === VillageType.A ? 'resourcesA' : 'resourcesB';
+        const q = query(collection(db, resColName), where("category", "==", "Equipment"));
+        
+        const unsub = onSnapshot(q, (snap) => {
+            const status: Record<string, boolean> = {};
+            snap.forEach(doc => {
+                const data = doc.data();
+                const locs = data.location ? data.location.split(',').map((s: string) => s.trim()) : [];
+                if (locs.includes(activeRoom)) {
+                    status[data.name] = true;
+                }
+            });
+            setEquipmentState(status);
+        });
+        return () => unsub();
+    }, [villageId, activeRoom]);
 
     // Fetch Env Logs
     useEffect(() => {
@@ -87,7 +104,6 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userE
             if (villageId === VillageType.C) return;
             const farmingCol = villageId === VillageType.A ? 'dailyfarming_logA' : 'dailyfarming_logB';
             try {
-                // Fetch all recent batches. 
                 const q = query(collection(db, farmingCol), orderBy('timestamp', 'desc'), limit(50));
                 const snap = await getDocs(q);
                 const batches: ActivityLog[] = [];
@@ -95,21 +111,26 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userE
 
                 snap.forEach(doc => {
                     const data = doc.data() as ActivityLog;
-                    // Filter specifically for batch creation records that are active
                     if (data.type === 'SUBSTRATE_PREP' && data.batchStatus !== 'COMPLETED') {
-                        batches.push({ id: doc.id, ...data });
-                        if (data.roomId) roomSet.add(data.roomId);
+                        const predicted = data.predictedYield || 0;
+                        const actual = data.totalYield || 0;
+                        const wastage = data.totalWastage || 0;
+                        const totalOutput = actual + wastage;
+
+                        // Logic: Remove batch if Output >= Predicted
+                        // Show batch if Output < Predicted
+                        if (predicted > 0 && totalOutput < predicted) {
+                            batches.push({ id: doc.id, ...data });
+                            if (data.roomId) roomSet.add(data.roomId);
+                        }
                     }
                 });
                 
                 setActiveBatches(batches);
                 const rooms = Array.from(roomSet).sort();
-                
-                // If rooms are empty, default to config based on filter
                 if (rooms.length > 0) {
                     setActiveRooms(rooms);
                 } else {
-                    // Fallback to configured rooms if no active batches
                     const allRooms = Object.values(MUSHROOM_ROOM_MAPPING).flat().sort();
                     setActiveRooms(allRooms);
                 }
@@ -133,8 +154,71 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userE
                 villageId
             });
             if (onSuccess) onSuccess(`Sensor reading logged for ${activeRoom}.`);
-            // Inputs are kept populated with defaults for next quick entry
+            const qNotif = query(collection(db, "system_notifications"), where("villageId", "==", villageId), where("read", "==", false));
+            const notifSnap = await getDocs(qNotif);
+            notifSnap.forEach(async (d) => {
+                if (d.data().message.includes(activeRoom)) {
+                    await updateDoc(doc(db, "system_notifications", d.id), { read: true });
+                }
+            });
         } catch (err) { console.error(err); if (onError) onError("Failed to save reading."); } finally { setIsSubmitting(false); }
+    };
+
+    const handleContinueMonitoring = async (docId: string, batchId: string) => {
+        try {
+            const farmingCol = villageId === VillageType.A ? 'dailyfarming_logA' : 'dailyfarming_logB';
+            await updateDoc(doc(db, farmingCol, docId), {
+                batchStatus: 'PENDING'
+            });
+            
+            // Update local state immediately for UI response
+            setActiveBatches(prev => prev.map(b => 
+                b.id === docId ? { ...b, batchStatus: 'PENDING' } : b
+            ));
+
+            if (onSuccess) onSuccess(`Monitoring continued for Batch ${batchId}. Status updated to Pending.`);
+        } catch (e) {
+            console.error("Error continuing monitoring", e);
+            if (onError) onError("Failed to update status.");
+        }
+    };
+
+    const toggleEquipmentLocation = async (type: string, action: string) => {
+        try {
+            const resColName = villageId === VillageType.A ? 'resourcesA' : 'resourcesB';
+            const q = query(collection(db, resColName), where("category", "==", "Equipment"));
+            const snap = await getDocs(q);
+            
+            let targetDoc = snap.docs.find(d => d.data().name === type);
+            
+            if (targetDoc) {
+                const data = targetDoc.data();
+                let currentLocations = data.location ? data.location.split(',').map((s: string) => s.trim()).filter(Boolean) : [];
+                
+                let actionTaken = "";
+                if (currentLocations.includes(activeRoom)) {
+                    currentLocations = currentLocations.filter((l: string) => l !== activeRoom);
+                    actionTaken = "Deactivated";
+                } else {
+                    currentLocations.push(activeRoom);
+                    actionTaken = "Activated";
+                }
+                
+                const newLocationStr = currentLocations.join(', ');
+                
+                await updateDoc(doc(db, resColName, targetDoc.id), {
+                    location: newLocationStr,
+                    operationStatus: currentLocations.length > 0 ? 'Active' : 'Idle',
+                    updatedAt: new Date().toISOString()
+                });
+                if (onSuccess) onSuccess(`${actionTaken} ${type} for ${activeRoom}.`);
+            } else {
+                if (onError) onError(`No ${type} found in Resources.`);
+            }
+        } catch (e) {
+            console.error("Equipment toggle failed", e);
+            if (onError) onError("Failed to update equipment status.");
+        }
     };
 
     // Filter Logic
@@ -144,23 +228,24 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userE
         return activeRooms.filter(r => allowedRooms.includes(r));
     }, [activeRooms, selectedTypeFilter]);
 
-    // Ensure activeRoom is valid within filter
     useEffect(() => {
         if (filteredRooms.length > 0 && !filteredRooms.includes(activeRoom)) {
             setActiveRoom(filteredRooms[0]);
         }
     }, [filteredRooms, activeRoom]);
 
-    // Derived Logic
+    const batchesInRoom = activeBatches.filter(b => b.roomId === activeRoom);
     const roomLogs = logs.filter(l => l.roomId === activeRoom);
-    const latest = roomLogs[0] || { temperature: 0, humidity: 0, moisture: 0, roomId: activeRoom, timestamp: new Date().toISOString() };
+    
+    // Logic: If NO active batches in the room, reset readings to 0
+    const latest = (batchesInRoom.length > 0 && roomLogs[0])
+        ? roomLogs[0]
+        : { temperature: 0, humidity: 0, moisture: 0, roomId: activeRoom, timestamp: new Date().toISOString() };
+        
     const previous = roomLogs[1] || { temperature: latest.temperature, humidity: latest.humidity, moisture: latest.moisture };
     
-    // Determine Assigned Strain for Active Room (Latest batch wins or Map lookup)
-    const batchesInRoom = activeBatches.filter(b => b.roomId === activeRoom);
     let assignedStrain = batchesInRoom.length > 0 ? batchesInRoom[0].mushroomStrain || 'Oyster' : 'Oyster';
     
-    // Fallback using mapping if no active batch
     if (batchesInRoom.length === 0) {
         for (const [strain, rooms] of Object.entries(MUSHROOM_ROOM_MAPPING)) {
             if (rooms.includes(activeRoom)) {
@@ -172,121 +257,84 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userE
 
     const rules = IDEAL_CONDITIONS[assignedStrain] || IDEAL_CONDITIONS['Oyster'];
 
-    // Auto-set default values for Log Sensor Reading based on Ideal Target
     useEffect(() => {
         if (rules) {
-            // Calculate averages/targets
             const targetTemp = (rules.minT + rules.maxT) / 2;
             const targetHumid = (rules.minH + rules.maxH) / 2;
             const targetMoist = (rules.minM + rules.maxM) / 2;
-            
             setInputTemp(targetTemp.toFixed(1));
             setInputHumid(targetHumid.toFixed(1));
             setInputMoist(targetMoist.toFixed(1));
         }
     }, [activeRoom, assignedStrain]);
 
-    // 1️⃣ Notification & Automation Logic Engine (Updated with Outside Impact Rules)
+    // Notification Logic (Alerts Only, No Automated Suggestion Buttons)
     useEffect(() => {
+        if (batchesInRoom.length === 0) {
+            setNotifications([]);
+            return;
+        }
+
         const newNotifs: typeof notifications = [];
-        const newActions: string[] = [];
-        
-        let fOn = false;
-        let cOn = false;
-        let hOn = false;
+        const buffer = 2; // Temp buffer
+        const humidBuffer = 5; // Humidity buffer
 
-        const isIndoorTempRising = latest.temperature > previous.temperature;
-
-        // --- Environmental Impact Rules (Outside -> Inside) ---
-
-        // Rule 1: High Outside Temp + Rising Indoor Temp
-        // Impact: Ventilation or Cooling Needed
-        if (outsideTemp > 32 && isIndoorTempRising) {
-            fOn = true;
-            cOn = true;
-            newNotifs.push({ 
-                type: 'WEATHER', 
-                msg: `Ext Heat Impact: Outside ${outsideTemp}°C & Indoor Rising.`, 
-                action: "Ventilation + Cooling ON",
-                urgency: 'High'
-            });
-            newActions.push("Activate Cooling System", "Maximize Ventilation");
+        // Rule 1: Outside Temp TOO HIGH -> Air Cooler
+        if (outsideTemp > (rules.maxT + buffer)) {
+            if (!equipmentState['Air Cooler']) {
+                newNotifs.push({ 
+                    type: 'WEATHER', 
+                    msg: `High Outside Temp (${outsideTemp}°C). Open Air Cooler?`, 
+                    action: "Use Air Cooler",
+                    urgency: 'High'
+                });
+            }
         } 
-        // Rule 2: Sharp Drop / Low Outside Temp
-        // Impact: Risk of indoor temp decline
-        else if (outsideTemp < 18) {
-            newNotifs.push({ 
-                type: 'WEATHER', 
-                msg: `Cold Front Alert: Outside ${outsideTemp}°C. Monitor Indoor Temp.`, 
-                action: "Reduce Ventilation + Heater Alert", 
-                urgency: 'Normal' 
-            });
-            newActions.push("Reduce Ventilation", "Check Heater");
+        
+        // Rule 2: Outside Temp TOO LOW -> Heater
+        if (outsideTemp < (rules.minT - buffer)) {
+            if (!equipmentState['Heater']) {
+                newNotifs.push({ 
+                    type: 'WEATHER', 
+                    msg: `Low Outside Temp (${outsideTemp}°C). Open Heater?`, 
+                    action: "Use Heater",
+                    urgency: 'High'
+                });
+            }
         }
 
-        // Rule 3: Heavy Rain or High Outside Humidity
-        // Impact: Risk of excessive indoor humidity -> Increase air exchange
-        if (outsideCondition === 'Rain' || outsideHumidity > 85) {
-            fOn = true;
-            newNotifs.push({ 
-                type: 'WEATHER', 
-                msg: `High Outdoor Moisture (Rain/${outsideHumidity}%). Indoor humidity risk.`, 
-                action: "Increase Air Exchange", 
-                urgency: 'Normal' 
-            });
-            newActions.push("Increase Air Exchange Rate");
+        // Rule 3: Outside Humidity TOO HIGH -> Exhaust Fan
+        if (outsideHumidity > (rules.maxH + humidBuffer)) {
+             if (!equipmentState['Exhaust Fan']) {
+                 newNotifs.push({
+                     type: 'WEATHER',
+                     msg: `High Humidity (${outsideHumidity}%). Open Fan?`,
+                     action: "Use Exhaust Fan",
+                     urgency: 'Normal'
+                 });
+             }
         }
 
-        // Rule 4: Dry Hot Weather
-        if (outsideTemp > 30 && outsideHumidity < 40) {
-             hOn = true;
-             newNotifs.push({
-                 type: 'WEATHER',
-                 msg: `Dry Heat Alert: Low Outside Humidity (${outsideHumidity}%).`,
-                 action: "Activate Humidifier",
-                 urgency: 'Normal'
-             });
-             newActions.push("Activate Humidifier");
+        // Rule 4: Outside Humidity TOO LOW -> Humidifier
+        if (outsideHumidity < (rules.minH - humidBuffer)) {
+             if (!equipmentState['Humidifier']) {
+                 newNotifs.push({
+                     type: 'WEATHER',
+                     msg: `Low Humidity (${outsideHumidity}%). Open Humidifier?`,
+                     action: "Use Humidifier",
+                     urgency: 'High'
+                 });
+             }
         }
 
-        // --- Standard Indoor Threshold Rules ---
-
-        // 🌡️ Temperature Control Flow
-        // IF outsideTemp > 32°C AND indoorTemp > idealMax
-        if (outsideTemp > 32 && latest.temperature > rules.maxT) {
-            fOn = true;
-            newNotifs.push({ type: 'RISK', msg: `Temp Critical: ${latest.temperature}°C > ${rules.maxT}°C (Outside ${outsideTemp}°C)`, action: "Fan + Alert", urgency: 'High' });
-            if (!newActions.includes("Turn on exhaust fan")) newActions.push("Turn on exhaust fan", "Increase monitoring frequency");
-        } else if (latest.temperature > rules.maxT) {
-            fOn = true;
-            newNotifs.push({ type: 'RISK', msg: `Temp High: ${latest.temperature}°C > ${rules.maxT}°C`, action: "Fan ON", urgency: 'Normal' });
-            if (!newActions.includes("Turn on exhaust fan")) newActions.push("Turn on exhaust fan");
-        } else if (latest.temperature < rules.minT) {
-            newNotifs.push({ type: 'RISK', msg: `Temp Low: ${latest.temperature}°C < ${rules.minT}°C`, action: "Heater Alert", urgency: 'Normal' });
-        }
-
-        // 💧 Humidity Control Flow
-        // IF indoorHumidity < idealMin
-        if (latest.humidity < rules.minH) {
-            hOn = true;
-            newNotifs.push({ 
-                type: 'RISK', 
-                msg: `Humidity Low: ${latest.humidity}% < ${rules.minH}%`, 
-                action: "Humidifier ON",
-                urgency: 'Normal'
-            });
-            if (!newActions.includes("Activate humidifier")) newActions.push("Activate humidifier", "Log water usage");
-        }
-
-        // 4️⃣ Harvest Notification Logic (AI + Rule Engine)
+        // Harvest Notification Logic
         batchesInRoom.forEach(batch => {
             const cycleDays = SPECIES_CYCLES[batch.mushroomStrain || 'Oyster'] || 30;
             const daysElapsed = (new Date().getTime() - new Date(batch.timestamp).getTime()) / (1000 * 60 * 60 * 24);
-            const progress = daysElapsed / cycleDays; // growthStage >= 90%
+            const progress = daysElapsed / cycleDays; 
             
             if (progress >= 0.9) {
                 const daysRemaining = Math.max(0, Math.ceil(cycleDays - daysElapsed));
-                
                 if (daysRemaining <= 3) {
                     let urgency: 'Normal' | 'High' | 'Critical' = 'Normal';
                     let msg = `Batch ${batch.batchId} (${batch.mushroomStrain}) ready in ${daysRemaining} days.`;
@@ -309,30 +357,31 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userE
             }
         });
 
-        setFanActive(fOn);
-        setCoolingActive(cOn);
-        setHumidifierActive(hOn);
         setNotifications(newNotifs);
-        setSystemActions(newActions);
-    }, [latest, previous, outsideTemp, outsideHumidity, outsideCondition, activeRoom, batchesInRoom, rules]);
-
-    // 6️⃣ AI Prediction Logic (Simulated)
-    const getTrend = (curr: number, prev: number) => {
-        if (Math.abs(curr - prev) < 0.5) return 'Stable ↔';
-        return curr > prev ? 'Increasing ↑' : 'Decreasing ↓';
-    };
+    }, [outsideTemp, outsideHumidity, outsideCondition, activeRoom, batchesInRoom, rules, equipmentState]);
 
     const aiAnalysis = useMemo(() => {
         let riskScore = 0;
+        
+        // If room is inactive (no batches), return safe values
+        if (batchesInRoom.length === 0) {
+            return {
+                tempTrend: 'Inactive',
+                humidTrend: 'Inactive',
+                moistTrend: 'Inactive',
+                harvestDays: 0,
+                confidence: 100,
+                risk: 'None'
+            };
+        }
+
         if (latest.temperature > rules.maxT || latest.temperature < rules.minT) riskScore += 20;
         if (latest.humidity < rules.minH) riskScore += 15;
-        // Impact of outside conditions on risk
         if (outsideTemp > 35) riskScore += 10;
         if (outsideHumidity > 90) riskScore += 5;
         
         const confidence = Math.max(50, 98 - riskScore);
         const cycle = SPECIES_CYCLES[assignedStrain] || 30;
-        // Estimate based on the oldest active batch
         const oldestBatch = batchesInRoom[batchesInRoom.length - 1]; 
         let daysToHarvest = cycle;
         
@@ -344,9 +393,9 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userE
         const adjustedDays = riskScore > 20 ? daysToHarvest + 2 : daysToHarvest;
 
         return {
-            tempTrend: getTrend(latest.temperature, previous.temperature),
-            humidTrend: getTrend(latest.humidity, previous.humidity),
-            moistTrend: getTrend(latest.moisture, previous.moisture),
+            tempTrend: Math.abs(latest.temperature - previous.temperature) < 0.5 ? 'Stable ↔' : latest.temperature > previous.temperature ? 'Increasing ↑' : 'Decreasing ↓',
+            humidTrend: Math.abs(latest.humidity - previous.humidity) < 0.5 ? 'Stable ↔' : latest.humidity > previous.humidity ? 'Increasing ↑' : 'Decreasing ↓',
+            moistTrend: Math.abs(latest.moisture - previous.moisture) < 0.5 ? 'Stable ↔' : latest.moisture > previous.moisture ? 'Increasing ↑' : 'Decreasing ↓',
             harvestDays: adjustedDays,
             confidence,
             risk: riskScore > 30 ? 'High' : riskScore > 10 ? 'Medium' : 'Low'
@@ -354,6 +403,7 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userE
     }, [latest, previous, rules, assignedStrain, batchesInRoom, outsideTemp, outsideHumidity]);
 
     const getStatus = (val: number, min: number, max: number) => {
+        if (batchesInRoom.length === 0) return 'green'; // Idle state is safe
         if (val >= min && val <= max) return 'green';
         if (val < min * 0.9 || val > max * 1.1) return 'red';
         return 'yellow';
@@ -366,19 +416,51 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userE
     ];
 
     const harvestNotifications = notifications.filter(n => n.type === 'HARVEST');
+    const urgentWeatherNotifications = notifications.filter(n => n.type === 'WEATHER' && n.urgency === 'High');
+
+    // Missing Logs Check
+    const showMissingLogsBanner = batchesInRoom.length > 0 && (roomLogs.length === 0 || (new Date().getTime() - new Date(latest.timestamp).getTime()) > 24 * 60 * 60 * 1000);
 
     if (loading) return <div className="p-10 text-center animate-pulse">Loading environmental data...</div>;
 
     return (
         <div className="space-y-8 animate-fade-in-up">
             
+            {/* Missing Data Reminder Banner */}
+            {showMissingLogsBanner && (
+                <div className="bg-yellow-50 border-l-8 border-yellow-400 p-4 rounded-r-xl shadow-md animate-fade-in-down mb-2">
+                    <div className="flex items-center gap-3">
+                        <svg className="h-6 w-6 text-yellow-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" /></svg>
+                        <div>
+                            <h3 className="font-bold text-yellow-800 uppercase text-sm tracking-widest">Environment Check Pending</h3>
+                            <p className="text-xs text-yellow-700 font-medium">Room {activeRoom} has active batches but no recent sensor data. Please log readings below.</p>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Urgent Weather Action Banner */}
+            {urgentWeatherNotifications.length > 0 && (
+                <div className="bg-red-500 border-l-8 border-red-800 text-white p-4 rounded-r-xl shadow-lg animate-pulse mb-2">
+                    <div className="flex items-center gap-3">
+                        <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" /></svg>
+                        <div>
+                            <h3 className="font-bold uppercase text-sm tracking-widest">Environmental Risk Detected</h3>
+                            {urgentWeatherNotifications.map((n, i) => (
+                                <p key={i} className="text-xs font-medium">{n.msg}</p>
+                            ))}
+                        </div>
+                    </div>
+                </div>
+            )}
+
             {/* Harvest Alert Banner */}
             {harvestNotifications.length > 0 && (
                 <div className="bg-gradient-to-r from-orange-50 to-orange-100 border-l-4 border-orange-500 p-4 rounded-r-xl shadow-sm animate-fade-in-down">
                     <div className="flex items-start">
                         <div className="flex-shrink-0">
                             <svg className="h-5 w-5 text-orange-600 animate-pulse" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
                             </svg>
                         </div>
                         <div className="ml-3 w-full">
@@ -411,8 +493,14 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userE
                     <div>
                         <h2 className="text-lg font-bold text-gray-900">Room Monitor</h2>
                         <div className="flex items-center gap-2">
-                            <span className="text-xs text-gray-500">Active Crop:</span>
-                            <span className="text-xs font-black bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded border border-indigo-100 uppercase">{assignedStrain}</span>
+                            {batchesInRoom.length > 0 ? (
+                                <>
+                                    <span className="text-xs text-gray-500">Active Crop:</span>
+                                    <span className="text-xs font-black bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded border border-indigo-100 uppercase">{assignedStrain}</span>
+                                </>
+                            ) : (
+                                <span className="text-xs font-black bg-gray-100 text-gray-500 px-2 py-0.5 rounded border border-gray-200 uppercase">Idle / No Batch</span>
+                            )}
                         </div>
                     </div>
                 </div>
@@ -499,17 +587,6 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userE
                         </div>
                         
                         <div className="flex flex-col items-center justify-center py-2 space-y-3">
-                            {(outsideTemp > 30 || outsideHumidity > 85) && setActiveTab && (
-                                <button
-                                    onClick={() => setActiveTab('resources')}
-                                    className="w-full bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-4 rounded-xl flex items-center justify-center gap-2 transition-colors text-xs uppercase tracking-wide animate-pulse"
-                                >
-                                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-                                    </svg>
-                                    High Risk: Adjust Equipment
-                                </button>
-                            )}
                             <a 
                                 href="https://www.accuweather.com/en/my/malaysia-weather" 
                                 target="_blank" 
@@ -540,7 +617,7 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userE
                             ) : (
                                 <div className="divide-y divide-gray-100">
                                     {notifications.map((note, idx) => (
-                                        <div key={idx} className={`p-4 ${note.urgency === 'Critical' ? 'bg-red-100' : note.type === 'HARVEST' ? 'bg-green-50' : note.type === 'WEATHER' ? 'bg-blue-50' : 'bg-orange-50'}`}>
+                                        <div key={idx} className={`p-4 ${note.urgency === 'Critical' ? 'bg-red-100' : note.type === 'HARVEST' ? 'bg-green-50' : note.type === 'WEATHER' ? 'bg-blue-50' : note.type === 'SYSTEM' ? 'bg-purple-50' : 'bg-orange-50'}`}>
                                             <div className="flex justify-between items-start mb-1">
                                                 <span className={`text-[10px] font-black px-2 py-0.5 rounded uppercase ${
                                                     note.urgency === 'Critical' ? 'bg-red-600 text-white' : 
@@ -557,19 +634,6 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userE
                                                     Action: {note.action}
                                                 </div>
                                             )}
-                                            
-                                            {/* Action Button for Non-Harvest Risks */}
-                                            {note.type !== 'HARVEST' && setActiveTab && (
-                                                <button 
-                                                    onClick={() => setActiveTab('resources')}
-                                                    className="mt-2 w-full py-1 bg-white border border-gray-300 rounded text-[10px] font-bold uppercase text-gray-600 hover:bg-gray-50 flex items-center justify-center gap-1 transition-colors"
-                                                >
-                                                    <svg className="w-3 h-3 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4" />
-                                                    </svg>
-                                                    Verify Equipment Status
-                                                </button>
-                                            )}
                                         </div>
                                     ))}
                                 </div>
@@ -577,22 +641,38 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userE
                         </div>
                     </div>
 
-                    {/* Automation Panel */}
+                    {/* Automation Panel - Modified to be Manual Controls */}
                     <div className="bg-slate-800 rounded-xl shadow-lg p-5 text-white">
                         <h3 className="text-xs font-bold text-slate-400 uppercase mb-3 tracking-widest flex items-center gap-2">
-                            <svg className="w-4 h-4 animate-spin-slow" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
-                            Auto-System Actions
+                            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4" /></svg>
+                            Facility Controls
                         </h3>
-                        <ul className="space-y-2">
-                            {systemActions.length > 0 ? systemActions.map((action, i) => (
-                                <li key={i} className="text-[10px] font-mono text-green-400 bg-slate-700/50 px-2 py-1.5 rounded border border-slate-600 flex items-center gap-2">
-                                    <span className="w-1.5 h-1.5 rounded-full bg-green-500"></span>
-                                    {action}
-                                </li>
-                            )) : (
-                                <li className="text-[10px] text-slate-500 italic">No automated actions currently triggered.</li>
-                            )}
-                        </ul>
+                        
+                        <div className="space-y-4">
+                            {/* Manual Controls for ALL Equipment */}
+                            <div>
+                                <p className="text-[10px] text-slate-500 mb-2 font-bold uppercase">Equipment Control Panel</p>
+                                <ul className="space-y-2">
+                                    {EQUIPMENT_TYPES.map(name => {
+                                        const isActive = equipmentState[name];
+                                        return (
+                                            <li key={name} className={`flex items-center justify-between p-2 rounded border ${isActive ? 'bg-green-900/30 border-green-700/50' : 'bg-slate-700/30 border-slate-600/50'}`}>
+                                                <span className={`text-[10px] font-mono flex items-center gap-2 ${isActive ? 'text-green-100' : 'text-slate-400'}`}>
+                                                    <span className={`w-1.5 h-1.5 rounded-full ${isActive ? 'bg-green-500' : 'bg-slate-500'}`}></span>
+                                                    {name}
+                                                </span>
+                                                <button 
+                                                    onClick={() => toggleEquipmentLocation(name, isActive ? `Turn Off ${name}` : `Turn On ${name}`)} 
+                                                    className={`text-white text-[9px] font-bold px-3 py-1 rounded uppercase transition-colors ${isActive ? 'bg-red-600 hover:bg-red-700' : 'bg-green-600 hover:bg-green-700'}`}
+                                                >
+                                                    {isActive ? 'Turn Off' : 'Turn On'}
+                                                </button>
+                                            </li>
+                                        );
+                                    })}
+                                </ul>
+                            </div>
+                        </div>
                     </div>
 
                     {/* 6️⃣ AI Prediction Panel */}
@@ -637,6 +717,7 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userE
                                         <th className="px-6 py-3">Strain</th>
                                         <th className="px-6 py-3">Est. Harvest Date</th>
                                         <th className="px-6 py-3 text-center">Status</th>
+                                        <th className="px-6 py-3 text-center">Action</th>
                                     </tr>
                                 </thead>
                                 <tbody>
@@ -648,10 +729,25 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userE
                                         const diffTime = harvestDate.getTime() - today.getTime();
                                         const daysRemaining = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
                                         
+                                        const predicted = batch.predictedYield || 0;
+                                        const actual = batch.totalYield || 0;
+                                        const wastage = batch.totalWastage || 0;
+                                        const totalOutput = actual + wastage;
+                                        
+                                        const isPending = batch.batchStatus === 'PENDING';
+
+                                        // "Continue Monitoring" condition:
+                                        // 1. Time is ripe (daysRemaining <= 0)
+                                        // 2. Output is LESS than predicted (meaning not finished yet)
+                                        const showContinueMonitoring = daysRemaining <= 0 && totalOutput < predicted;
+
                                         let statusColor = "bg-green-100 text-green-700";
                                         let statusText = `${daysRemaining} Days Left`;
                                         
-                                        if (daysRemaining <= 0) {
+                                        if (isPending) {
+                                            statusColor = "bg-yellow-100 text-yellow-800 border border-yellow-200";
+                                            statusText = "PENDING";
+                                        } else if (daysRemaining <= 0) {
                                             statusColor = "bg-red-100 text-red-700 animate-pulse border border-red-200";
                                             statusText = "HARVEST NOW";
                                         } else if (daysRemaining <= 3) {
@@ -671,6 +767,17 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userE
                                                     <span className={`px-2 py-1 rounded text-[10px] font-black uppercase ${statusColor}`}>
                                                         {statusText}
                                                     </span>
+                                                </td>
+                                                <td className="px-6 py-3 text-center">
+                                                    {showContinueMonitoring && !isPending && (
+                                                        <button 
+                                                            onClick={() => batch.id && handleContinueMonitoring(batch.id, batch.batchId || '')}
+                                                            className="text-[9px] bg-blue-50 text-blue-600 px-2 py-1 rounded hover:bg-blue-100 border border-blue-200 font-bold uppercase whitespace-nowrap"
+                                                            title={`Yield deficit: ${(predicted - totalOutput).toFixed(1)}kg`}
+                                                        >
+                                                            Continue Monitoring
+                                                        </button>
+                                                    )}
                                                 </td>
                                             </tr>
                                         );

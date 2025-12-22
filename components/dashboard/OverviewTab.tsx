@@ -3,7 +3,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { collection, query, getDocs, orderBy, limit, where } from 'firebase/firestore';
 import { db } from '../../services/firebase';
 import { VillageType, VillageRole, FinancialRecord, ActivityLog, UserRole, ResourceItem } from '../../types';
-import { VILLAGES } from '../../constants';
+import { VILLAGES, MUSHROOM_ROOM_MAPPING } from '../../constants';
 
 interface OverviewTabProps {
   villageId: VillageType;
@@ -27,6 +27,14 @@ const SPECIES_CYCLES: Record<string, number> = {
     'Unknown': 30
 };
 
+// Simple ideal conditions reference for Overview alerts (matching EnvironmentTab)
+const IDEAL_CONDITIONS: Record<string, { minT: number, maxT: number, minH: number, maxH: number }> = {
+    'Oyster': { minT: 22, maxT: 30, minH: 80, maxH: 95 },
+    'Button': { minT: 16, maxT: 22, minH: 85, maxH: 90 },
+    'Shiitake': { minT: 18, maxT: 24, minH: 75, maxH: 85 },
+    "Lion's Mane": { minT: 18, maxT: 24, minH: 85, maxH: 95 },
+};
+
 export const OverviewTab: React.FC<OverviewTabProps> = ({ 
     villageId, userName, theme, financeOverviewData, userRole, isFinance, financialRecords, setActiveTab, openEditTransModal, chartFilter, setChartFilter
 }) => {
@@ -36,6 +44,11 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
     const [latestEnv, setLatestEnv] = useState<{temperature: number, humidity: number, moisture: number, timestamp: string} | null>(null);
     const [resources, setResources] = useState<ResourceItem[]>([]);
     const [isLoading, setIsLoading] = useState(true);
+
+    // Hardcoded simulation for Overview logic to match EnvironmentTab defaults, 
+    // in a real app this would come from a shared context or weather API.
+    const outsideTemp = 30; 
+    const outsideHumidity = 65; 
 
     useEffect(() => {
         if (!isFarming) return;
@@ -51,7 +64,14 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
                 batchSnap.forEach(doc => {
                     const data = doc.data() as ActivityLog;
                     if (data.type === 'SUBSTRATE_PREP' && data.batchStatus !== 'COMPLETED') {
-                        batches.push({ id: doc.id, ...data });
+                        // Filter out harvested batches: if total output >= predicted, consider it done/harvested
+                        const predicted = data.predictedYield || 0;
+                        const actual = data.totalYield || 0;
+                        const wastage = data.totalWastage || 0;
+                        
+                        if (predicted === 0 || (actual + wastage) < predicted) {
+                            batches.push({ id: doc.id, ...data });
+                        }
                     }
                 });
                 setActiveBatches(batches);
@@ -94,10 +114,9 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
             const start = new Date(b.timestamp).getTime();
             const cycle = SPECIES_CYCLES[b.mushroomStrain || 'Oyster'] || 30;
             const daysElapsed = (now - start) / (86400000);
-            // Assuming progress calculation logic from EnvironmentTab
             const progress = daysElapsed / cycle;
             
-            if (progress >= 0.85) { // Show slightly earlier in Overview to prepare
+            if (progress >= 0.85) { 
                 const daysRemaining = Math.ceil(cycle - daysElapsed);
                 if (daysRemaining <= 3) {
                     alerts.push({
@@ -110,6 +129,25 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
         });
         return alerts.sort((a,b) => a.days - b.days);
     }, [activeBatches]);
+
+    // --- Weather Action Logic (Based on active batch strain requirements) ---
+    const weatherAlerts = useMemo(() => {
+        const alerts: string[] = [];
+        // Default to Oyster rules if no batches, otherwise check aggregate need
+        // Simplification: Check rules for the most common strain active
+        if (activeBatches.length > 0) {
+            const strain = activeBatches[0].mushroomStrain || 'Oyster';
+            const rules = IDEAL_CONDITIONS[strain];
+            const buffer = 2;
+            const humidBuffer = 5;
+
+            if (outsideTemp > rules.maxT + buffer) alerts.push("Activate Air Cooler (High Outside Temp)");
+            if (outsideTemp < rules.minT - buffer) alerts.push("Activate Heater (Low Outside Temp)");
+            if (outsideHumidity > rules.maxH + humidBuffer) alerts.push("Activate Exhaust Fan (High Outside Humidity)");
+            if (outsideHumidity < rules.minH - humidBuffer) alerts.push("Activate Humidifier (Low Outside Humidity)");
+        }
+        return alerts;
+    }, [activeBatches, outsideTemp, outsideHumidity]);
 
     // --- Farming Stats ---
     const farmingStats = useMemo(() => {
@@ -241,13 +279,29 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
         return (
             <div className="space-y-6 animate-fade-in-up">
                 
+                {/* Weather Action Banner */}
+                {weatherAlerts.length > 0 && (
+                    <div className="bg-red-500 border-l-8 border-red-800 text-white p-4 rounded-r-xl shadow-lg animate-pulse">
+                        <div className="flex items-center gap-3">
+                            <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" /></svg>
+                            <div>
+                                <h3 className="font-bold uppercase text-sm tracking-widest">Environment Action Required</h3>
+                                {weatherAlerts.map((msg, i) => (
+                                    <p key={i} className="text-xs font-medium mt-1">{msg}</p>
+                                ))}
+                                <button onClick={() => setActiveTab('environment')} className="mt-2 text-[10px] bg-white text-red-600 font-bold uppercase px-3 py-1 rounded shadow-sm hover:bg-red-50">Go to Environment Tab</button>
+                            </div>
+                        </div>
+                    </div>
+                )}
+
                 {/* Harvest Alert Banner */}
                 {harvestAlerts.length > 0 && (
                     <div className="bg-gradient-to-r from-orange-50 to-orange-100 border-l-4 border-orange-500 p-4 rounded-r-xl shadow-sm animate-fade-in-down">
                         <div className="flex items-start">
                             <div className="flex-shrink-0">
                                 <svg className="h-5 w-5 text-orange-600 animate-pulse" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
                                 </svg>
                             </div>
                             <div className="ml-3 w-full">

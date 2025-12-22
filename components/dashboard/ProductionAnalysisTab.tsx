@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useMemo } from 'react';
 import { collection, query, orderBy, getDocs, where, limit } from 'firebase/firestore';
 import { db } from '../../services/firebase';
@@ -19,7 +20,6 @@ interface BatchAnalysis {
     actualYield: number;
     wastage: number;
     materialCost: number;
-    costPerKg: number;
     efficiency: number;
     envStats: {
         avgTemp: number;
@@ -31,6 +31,7 @@ interface BatchAnalysis {
         qty: number;
         unit: string;
         activity: string;
+        unitCost: number;
         cost: number;
     }[];
 }
@@ -90,6 +91,7 @@ export const ProductionAnalysisTab: React.FC<ProductionAnalysisTabProps> = ({ vi
                         qty: data.quantity || 0,
                         unit: data.unit || '',
                         activity: data.activity || 'Misc',
+                        unitCost: data.unitCostSnapshot || 0,
                         cost: costVal
                     });
                 });
@@ -107,7 +109,6 @@ export const ProductionAnalysisTab: React.FC<ProductionAnalysisTabProps> = ({ vi
                 const avgHumid = relevantEnv.length ? relevantEnv.reduce((a, b) => a + b.humidity, 0) / relevantEnv.length : 0;
 
                 const efficiency = predicted > 0 ? (actual / predicted) * 100 : 0;
-                const costPerKg = actual > 0 ? totalCost / actual : (predicted > 0 ? totalCost / predicted : 0);
 
                 return {
                     id: batch.id,
@@ -119,7 +120,6 @@ export const ProductionAnalysisTab: React.FC<ProductionAnalysisTabProps> = ({ vi
                     actualYield: actual,
                     wastage,
                     materialCost: totalCost,
-                    costPerKg,
                     efficiency,
                     envStats: {
                         avgTemp,
@@ -184,7 +184,6 @@ export const ProductionAnalysisTab: React.FC<ProductionAnalysisTabProps> = ({ vi
                                 <th className="px-6 py-3 text-left">Strain</th>
                                 <th className="px-6 py-3 text-right">Input Cost</th>
                                 <th className="px-6 py-3 text-right">Output (kg)</th>
-                                <th className="px-6 py-3 text-right">Cost/kg</th>
                                 <th className="px-6 py-3 text-center">Efficiency</th>
                                 <th className="px-6 py-3 text-center">Env Link</th>
                                 <th className="px-6 py-3 text-center">Action</th>
@@ -195,12 +194,13 @@ export const ProductionAnalysisTab: React.FC<ProductionAnalysisTabProps> = ({ vi
                                 <React.Fragment key={batch.id}>
                                     <tr className="hover:bg-gray-50 transition-colors">
                                         <td className="px-6 py-4 font-mono font-bold text-gray-800">{batch.batchId}</td>
-                                        <td className="px-6 py-4">{batch.strain}</td>
+                                        <td className="px-6 py-4">
+                                            <span className="bg-indigo-50 text-indigo-700 px-2 py-1 rounded-md text-xs font-bold uppercase">{batch.strain}</span>
+                                        </td>
                                         <td className="px-6 py-4 text-right">RM{batch.materialCost.toFixed(2)}</td>
                                         <td className="px-6 py-4 text-right font-bold">
                                             {batch.actualYield.toFixed(1)} <span className="text-gray-400 font-normal">/ {batch.predictedYield}</span>
                                         </td>
-                                        <td className="px-6 py-4 text-right font-mono text-xs text-gray-600">RM{batch.costPerKg.toFixed(2)}</td>
                                         <td className="px-6 py-4 text-center">
                                             <span className={`px-2 py-1 rounded-full text-[10px] font-black ${batch.efficiency >= 90 ? 'bg-green-100 text-green-700' : batch.efficiency >= 50 ? 'bg-blue-100 text-blue-700' : 'bg-red-100 text-red-700'}`}>
                                                 {batch.efficiency.toFixed(0)}%
@@ -228,32 +228,34 @@ export const ProductionAnalysisTab: React.FC<ProductionAnalysisTabProps> = ({ vi
                                             <td colSpan={8} className="px-6 py-4">
                                                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                                                     <div>
-                                                        <h4 className="text-[10px] font-bold text-gray-400 uppercase mb-2">Material Cost Breakdown</h4>
+                                                        <h4 className="text-[10px] font-bold text-gray-400 uppercase mb-2">Material Cost Breakdown (Detailed)</h4>
                                                         <table className="w-full text-xs bg-white rounded border border-gray-200">
                                                             <thead>
                                                                 <tr className="bg-gray-50 border-b">
                                                                     <th className="p-2 text-left">Activity</th>
                                                                     <th className="p-2 text-left">Material</th>
-                                                                    <th className="p-2 text-right">Qty Used</th>
-                                                                    <th className="p-2 text-right">Cost</th>
+                                                                    <th className="p-2 text-right">Qty</th>
+                                                                    <th className="p-2 text-right">Unit Price</th>
+                                                                    <th className="p-2 text-right">Total Cost</th>
                                                                 </tr>
                                                             </thead>
                                                             <tbody>
                                                                 {batch.breakdown.length === 0 ? (
-                                                                    <tr><td colSpan={4} className="p-4 text-center italic text-gray-400">No cost data logged.</td></tr>
+                                                                    <tr><td colSpan={5} className="p-4 text-center italic text-gray-400">No cost data logged for this batch.</td></tr>
                                                                 ) : (
                                                                     batch.breakdown.map((item, i) => (
-                                                                        <tr key={i} className="border-b last:border-0">
-                                                                            <td className="p-2 text-gray-500">{item.activity}</td>
-                                                                            <td className="p-2 font-medium">{item.material}</td>
-                                                                            <td className="p-2 text-right">{item.qty.toFixed(2)} {item.unit}</td>
-                                                                            <td className="p-2 text-right font-mono">RM{item.cost.toFixed(2)}</td>
+                                                                        <tr key={i} className="border-b last:border-0 hover:bg-gray-50">
+                                                                            <td className="p-2 font-bold text-gray-700">{item.activity}</td>
+                                                                            <td className="p-2 text-gray-600">{item.material}</td>
+                                                                            <td className="p-2 text-right">{item.qty} <span className="text-[9px] text-gray-400">{item.unit}</span></td>
+                                                                            <td className="p-2 text-right text-gray-500">RM{item.unitCost.toFixed(2)}</td>
+                                                                            <td className="p-2 text-right font-mono font-bold text-indigo-600">RM{item.cost.toFixed(2)}</td>
                                                                         </tr>
                                                                     ))
                                                                 )}
-                                                                <tr className="font-bold bg-gray-50">
-                                                                    <td className="p-2" colSpan={3}>Total</td>
-                                                                    <td className="p-2 text-right">RM{batch.materialCost.toFixed(2)}</td>
+                                                                <tr className="font-bold bg-gray-50 border-t-2 border-gray-200">
+                                                                    <td className="p-2" colSpan={4}>Input Cost (Total Material Deductions)</td>
+                                                                    <td className="p-2 text-right text-indigo-700">RM{batch.materialCost.toFixed(2)}</td>
                                                                 </tr>
                                                             </tbody>
                                                         </table>

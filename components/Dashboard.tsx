@@ -561,7 +561,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ villageId, userEmail, user
                 </div>
             )}
             
-            {activeTab === 'farming' && <FarmingTab villageId={villageId} userEmail={userEmail} theme={theme} farmingLogs={farmingLogs} onActivityLogged={fetchProductionData} onSuccess={(msg) => showNotification(msg, 'success')} onError={(msg) => showNotification(msg, 'error')} />}
+            {activeTab === 'farming' && <FarmingTab villageId={villageId} userEmail={userEmail} theme={theme} farmingLogs={farmingLogs} onActivityLogged={fetchProductionData} onSuccess={(msg) => showNotification(msg, 'success')} onError={(msg) => showNotification(msg, 'error')} setActiveTab={setActiveTab} />}
             {activeTab === 'environment' && <EnvironmentTab villageId={villageId} userEmail={userEmail} theme={theme} onSuccess={(msg) => showNotification(msg, 'success')} onError={(msg) => showNotification(msg, 'error')} setActiveTab={setActiveTab} />}
             {activeTab === 'analysis' && (userRole === 'admin' || userRole === 'finance') && <ProductionAnalysisTab villageId={villageId} userEmail={userEmail} />}
             {activeTab === 'resources' && (
