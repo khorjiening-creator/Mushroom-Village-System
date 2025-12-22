@@ -152,6 +152,10 @@ export const ProcessingFloor: React.FC<Props> = ({
         } catch (err) { console.error(err); } finally { setIsIntakeSubmitting(false); }
     };
 
+    const displayBatchId = selectedShipmentId 
+        ? pendingShipments.find(s => s.id === selectedShipmentId)?.batchId 
+        : `Auto-Generated (Manual)`;
+
     const handleQCSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
         if (!selectedBatch) return;
@@ -362,6 +366,11 @@ export const ProcessingFloor: React.FC<Props> = ({
                         )}
 
                         <form onSubmit={handleIntakeSubmit} className="bg-white p-6 rounded-xl border border-gray-100 shadow-sm space-y-4">
+                            <div className="bg-gray-50 p-3 rounded-lg border border-gray-200">
+                                <label className="block text-[10px] font-bold text-gray-400 uppercase mb-1">Batch Identification</label>
+                                <div className="text-sm font-black text-gray-900 font-mono tracking-tight">{displayBatchId}</div>
+                                {selectedShipmentId && <div className="text-[10px] text-blue-600 font-bold mt-1 uppercase">Linked to Shipment</div>}
+                            </div>
                             <div className="grid grid-cols-2 gap-4">
                                 <div><label className="block text-[10px] font-bold text-gray-400 uppercase">Date</label><input type="date" value={intakeDate} onChange={e=>setIntakeDate(e.target.value)} className="w-full p-2 border rounded" required /></div>
                                 <div><label className="block text-[10px] font-bold text-gray-400 uppercase">Time</label><input type="time" value={intakeTime} onChange={e=>setIntakeTime(e.target.value)} className="w-full p-2 border rounded" required /></div>
