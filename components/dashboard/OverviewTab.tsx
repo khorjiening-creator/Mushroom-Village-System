@@ -141,13 +141,41 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
             const buffer = 2;
             const humidBuffer = 5;
 
-            if (outsideTemp > rules.maxT + buffer) alerts.push("Activate Air Cooler (High Outside Temp)");
-            if (outsideTemp < rules.minT - buffer) alerts.push("Activate Heater (Low Outside Temp)");
-            if (outsideHumidity > rules.maxH + humidBuffer) alerts.push("Activate Exhaust Fan (High Outside Humidity)");
-            if (outsideHumidity < rules.minH - humidBuffer) alerts.push("Activate Humidifier (Low Outside Humidity)");
+            // Helper to check equipment status
+            const isEquipActive = (name: string) => {
+                const equip = resources.find(r => r.name === name);
+                if (!equip) return false;
+                const data = equip as any; 
+                return data.operationStatus === 'Active' || (data.location && data.location.length > 0);
+            };
+
+            // Rule 1: High Temp -> Air Cooler
+            if (outsideTemp > rules.maxT + buffer) {
+                if (!isEquipActive('Air Cooler')) {
+                    alerts.push("Activate Air Cooler (High Outside Temp)");
+                }
+            }
+            // Rule 2: Low Temp -> Heater
+            if (outsideTemp < rules.minT - buffer) {
+                if (!isEquipActive('Heater')) {
+                    alerts.push("Activate Heater (Low Outside Temp)");
+                }
+            }
+            // Rule 3: High Humidity -> Exhaust Fan
+            if (outsideHumidity > rules.maxH + humidBuffer) {
+                if (!isEquipActive('Exhaust Fan')) {
+                    alerts.push("Activate Exhaust Fan (High Outside Humidity)");
+                }
+            }
+            // Rule 4: Low Humidity -> Humidifier
+            if (outsideHumidity < rules.minH - humidBuffer) {
+                if (!isEquipActive('Humidifier')) {
+                    alerts.push("Activate Humidifier (Low Outside Humidity)");
+                }
+            }
         }
         return alerts;
-    }, [activeBatches, outsideTemp, outsideHumidity]);
+    }, [activeBatches, outsideTemp, outsideHumidity, resources]);
 
     // --- Farming Stats ---
     const farmingStats = useMemo(() => {

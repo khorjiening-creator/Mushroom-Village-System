@@ -196,6 +196,59 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({
         }
     }, [initialPurchaseState]);
 
+    // --- Auto-cleanup Equipment Locations ---
+    useEffect(() => {
+        if (villageId === VillageType.C) return;
+        
+        const cleanupEquipmentLocations = async () => {
+            try {
+                const farmingCol = villageId === VillageType.A ? 'dailyfarming_logA' : 'dailyfarming_logB';
+                const q = query(collection(db, farmingCol), orderBy('timestamp', 'desc'), limit(100));
+                const snap = await getDocs(q);
+                
+                const activeRoomSet = new Set<string>();
+                snap.forEach(doc => {
+                    const data = doc.data();
+                    if (data.type === 'SUBSTRATE_PREP' && data.batchStatus !== 'COMPLETED') {
+                        const predicted = data.predictedYield || 0;
+                        const actual = data.totalYield || 0;
+                        const wastage = data.totalWastage || 0;
+                        if (predicted > 0 && (actual + wastage) < predicted) {
+                            if (data.roomId) activeRoomSet.add(data.roomId);
+                        }
+                    }
+                });
+
+                const equipment = resources.filter(r => r.category === 'Equipment');
+                
+                equipment.forEach(async (eq) => {
+                    if (!eq.location) return;
+                    const currentLocs = eq.location.split(',').map(s => s.trim()).filter(Boolean);
+                    const validLocs = currentLocs.filter(loc => activeRoomSet.has(loc));
+                    
+                    if (validLocs.length !== currentLocs.length) {
+                        const newLocStr = validLocs.join(', ');
+                        const newStatus = validLocs.length > 0 ? 'Active' : 'Idle';
+                        const resColName = villageId === VillageType.A ? 'resourcesA' : 'resourcesB';
+                        
+                        await updateDoc(doc(db, resColName, eq.id), {
+                            location: newLocStr,
+                            operationStatus: newStatus,
+                            updatedAt: new Date().toISOString()
+                        });
+                        console.log(`Auto-removed inactive rooms from ${eq.name}`);
+                    }
+                });
+            } catch (err) {
+                console.error("Cleanup failed", err);
+            }
+        };
+
+        if (resources.length > 0) {
+            cleanupEquipmentLocations();
+        }
+    }, [villageId, resources]); 
+
     // --- Purchase Calculation Logic ---
     const selectedPurchaseResource = useMemo(() => 
         resources.find(r => r.id === purchaseItemId), 
@@ -1094,20 +1147,18 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({
                                                         {locations.length > 0 ? (
                                                             <div className="flex flex-wrap gap-1 max-w-[200px]">
                                                                 {locations.map((loc, i) => (
-                                                                    <span key={i} className="bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded border border-indigo-100">{loc}</span>
+                                                                    <span key={i} className="px-2 py-0.5 bg-blue-50 text-blue-600 rounded border border-blue-100 uppercase text-[9px]">{loc}</span>
                                                                 ))}
                                                             </div>
-                                                        ) : (
-                                                            <span className="text-gray-400 italic">Not assigned</span>
-                                                        )}
+                                                        ) : <span className="text-gray-400 italic">Storage</span>}
                                                     </td>
                                                     <td className="px-6 py-5 whitespace-nowrap text-center">
-                                                        <span className={`px-3 py-1 rounded-full text-[10px] font-black uppercase ${isUnavailable ? 'bg-red-50 text-red-600' : 'bg-green-100 text-green-700'}`}>
-                                                            {isUnavailable ? 'Unavailable' : `${availableCount} Available`}
+                                                        <span className={`px-2.5 py-1 rounded-full text-[10px] font-black uppercase ${isUnavailable ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-800'}`}>
+                                                            {isUnavailable ? 'In Use' : 'Available'}
                                                         </span>
                                                     </td>
-                                                    <td className="px-6 py-5 whitespace-nowrap text-sm font-black text-right text-gray-900">
-                                                        {totalQty} <span className="text-gray-400 font-bold text-[10px]">{item.unit}</span>
+                                                    <td className="px-6 py-5 whitespace-nowrap text-right text-sm font-black text-gray-900">
+                                                        {availableCount} <span className="text-gray-400 font-bold text-[10px]">/ {totalQty}</span>
                                                     </td>
                                                 </tr>
                                             );
@@ -1121,175 +1172,153 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({
             )}
 
             {/* Modals */}
-            {isTransModalOpen && selectedItem && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-                    <div className="bg-white rounded-lg p-6 w-full max-w-sm">
-                        <h3 className="text-lg font-bold mb-4">Adjust Stock: {selectedItem.name}</h3>
-                        <form onSubmit={handleTransaction}>
-                            <div className="flex gap-4 mb-4">
-                                <label className="flex items-center gap-2 cursor-pointer">
-                                    <input type="radio" name="transType" checked={transType==='IN'} onChange={()=>setTransType('IN')} />
-                                    <span>Add Stock (IN)</span>
-                                </label>
-                                <label className="flex items-center gap-2 cursor-pointer">
-                                    <input type="radio" name="transType" checked={transType==='OUT'} onChange={()=>setTransType('OUT')} />
-                                    <span>Deduct Stock (OUT)</span>
-                                </label>
-                            </div>
-                            <input type="number" required step="0.01" value={transQty} onChange={e=>setTransQty(e.target.value)} className="w-full border rounded p-2 mb-3" placeholder={`Quantity (${selectedItem.unit})`} />
-                            <input type="text" value={transReason} onChange={e=>setTransReason(e.target.value)} className="w-full border rounded p-2 mb-4" placeholder="Reason (e.g. Restock, Usage)" />
-                            <div className="flex justify-end gap-2">
-                                <button type="button" onClick={()=>setIsTransModalOpen(false)} className="px-4 py-2 bg-gray-200 rounded">Cancel</button>
-                                <button type="submit" className="px-4 py-2 bg-blue-600 text-white rounded">Save</button>
-                            </div>
-                        </form>
-                    </div>
-                </div>
-            )}
-
-            {isAddMatModalOpen && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-gray-900/60 backdrop-blur-sm p-4">
-                    <div className="bg-white rounded-3xl shadow-2xl w-full max-w-md p-8 animate-scale-up">
-                        <div className="mb-6">
-                            <h3 className="text-2xl font-black text-gray-900 tracking-tight">Register New Material</h3>
-                            <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mt-1">Add a new item to inventory tracking</p>
+            {/* Purchase Request Modal */}
+            {isPurchaseModalOpen && (
+                <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-[80] p-4 backdrop-blur-sm">
+                    <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden animate-scale-up">
+                        <div className="p-6 bg-indigo-600 text-white flex justify-between items-center">
+                            <h3 className="font-bold text-lg">Purchase Request</h3>
+                            <button onClick={() => setIsPurchaseModalOpen(false)} className="text-white hover:text-white/80 font-bold text-2xl">×</button>
                         </div>
-                        <form onSubmit={handleAddMaterial} className="space-y-5">
+                        <form onSubmit={handlePurchaseRequest} className="p-6 space-y-4">
                             <div>
-                                <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1.5">Material Name</label>
-                                <input type="text" required value={newMatName} onChange={e=>setNewMatName(e.target.value)} className="w-full bg-gray-50 border-transparent focus:bg-white focus:border-gray-200 focus:ring-0 rounded-xl px-4 py-3.5 text-sm font-bold text-gray-800 placeholder-gray-300 transition-all" placeholder="e.g. Bio-Substrate X" />
-                            </div>
-                            <div className="grid grid-cols-2 gap-4">
-                                <div>
-                                    <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1.5">Category</label>
-                                    <div className="relative">
-                                        <select value={newMatCategory} onChange={e=>setNewMatCategory(e.target.value)} className="w-full bg-gray-50 border-transparent focus:bg-white focus:border-gray-200 focus:ring-0 rounded-xl px-4 py-3.5 text-sm font-bold text-gray-800 appearance-none">
-                                            <option value="Input">Input</option>
-                                            <option value="Nutrient">Nutrient</option>
-                                            <option value="Utility">Utility</option>
-                                            <option value="Equipment">Equipment</option>
-                                        </select>
-                                        <div className="absolute inset-y-0 right-0 flex items-center px-3 pointer-events-none text-gray-400">
-                                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7"></path></svg>
-                                        </div>
-                                    </div>
-                                </div>
-                                <div>
-                                    <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1.5">Unit</label>
-                                    <div className="relative">
-                                         <select value={newMatUnit} onChange={e=>setNewMatUnit(e.target.value)} className="w-full bg-gray-50 border-transparent focus:bg-white focus:border-gray-200 focus:ring-0 rounded-xl px-4 py-3.5 text-sm font-bold text-gray-800 appearance-none">
-                                            <option value="kg">kg</option>
-                                            <option value="L">L</option>
-                                            <option value="units">units</option>
-                                            <option value="packs">packs</option>
-                                        </select>
-                                        <div className="absolute inset-y-0 right-0 flex items-center px-3 pointer-events-none text-gray-400">
-                                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7"></path></svg>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                            <div className="grid grid-cols-3 gap-4">
-                                <div>
-                                    <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1.5">Initial Qty</label>
-                                    <input type="number" required step="0.01" value={newMatQty} onChange={e=>setNewMatQty(e.target.value)} className="w-full bg-gray-50 border-transparent focus:bg-white focus:border-gray-200 focus:ring-0 rounded-xl px-4 py-3.5 text-sm font-bold text-gray-800 placeholder-gray-300 transition-all" placeholder="0" />
-                                </div>
-                                <div>
-                                    <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1.5">Low Alert</label>
-                                    <input type="number" required step="0.01" value={newMatThreshold} onChange={e=>setNewMatThreshold(e.target.value)} className="w-full bg-gray-50 border-transparent focus:bg-white focus:border-gray-200 focus:ring-0 rounded-xl px-4 py-3.5 text-sm font-bold text-gray-800 placeholder-gray-300 transition-all" placeholder="Min" />
-                                </div>
-                                <div>
-                                    <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1.5">Cost/Unit</label>
-                                    <input type="number" required step="0.01" value={newMatUnitCost} onChange={e=>setNewMatUnitCost(e.target.value)} className="w-full bg-gray-50 border-transparent focus:bg-white focus:border-gray-200 focus:ring-0 rounded-xl px-4 py-3.5 text-sm font-bold text-gray-800 placeholder-gray-300 transition-all" placeholder="RM" />
-                                </div>
-                            </div>
-                            <div className="flex gap-4 pt-2">
-                                <button type="button" onClick={()=>setIsAddMatModalOpen(false)} className="flex-1 bg-white border-2 border-gray-100 text-gray-700 font-black py-4 rounded-xl hover:bg-gray-50 transition-colors uppercase text-xs tracking-wider">Cancel</button>
-                                <button type="submit" className="flex-1 bg-green-600 text-white font-black py-4 rounded-xl hover:bg-green-700 shadow-xl shadow-green-200 transition-all transform hover:-translate-y-0.5 uppercase text-xs tracking-wider">Save Material</button>
-                            </div>
-                        </form>
-                    </div>
-                </div>
-            )}
-
-            {isEditMatModalOpen && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-                    <div className="bg-white rounded-lg p-6 w-full max-w-sm">
-                        <h3 className="text-lg font-bold mb-4">Edit {editItemName}</h3>
-                        <form onSubmit={handleUpdateDetails} className="space-y-3">
-                            <div>
-                                <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Cost Per Unit (RM)</label>
-                                <input type="number" required step="0.01" value={editItemUnitCost} onChange={e=>setEditItemUnitCost(e.target.value)} className="w-full border rounded p-2" />
-                            </div>
-                            <div>
-                                <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Category</label>
-                                <select value={editItemCategory} onChange={e=>setEditItemCategory(e.target.value)} className="w-full border rounded p-2">
-                                    <option value="Input">Input</option><option value="Nutrient">Nutrient</option><option value="Utility">Utility</option><option value="Equipment">Equipment</option>
+                                <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Select Item</label>
+                                <select 
+                                    value={purchaseItemId} 
+                                    onChange={e => setPurchaseItemId(e.target.value)} 
+                                    className="w-full p-2 border rounded-lg bg-gray-50 font-medium"
+                                    required
+                                >
+                                    <option value="">Select Material...</option>
+                                    {resources.map(r => <option key={r.id} value={r.id}>{r.name} ({r.unit})</option>)}
                                 </select>
                             </div>
-                            <div>
-                                <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Unit</label>
-                                <input type="text" required value={editItemUnit} onChange={e=>setEditItemUnit(e.target.value)} className="w-full border rounded p-2" />
+                            <div className="grid grid-cols-2 gap-4">
+                                <div>
+                                    <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Quantity ({selectedPurchaseResource?.unit || 'Units'})</label>
+                                    <input 
+                                        type="number" 
+                                        value={purchaseQty} 
+                                        onChange={e => setPurchaseQty(e.target.value)} 
+                                        className="w-full p-2 border rounded-lg" 
+                                        required 
+                                        min="0"
+                                        step="0.01"
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Total Est. Cost (RM)</label>
+                                    <input 
+                                        type="number" 
+                                        value={purchaseCost} 
+                                        onChange={e => setPurchaseCost(e.target.value)} 
+                                        className="w-full p-2 border rounded-lg font-bold text-indigo-600" 
+                                        required 
+                                        min="0"
+                                        step="0.01"
+                                    />
+                                </div>
                             </div>
-                            <div className="flex justify-end gap-2 mt-4">
-                                <button type="button" onClick={()=>setIsEditMatModalOpen(false)} className="px-4 py-2 bg-gray-200 rounded">Cancel</button>
-                                <button type="submit" disabled={isUpdatingDetails} className="px-4 py-2 bg-blue-600 text-white rounded">Save</button>
+                            <div>
+                                <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Notes / Supplier Info</label>
+                                <textarea 
+                                    value={purchaseNotes} 
+                                    onChange={e => setPurchaseNotes(e.target.value)} 
+                                    className="w-full p-2 border rounded-lg h-20" 
+                                    placeholder="Optional details for finance..." 
+                                />
+                            </div>
+                            <div className="flex justify-end pt-2">
+                                <button type="submit" className="w-full bg-indigo-600 text-white font-bold py-3 rounded-lg hover:bg-indigo-700 shadow-lg">Submit Request</button>
                             </div>
                         </form>
                     </div>
                 </div>
             )}
 
-            {isPurchaseModalOpen && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-gray-900/60 backdrop-blur-sm p-4">
-                    <div className="bg-white rounded-3xl shadow-2xl w-full max-w-md p-8 animate-scale-up text-center">
-                        <div className="mx-auto h-16 w-16 bg-indigo-50 rounded-2xl flex items-center justify-center mb-6 shadow-inner">
-                            <svg className="w-8 h-8 text-indigo-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 3h2l.4 2M7 13h10l4-8H5.4M7 13L5.4 5M7 13l-2.293 2.293c-.63.63-.184 1.707.707 1.707H17m0 0a2 2 0 100 4 2 2 0 000-4zm-8 2a2 2 0 11-4 0 2 2 0 014 0z" /></svg>
-                        </div>
-                        <h3 className="text-2xl font-black text-gray-900 tracking-tight">Initiate Purchase</h3>
-                        <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mt-1 mb-8">Submit order to finance dept</p>
-                        
-                        <form onSubmit={handlePurchaseRequest} className="space-y-5 text-left">
+            {/* Stock Adjustment Modal */}
+            {isTransModalOpen && selectedItem && (
+                <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-[80] p-4 backdrop-blur-sm">
+                    <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm overflow-hidden animate-scale-up">
+                        <div className="p-6 border-b flex justify-between items-center bg-gray-50">
                             <div>
-                                <div className="flex justify-between items-center mb-1.5">
-                                    <label className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Material to Restock</label>
-                                    <button type="button" onClick={() => { setIsPurchaseModalOpen(false); setIsAddMatModalOpen(true); }} className="text-[10px] font-bold text-indigo-600 hover:text-indigo-800 uppercase tracking-wide">Create New?</button>
-                                </div>
-                                <div className="relative">
-                                    <select value={purchaseItemId} onChange={e=>setPurchaseItemId(e.target.value)} className="w-full bg-gray-50 border-transparent focus:bg-white focus:border-gray-200 focus:ring-0 rounded-xl px-4 py-3.5 text-sm font-bold text-gray-800 appearance-none">
-                                        <option value="">-- Select Resource --</option>
-                                        {resources.map(r=><option key={r.id} value={r.id}>{r.name}</option>)}
-                                    </select>
-                                    <div className="absolute inset-y-0 right-0 flex items-center px-3 pointer-events-none text-gray-400">
-                                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7"></path></svg>
-                                    </div>
-                                </div>
-                                {selectedPurchaseResource && (
-                                    <div className="text-right mt-1">
-                                        <span className="text-[10px] font-bold text-indigo-500 bg-indigo-50 px-2 py-0.5 rounded">
-                                            Unit Price: RM {selectedPurchaseResource.unitCost.toFixed(2)} per {selectedPurchaseResource.unit === 'L' ? '10L' : selectedPurchaseResource.unit}
-                                        </span>
-                                    </div>
-                                )}
+                                <h3 className="font-bold text-lg text-gray-900">Adjust Stock</h3>
+                                <p className="text-xs text-gray-500 font-medium">{selectedItem.name}</p>
+                            </div>
+                            <button onClick={() => setIsTransModalOpen(false)} className="text-gray-400 hover:text-gray-600 font-bold text-xl">×</button>
+                        </div>
+                        <form onSubmit={handleTransaction} className="p-6 space-y-4">
+                            <div className="flex bg-gray-100 p-1 rounded-lg">
+                                <button type="button" onClick={()=>setTransType('IN')} className={`flex-1 py-2 rounded-md text-xs font-bold uppercase transition-all ${transType === 'IN' ? 'bg-white text-green-600 shadow-sm' : 'text-gray-400'}`}>Add Stock</button>
+                                <button type="button" onClick={()=>setTransType('OUT')} className={`flex-1 py-2 rounded-md text-xs font-bold uppercase transition-all ${transType === 'OUT' ? 'bg-white text-red-600 shadow-sm' : 'text-gray-400'}`}>Deduct</button>
+                            </div>
+                            <div>
+                                <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Quantity ({selectedItem.unit})</label>
+                                <input type="number" step="0.01" value={transQty} onChange={e=>setTransQty(e.target.value)} className="w-full p-2 border rounded-lg text-lg font-bold" required autoFocus />
+                            </div>
+                            <div>
+                                <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Reason</label>
+                                <input type="text" value={transReason} onChange={e=>setTransReason(e.target.value)} className="w-full p-2 border rounded-lg" placeholder="e.g. Spoilage, Correction" />
+                            </div>
+                            <button type="submit" className={`w-full py-3 rounded-lg font-bold text-white shadow-lg ${transType === 'IN' ? 'bg-green-600 hover:bg-green-700' : 'bg-red-600 hover:bg-red-700'}`}>
+                                Confirm {transType === 'IN' ? 'Addition' : 'Deduction'}
+                            </button>
+                        </form>
+                    </div>
+                </div>
+            )}
+
+            {/* Add Material Modal */}
+            {isAddMatModalOpen && (
+                <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-[80] p-4 backdrop-blur-sm">
+                    <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden animate-scale-up">
+                        <div className="p-6 bg-gray-900 text-white flex justify-between items-center">
+                            <h3 className="font-bold text-lg">New Inventory Item</h3>
+                            <button onClick={() => setIsAddMatModalOpen(false)} className="text-white hover:text-white/80 font-bold text-2xl">×</button>
+                        </div>
+                        <form onSubmit={handleAddMaterial} className="p-6 space-y-4">
+                            <div className="grid grid-cols-2 gap-4">
+                                <div><label className="block text-xs font-bold text-gray-500 uppercase mb-1">Name</label><input type="text" value={newMatName} onChange={e=>setNewMatName(e.target.value)} className="w-full p-2 border rounded-lg" required /></div>
+                                <div><label className="block text-xs font-bold text-gray-500 uppercase mb-1">Category</label><select value={newMatCategory} onChange={e=>setNewMatCategory(e.target.value)} className="w-full p-2 border rounded-lg bg-white"><option value="Input">Input</option><option value="Nutrient">Nutrient</option><option value="Utility">Utility</option><option value="Equipment">Equipment</option></select></div>
                             </div>
                             <div className="grid grid-cols-2 gap-4">
-                                <div>
-                                    <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1.5">Quantity to Buy</label>
-                                    <input type="number" required step="0.01" value={purchaseQty} onChange={e=>setPurchaseQty(e.target.value)} className="w-full bg-gray-50 border-transparent focus:bg-white focus:border-gray-200 focus:ring-0 rounded-xl px-4 py-3.5 text-sm font-bold text-gray-800 placeholder-gray-300 transition-all text-center" placeholder="0.00" />
-                                </div>
-                                <div>
-                                    <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1.5">Total Cost (RM)</label>
-                                    <input type="number" required step="0.01" value={purchaseCost} onChange={e=>setPurchaseCost(e.target.value)} className="w-full bg-gray-50 border-transparent focus:bg-white focus:border-gray-200 focus:ring-0 rounded-xl px-4 py-3.5 text-sm font-bold text-gray-800 placeholder-gray-300 transition-all text-center" placeholder="0.00" />
-                                </div>
+                                <div><label className="block text-xs font-bold text-gray-500 uppercase mb-1">Initial Qty</label><input type="number" value={newMatQty} onChange={e=>setNewMatQty(e.target.value)} className="w-full p-2 border rounded-lg" required /></div>
+                                <div><label className="block text-xs font-bold text-gray-500 uppercase mb-1">Unit</label><select value={newMatUnit} onChange={e=>setNewMatUnit(e.target.value)} className="w-full p-2 border rounded-lg bg-white"><option value="kg">kg</option><option value="L">L</option><option value="units">units</option><option value="packs">packs</option></select></div>
+                            </div>
+                            <div className="grid grid-cols-2 gap-4">
+                                <div><label className="block text-xs font-bold text-gray-500 uppercase mb-1">Low Limit</label><input type="number" value={newMatThreshold} onChange={e=>setNewMatThreshold(e.target.value)} className="w-full p-2 border rounded-lg" required /></div>
+                                <div><label className="block text-xs font-bold text-gray-500 uppercase mb-1">Est. Unit Cost</label><input type="number" step="0.01" value={newMatUnitCost} onChange={e=>setNewMatUnitCost(e.target.value)} className="w-full p-2 border rounded-lg" required /></div>
+                            </div>
+                            <button type="submit" className="w-full bg-gray-900 text-white font-bold py-3 rounded-lg hover:bg-black shadow-lg">Create Item</button>
+                        </form>
+                    </div>
+                </div>
+            )}
+
+            {/* Edit Material Modal */}
+            {isEditMatModalOpen && (
+                <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-[80] p-4 backdrop-blur-sm">
+                    <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm overflow-hidden animate-scale-up">
+                        <div className="p-6 border-b flex justify-between items-center">
+                            <h3 className="font-bold text-lg text-gray-900">Edit Details</h3>
+                            <button onClick={() => setIsEditMatModalOpen(false)} className="text-gray-400 hover:text-gray-600 font-bold text-xl">×</button>
+                        </div>
+                        <form onSubmit={handleUpdateDetails} className="p-6 space-y-4">
+                            <div className="bg-gray-50 p-3 rounded-lg text-center">
+                                <span className="block text-xs font-bold text-gray-400 uppercase">Editing</span>
+                                <span className="font-bold text-lg text-indigo-600">{editItemName}</span>
                             </div>
                             <div>
-                                <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1.5">Suppliers / Notes</label>
-                                <textarea value={purchaseNotes} onChange={e=>setPurchaseNotes(e.target.value)} className="w-full bg-gray-50 border-transparent focus:bg-white focus:border-gray-200 focus:ring-0 rounded-xl px-4 py-3.5 text-sm font-bold text-gray-800 placeholder-gray-300 transition-all min-h-[80px]" placeholder="e.g. Urgent, Main Supplier ABC" />
+                                <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Unit Cost (RM)</label>
+                                <input type="number" step="0.01" value={editItemUnitCost} onChange={e=>setEditItemUnitCost(e.target.value)} className="w-full p-2 border rounded-lg" required />
                             </div>
-                            <div className="flex gap-4 pt-4">
-                                <button type="button" onClick={()=>{setIsPurchaseModalOpen(false); setPurchaseItemId('');}} className="flex-1 bg-white border-2 border-gray-100 text-gray-800 font-black py-4 rounded-xl hover:bg-gray-50 transition-colors uppercase text-xs tracking-wider">Cancel</button>
-                                <button type="submit" className="flex-1 bg-indigo-600 text-white font-black py-4 rounded-xl hover:bg-indigo-700 shadow-xl shadow-indigo-200 transition-all transform hover:-translate-y-0.5 uppercase text-xs tracking-wider">Submit Order</button>
+                            <div className="grid grid-cols-2 gap-4">
+                                <div><label className="block text-xs font-bold text-gray-500 uppercase mb-1">Category</label><select value={editItemCategory} onChange={e=>setEditItemCategory(e.target.value)} className="w-full p-2 border rounded-lg bg-white"><option value="Input">Input</option><option value="Nutrient">Nutrient</option><option value="Utility">Utility</option><option value="Equipment">Equipment</option></select></div>
+                                <div><label className="block text-xs font-bold text-gray-500 uppercase mb-1">Unit</label><select value={editItemUnit} onChange={e=>setEditItemUnit(e.target.value)} className="w-full p-2 border rounded-lg bg-white"><option value="kg">kg</option><option value="L">L</option><option value="units">units</option><option value="packs">packs</option></select></div>
                             </div>
+                            <button type="submit" disabled={isUpdatingDetails} className="w-full bg-blue-600 text-white font-bold py-3 rounded-lg hover:bg-blue-700 shadow-lg disabled:opacity-50">
+                                {isUpdatingDetails ? 'Saving...' : 'Update Details'}
+                            </button>
                         </form>
                     </div>
                 </div>
