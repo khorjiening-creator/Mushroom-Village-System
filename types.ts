@@ -152,11 +152,14 @@ export interface DeliveryRecord {
   id: string;
   deliveryDate: string;
   deliveryTime: string;
-  status: 'SCHEDULED' | 'OUT_FOR_DELIVERY' | 'DELIVERED' | 'FAILED';
+  status: 'PENDING_SCHEDULE' | 'SCHEDULED' | 'OUT_FOR_DELIVERY' | 'DELIVERED' | 'FAILED';
   route: string;
   destinationAddress: string;
   customerEmail: string;
   customerPhone?: string;
+  customerName?: string; // Added for linking
+  orderSummary?: string; // Added for linking
+  saleId?: string; // Added for linking
   zone: string;
   driverId: string;
   driverName: string;

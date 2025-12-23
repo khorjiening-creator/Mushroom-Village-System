@@ -1,7 +1,7 @@
 import React, { useState, useMemo, useEffect } from 'react';
-import { collection, setDoc, doc, updateDoc, getDocs, query, where, limit } from '@firebase/firestore';
+import { collection, setDoc, doc, updateDoc, getDocs, query, where, limit, addDoc } from '@firebase/firestore';
 import { db } from '../../services/firebase';
-import { ProcessingLog, VillageType, PackagingLogData, InventoryItem } from '../../types';
+import { ProcessingLog, VillageType, PackagingLogData, InventoryItem, UserRole } from '../../types';
 import { 
   MUSHROOM_VARIETIES, 
   SUPERVISOR_LIST, 
@@ -11,18 +11,24 @@ import {
 
 interface Props {
     villageId: VillageType;
+    userRole: UserRole;
     userEmail: string;
     theme: any;
     processingLogs: ProcessingLog[];
+    packagingHistory: PackagingLogData[];
     onRefresh: () => void;
+    onSuccess: (msg: string) => void;
+    onError?: (msg: string) => void;
 }
 
 export const Packaging: React.FC<Props> = ({ 
-    villageId, userEmail, theme, processingLogs, onRefresh 
+    villageId, userRole, userEmail, theme, processingLogs, packagingHistory, onRefresh, onSuccess, onError 
 }) => {
-    const [mainTab, setMainTab] = useState('Overview');
+    const [mainTab, setMainTab] = useState<'Overview' | 'History' | string>('Overview');
     const [gradeTab, setGradeTab] = useState<'A' | 'B' | 'C'>('A');
     const [selectedPackBatches, setSelectedPackBatches] = useState<ProcessingLog[]>([]);
+
+    const isAdmin = userRole === 'admin';
 
     // Form States
     const [packDate, setPackDate] = useState(new Date().toISOString().split('T')[0]);
@@ -68,6 +74,29 @@ export const Packaging: React.FC<Props> = ({
             setPackUnits('');
         }
     }, [selectedPackBatches, gradeTab, autoUnitsToPack]);
+
+    const handleExportPackaging = () => {
+        if (!isAdmin) return;
+        const headers = ["Batch ID", "Variety", "Grade", "Weight (kg)", "Units (200g)", "Operator", "Supervisor", "Packaging Date"];
+        const rows = packagingHistory.map(l => [
+            l.batchId,
+            l.mushroomType,
+            l.grade,
+            l.weight.toFixed(2),
+            l.units,
+            l.operator,
+            l.supervisor,
+            l.packagingDate
+        ]);
+        const csvContent = "data:text/csv;charset=utf-8," + [headers.join(','), ...rows.map(e => e.join(','))].join('\n');
+        const encodedUri = encodeURI(csvContent);
+        const link = document.createElement("a");
+        link.setAttribute("href", encodedUri);
+        link.setAttribute("download", `packaging_history_${new Date().toISOString().split('T')[0]}.csv`);
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+    };
 
     const navigateToManage = (log: ProcessingLog, grade: 'A' | 'B' | 'C') => {
         setMainTab(log.mushroomType);
@@ -141,6 +170,19 @@ export const Packaging: React.FC<Props> = ({
 
             await updateInventoryStock(mainTab, gradeTab, massNeeded);
 
+            // Record STOCK IN movement
+            await addDoc(collection(db, "stock_movements"), {
+                batchId: selectedPackBatches.length === 1 ? selectedPackBatches[0].batchId : `CONSOL-${gradeTab}`,
+                type: 'IN',
+                quantity: massNeeded,
+                date: new Date().toISOString(),
+                referenceId: `PKG-${Date.now()}`,
+                performedBy: userEmail,
+                villageId,
+                mushroomType: mainTab,
+                grade: gradeTab
+            } as any);
+
             for (const batch of sorted) {
                 if (weightToDeduct <= 0) break;
 
@@ -202,9 +244,12 @@ export const Packaging: React.FC<Props> = ({
                 }
             }
 
+            onSuccess(`Packaging completed for ${mainTab} Grade ${gradeTab}. ${packUnits} units added to inventory.`);
             onRefresh(); setSelectedPackBatches([]); setPackUnits(''); setPackLabelCheck(false);
-            alert("Packaging executed successfully.");
-        } catch (err: any) { alert(err.message); } finally { setIsSubmitting(false); }
+        } catch (err: any) { 
+            console.error(err);
+            if (onError) onError(err.message || "Failed to execute packaging.");
+        } finally { setIsSubmitting(false); }
     };
 
     const handleToggleBatch = (batch: ProcessingLog) => {
@@ -223,8 +268,10 @@ export const Packaging: React.FC<Props> = ({
     return (
         <div className="space-y-6">
             <div className="flex border-b border-gray-200 mb-6 overflow-x-auto scrollbar-hide">
-                {['Overview', ...MUSHROOM_VARIETIES].map(tab => {
-                    const count = tab !== 'Overview' ? getVarietyPendingCount(tab) : 0;
+                {['Overview', 'History', ...MUSHROOM_VARIETIES]
+                    .filter(tab => tab !== 'History' || isAdmin)
+                    .map(tab => {
+                    const count = (tab !== 'Overview' && tab !== 'History') ? getVarietyPendingCount(tab) : 0;
                     return (
                         <button key={tab} onClick={() => { setMainTab(tab); setSelectedPackBatches([]); }} className={`px-6 py-3 text-sm font-bold uppercase border-b-2 transition-all flex items-center gap-2 whitespace-nowrap ${mainTab === tab ? `border-blue-500 text-blue-600` : 'border-transparent text-gray-400 hover:text-gray-600'}`}>
                             {tab} {count > 0 && <span className="bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full text-[10px]">{count}</span>}
@@ -244,14 +291,13 @@ export const Packaging: React.FC<Props> = ({
                             >
                                 <div className="text-gray-400 text-[10px] font-bold uppercase mb-2 tracking-widest group-hover:text-blue-500">Grade {g} Total Pending</div>
                                 <div className="text-4xl font-black text-blue-600">{stats[g].toFixed(2)}kg</div>
-                                <div className="text-[10px] font-bold text-gray-400 mt-2 uppercase">Go to Management View</div>
                             </button>
                         ))}
                     </div>
 
                     <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden flex flex-col">
                         <div className="px-6 py-4 border-b border-gray-50 flex justify-between items-center bg-gray-50/50">
-                            <h3 className="text-sm font-bold text-gray-700 uppercase tracking-tight">Active Packaging Queue (Consolidation Queue)</h3>
+                            <h3 className="text-sm font-bold text-gray-700 uppercase tracking-tight">Active Packaging Queue</h3>
                         </div>
                         <div className="max-h-[500px] overflow-y-auto scrollbar-thin scrollbar-thumb-gray-200">
                             <table className="min-w-full divide-y divide-gray-200 text-xs">
@@ -306,6 +352,54 @@ export const Packaging: React.FC<Props> = ({
                         </div>
                     </div>
                 </div>
+            ) : (mainTab === 'History' && isAdmin) ? (
+                <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden animate-fade-in">
+                    <div className="p-6 border-b flex justify-between items-center bg-gray-50/50">
+                        <h3 className="text-sm font-black text-slate-700 uppercase tracking-widest">Finished Goods Packaging Ledger</h3>
+                        <button 
+                            onClick={handleExportPackaging}
+                            className="bg-white border border-slate-200 px-4 py-2 rounded-xl text-[10px] font-black uppercase hover:bg-slate-50 transition-all flex items-center gap-2"
+                        >
+                            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
+                            Export to Excel
+                        </button>
+                    </div>
+                    <div className="overflow-x-auto">
+                        <table className="min-w-full divide-y divide-gray-200 text-sm text-left">
+                            <thead className="bg-gray-50 text-[10px] font-black text-gray-400 uppercase tracking-widest">
+                                <tr>
+                                    <th className="px-6 py-4">Batch Ref</th>
+                                    <th className="px-6 py-4">Product Variety</th>
+                                    <th className="px-6 py-4 text-center">Grade</th>
+                                    <th className="px-6 py-4 text-right">Mass Used</th>
+                                    <th className="px-6 py-4 text-right">Units Output</th>
+                                    <th className="px-6 py-4">Operator</th>
+                                    <th className="px-6 py-4">Supervisor</th>
+                                    <th className="px-6 py-4">Pack Date</th>
+                                </tr>
+                            </thead>
+                            <tbody className="divide-y divide-gray-100">
+                                {packagingHistory.map(l => (
+                                    <tr key={l.id} className="hover:bg-gray-50 transition-colors">
+                                        <td className="px-6 py-4"><span className="bg-indigo-50 text-indigo-700 px-2 py-1 rounded font-mono text-[10px] font-bold">{l.batchId}</span></td>
+                                        <td className="px-6 py-4 font-bold text-gray-700">{l.mushroomType}</td>
+                                        <td className="px-6 py-4 text-center">
+                                            <span className="bg-slate-900 text-white px-2 py-0.5 rounded text-[10px] font-black">Grade {l.grade}</span>
+                                        </td>
+                                        <td className="px-6 py-4 text-right font-mono font-bold text-gray-500">{l.weight.toFixed(2)} kg</td>
+                                        <td className="px-6 py-4 text-right font-black text-indigo-600">{l.units} <span className="text-[10px] text-slate-400 font-normal">Packs</span></td>
+                                        <td className="px-6 py-4 text-gray-500 text-[11px] font-medium">{l.operator}</td>
+                                        <td className="px-6 py-4 text-gray-500 text-[11px] font-medium">{l.supervisor}</td>
+                                        <td className="px-6 py-4 font-mono text-[11px] text-gray-400">{l.packagingDate}</td>
+                                    </tr>
+                                ))}
+                                {packagingHistory.length === 0 && (
+                                    <tr><td colSpan={8} className="px-6 py-20 text-center text-gray-300 italic">No packaging records available.</td></tr>
+                                )}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
             ) : (
                 <div className="grid md:grid-cols-3 gap-8 animate-fade-in-up">
                     <div className="col-span-1 border-r pr-6 space-y-4">
@@ -341,9 +435,6 @@ export const Packaging: React.FC<Props> = ({
                                     </div>
                                 </div>
                             ))}
-                            {processingLogs.filter(l => l.currentStep === 6 && l.mushroomType === mainTab && l.packagingStatus?.[`grade${gradeTab}` as keyof typeof l.packagingStatus] === 'PENDING').length === 0 && (
-                                <div className="text-center py-10 text-gray-300 italic text-[11px]">No items for this variety/grade.</div>
-                            )}
                         </div>
                     </div>
 
@@ -412,7 +503,6 @@ export const Packaging: React.FC<Props> = ({
                                     <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" /></svg>
                                     Execute Packaging Output ({packUnits} packs)
                                 </button>
-                                <p className="text-[9px] text-gray-400 text-center font-bold uppercase tracking-widest">Weight deduction follows FIFO protocol across selected batches.</p>
                             </form>
                         ) : (
                             <div className="h-full flex flex-col items-center justify-center text-gray-300 border-2 border-dashed border-gray-100 rounded-3xl py-24 text-center">

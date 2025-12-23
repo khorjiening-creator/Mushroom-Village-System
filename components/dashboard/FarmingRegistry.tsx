@@ -1,6 +1,5 @@
-
 import React, { useState, useEffect, useMemo } from 'react';
-import { addDoc, collection, query, orderBy, limit, getDocs, setDoc, doc, updateDoc, increment, getDoc, arrayUnion } from 'firebase/firestore';
+import { addDoc, collection, query, orderBy, limit, getDocs, setDoc, doc, updateDoc, increment, getDoc, arrayUnion, where } from 'firebase/firestore';
 import { db } from '../../services/firebase';
 import { ActivityLog, VillageType, FinancialRecord, ProcessingLog } from '../../types';
 import { MUSHROOM_PRICES, MUSHROOM_ROOM_MAPPING } from '../../constants';
@@ -454,7 +453,7 @@ export const FarmingRegistry: React.FC<FarmingRegistryProps> = ({
         setIsSubmittingHarvest(true);
         try {
             const weight = parseFloat(harvestWeight);
-            const harvestCollection = villageId === VillageType.A ? "harvestYield_A" : villageId === VillageType.B ? "harvestYield_B" : null;
+            const harvestCollection = villageId === VillageType.A ? "harvestYield_A" : "harvestYield_B";
             if (!harvestCollection) throw new Error("Invalid village for harvest logging");
             
             const currentTime = new Date().toTimeString().split(' ')[0];
@@ -624,13 +623,41 @@ export const FarmingRegistry: React.FC<FarmingRegistryProps> = ({
         if (!selectedBatch?.id) return;
         setIsSavingEdit(true);
         try {
+            const newYield = parseFloat(editBatchYield) || 0;
+            const newPredicted = parseFloat(editBatchPredictedYield) || 0;
+
+            // 1. Update Primary Farming Log
             await updateDoc(doc(db, collectionName, selectedBatch.id), { 
                 mushroomStrain: editBatchStrain, 
                 details: editBatchDetails, 
-                totalYield: parseFloat(editBatchYield) || 0,
-                predictedYield: parseFloat(editBatchPredictedYield) || 0
+                totalYield: newYield,
+                predictedYield: newPredicted
             });
-            onSuccess("Batch updated successfully.");
+
+            // 2. Sync to Harvest Yield Collection (Aggregated by Village C)
+            const harvestCollection = villageId === VillageType.A ? "harvestYield_A" : "harvestYield_B";
+            const harvestRef = doc(db, harvestCollection, selectedBatch.id);
+            const harvestSnap = await getDoc(harvestRef);
+            if (harvestSnap.exists()) {
+                await updateDoc(harvestRef, {
+                    strain: editBatchStrain,
+                    totalYield: newYield
+                });
+            }
+
+            // 3. Sync to Pending Shipments (Used by Village C Processing Floor)
+            const qShipments = query(collection(db, "pending_shipments"), where("batchId", "==", selectedBatch.id), where("status", "==", "PENDING"));
+            const shipSnap = await getDocs(qShipments);
+            const shipPromises = shipSnap.docs.map(d => 
+                updateDoc(doc(db, "pending_shipments", d.id), {
+                    strain: editBatchStrain,
+                    // If the user corrected the yield, the shipment that came from this batch should ideally reflect it
+                    weight: newYield 
+                })
+            );
+            await Promise.all(shipPromises);
+
+            onSuccess("Batch updated and synchronized with Village C.");
             onRefresh(); setSelectedBatch(null); setIsEditingBatch(false);
         } catch (error: any) {
             console.error("Error updating batch:", error);

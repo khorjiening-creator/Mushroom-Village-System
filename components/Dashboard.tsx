@@ -25,7 +25,6 @@ import { ResourcesTab } from './dashboard/ResourcesTab';
 import { ProcessingFloor } from './dashboard/ProcessingFloor';
 import { Packaging } from './dashboard/Packaging';
 import { InventoryDelivery } from './dashboard/InventoryDelivery';
-import { Reports } from './dashboard/Reports';
 import { ProductionAnalysisTab } from './dashboard/ProductionAnalysisTab';
 import { FinancialsLedgerTab } from './dashboard/FinancialsLedgerTab';
 import { RegistryTab } from './dashboard/RegistryTab';
@@ -37,7 +36,7 @@ import { SettleModal } from './SettleModal';
 // Global Notification Component for Low Materials
 const GlobalLowStockAlert = ({ items, onClose, onAction }: { items: any[], onClose: () => void, onAction: () => void }) => (
     <div className="fixed top-20 left-1/2 transform -translate-x-1/2 z-[100] w-full max-w-sm px-4 animate-bounce-subtle">
-        <div className="bg-white border-2 border-orange-500 shadow-2xl rounded-2xl p-4 flex items-center gap-4 backdrop-blur-md bg-white/90">
+        <div className="bg-white border-2 border-orange-50 shadow-2xl rounded-2xl p-4 flex items-center gap-4 backdrop-blur-md bg-white/90">
             <div className="h-12 w-12 rounded-full bg-orange-100 flex items-center justify-center flex-shrink-0 animate-pulse">
                 <svg className="h-6 w-6 text-orange-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" /></svg>
             </div>
@@ -59,13 +58,13 @@ const Toast = ({ message, type, onClose }: { message: string, type: 'success' | 
             {type === 'success' ? (
                 <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd"></path></svg>
             ) : (
-                <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd"></path></svg>
+                <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd"></path></svg>
             )}
         </div>
         <div className="ml-3 text-sm font-medium">{message}</div>
         <button type="button" onClick={onClose} className={`ml-auto -mx-1.5 -my-1.5 rounded-lg focus:ring-2 p-1.5 inline-flex h-8 w-8 ${type === 'success' ? 'bg-green-100 text-green-500 hover:bg-green-200' : 'bg-red-100 text-red-800 hover:bg-red-200'}`}>
             <span className="sr-only">Close</span>
-            <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd"></path></svg>
+            <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd"></path></svg>
         </button>
     </div>
 );
@@ -171,6 +170,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ villageId, userEmail, user
         const qDel = query(collection(db, "Delivery_logs"), where("villageId", "==", villageId));
         const qAudit = query(collection(db, "audit_logs"), where("villageId", "==", villageId));
         
+        // Fix: Changed getDocs(auditS) to getDocs(qAudit) as auditS is not yet declared and it should use the query variable
         const [packS, delS, auditS] = await Promise.all([getDocs(qPack), getDocs(qDel), getDocs(qAudit)]);
         
         setPackagingHistory(packS.docs.map(d => ({id: d.id, ...d.data()} as PackagingLogData)).sort((a,b)=>b.timestamp.localeCompare(a.timestamp)));
@@ -443,7 +443,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ villageId, userEmail, user
 
   const navItems = useMemo(() => {
     const baseItems = [
-      { id: 'overview', label: 'Overview', icon: 'M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z' },
+      { id: 'overview', label: 'Overview', icon: 'M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 01-2 2h-2a2 2 0 01-1-2v-2z' },
     ];
 
     if (villageId !== VillageType.C) {
@@ -462,10 +462,9 @@ export const Dashboard: React.FC<DashboardProps> = ({ villageId, userEmail, user
       // Village C
       if (userRole === 'admin' || userRole === 'user') {
           baseItems.push(
-            { id: 'processing', label: 'Processing Floor', icon: 'M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z' },
+            { id: 'processing', label: 'Processing', icon: 'M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z' },
             { id: 'packaging', label: 'Packaging', icon: 'M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4' },
-            { id: 'inventory', label: 'Logistics', icon: 'M9 17a2 2 0 11-4 0 2 2 0 014 0zM19 17a2 2 0 11-4 0 2 2 0 014 0z' },
-            { id: 'reports', label: 'Reports', icon: 'M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z' },
+            { id: 'inventory', label: 'Inventory & Delivery Management', icon: 'M9 17a2 2 0 11-4 0 2 2 0 014 0zM19 17a2 2 0 11-4 0 2 2 0 014 0z' },
           );
       }
       // Costing - C Finance/Admin
@@ -558,10 +557,9 @@ export const Dashboard: React.FC<DashboardProps> = ({ villageId, userEmail, user
             {activeTab === 'resources' && <ResourcesTab villageId={villageId} userEmail={userEmail} theme={theme} onSuccess={(msg) => showNotification(msg, 'success')} financialRecords={financialRecords} initialPurchaseState={triggerPurchase} onResetPurchaseState={() => setTriggerPurchase({ active: false })} />}
             {activeTab === 'sales' && <SalesTab villageId={villageId} userEmail={userEmail} staffId={staffId} userRole={userRole} isAdmin={isAdmin} theme={theme} onSuccess={(msg) => showNotification(msg, 'success')} onError={(msg) => showNotification(msg, 'error')} financialRecords={financialRecords} />}
             {activeTab === 'costing' && <CostingTab villageId={villageId} userEmail={userEmail} theme={theme} onSuccess={(msg) => showNotification(msg, 'success')} onError={(msg) => showNotification(msg, 'error')} />}
-            {activeTab === 'processing' && <ProcessingFloor villageId={villageId} userEmail={userEmail} theme={theme} processingLogs={processingLogs} onRefresh={fetchData} handleDeleteLog={async (col, id) => { if(confirm("Delete?")) { await deleteDoc(doc(db, col, id)); fetchData(); } }} handleClearQueue={fetchData} />}
-            {activeTab === 'packaging' && <Packaging villageId={villageId} userEmail={userEmail} theme={theme} processingLogs={processingLogs} onRefresh={fetchData} />}
-            {activeTab === 'inventory' && <InventoryDelivery villageId={villageId} userEmail={userEmail} onRefresh={fetchData} initialFilter={logisticsSubFilter} />}
-            {activeTab === 'reports' && <Reports processingLogs={processingLogs} packagingHistory={packagingHistory} deliveryLogs={deliveryLogs} allDeliveries={allDeliveries} />}
+            {activeTab === 'processing' && <ProcessingFloor villageId={villageId} userRole={userRole} userEmail={userEmail} theme={theme} processingLogs={processingLogs} onRefresh={fetchData} handleDeleteLog={async (col, id) => { if(confirm("Delete?")) { await deleteDoc(doc(db, col, id)); fetchData(); } }} handleClearQueue={fetchData} onSuccess={(msg) => showNotification(msg, 'success')} onError={(msg) => showNotification(msg, 'error')} />}
+            {activeTab === 'packaging' && <Packaging villageId={villageId} userRole={userRole} userEmail={userEmail} theme={theme} processingLogs={processingLogs} packagingHistory={packagingHistory} onRefresh={fetchData} onSuccess={(msg) => showNotification(msg, 'success')} onError={(msg) => showNotification(msg, 'error')} />}
+            {activeTab === 'inventory' && <InventoryDelivery villageId={villageId} userRole={userRole} userEmail={userEmail} onRefresh={fetchData} initialFilter={logisticsSubFilter} onSuccess={(msg) => showNotification(msg, 'success')} onError={(msg) => showNotification(msg, 'error')} />}
             {activeTab === 'analysis' && <ProductionAnalysisTab villageId={villageId} userEmail={userEmail} />}
             
             {activeTab === 'financial' && (

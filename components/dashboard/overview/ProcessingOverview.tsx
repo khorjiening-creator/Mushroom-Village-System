@@ -1,4 +1,3 @@
-
 import React from 'react';
 import { FinancialRecord } from '../../../types';
 
@@ -176,7 +175,7 @@ export const ProcessingUserView: React.FC<ProcessingViewProps> = ({
                     <div className="bg-white w-14 h-14 rounded-2xl flex items-center justify-center text-blue-600 mb-6 shadow-sm group-hover:scale-110 transition-transform">
                         <svg className="w-8 h-8" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" /></svg>
                     </div>
-                    <h3 className="text-xl font-black text-blue-900">Processing Floor</h3>
+                    <h3 className="text-xl font-black text-blue-900">Processing</h3>
                     <p className="text-xs text-blue-700 font-medium mt-2">Intake, QC, Grading & Cleaning.</p>
                     <div className="mt-6 flex items-center gap-2 text-xs font-bold text-blue-600 uppercase tracking-widest group-hover:gap-3 transition-all">
                         Access Floor <span className="text-lg">→</span>
@@ -198,7 +197,7 @@ export const ProcessingUserView: React.FC<ProcessingViewProps> = ({
                     <div className="bg-white w-14 h-14 rounded-2xl flex items-center justify-center text-orange-600 mb-6 shadow-sm group-hover:scale-110 transition-transform">
                         <svg className="w-8 h-8" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
                     </div>
-                    <h3 className="text-xl font-black text-orange-900">Logistics & Stock</h3>
+                    <h3 className="text-xl font-black text-orange-900">Inventory & Delivery Management</h3>
                     <p className="text-xs text-orange-700 font-medium mt-2">Manage deliveries and warehouse.</p>
                     <div className="mt-6 flex items-center gap-2 text-xs font-bold text-orange-600 uppercase tracking-widest group-hover:gap-3 transition-all">
                         View Logistics <span className="text-lg">→</span>
@@ -289,7 +288,7 @@ export const ProcessingAdminView: React.FC<ProcessingViewProps> = ({
                 </button>
                 <button onClick={() => setActiveTab('inventory')} className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm hover:shadow-md hover:border-orange-300 transition-all text-left group">
                     <div className="text-orange-600 mb-3 group-hover:scale-110 transition-transform"><svg className="w-8 h-8" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg></div>
-                    <h3 className="font-black text-slate-800">Logistics</h3>
+                    <h3 className="font-black text-slate-800">Inventory & Delivery Management</h3>
                     <p className="text-[10px] text-slate-400 uppercase font-bold mt-1">Stock & Ship</p>
                 </button>
             </div>

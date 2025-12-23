@@ -1,3 +1,4 @@
+
 import React from 'react';
 import { VillageType } from '../types';
 import { VILLAGES } from '../constants';
@@ -68,9 +69,6 @@ const VillageSelector: React.FC<VillageSelectorProps> = ({ selected, onSelect })
               <h3 className={`text-lg font-black uppercase tracking-tight ${isSelected ? 'text-gray-900' : 'text-gray-500'}`}>
                 {village.name}
               </h3>
-              <p className={`text-xs font-bold leading-relaxed ${isSelected ? 'text-gray-600' : 'text-gray-400'}`}>
-                {village.description}
-              </p>
             </div>
           </button>
         );

@@ -1,10 +1,9 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { collection, addDoc, onSnapshot, query, where, updateDoc, doc, getDocs, limit } from '@firebase/firestore';
 import { db } from '../../services/firebase';
-import { VillageType, InventoryItem, DeliveryRecord, StockMovement } from '../../types';
+import { VillageType, InventoryItem, DeliveryRecord, StockMovement, UserRole } from '../../types';
 import { 
   MUSHROOM_VARIETIES, 
-  CUSTOMER_LIST, 
   DRIVER_LIST, 
   ROUTE_LIST,
   VEHICLE_LIST,
@@ -22,19 +21,24 @@ const FAILURE_REASONS = [
 
 interface Props {
     villageId: VillageType;
+    userRole: UserRole;
     userEmail: string;
     onRefresh: () => void;
-    initialFilter?: 'ALL' | 'SCHEDULED' | 'OUT_FOR_DELIVERY' | 'DELIVERED' | 'FAILED';
+    initialFilter?: 'ALL' | 'PENDING_SCHEDULE' | 'SCHEDULED' | 'OUT_FOR_DELIVERY' | 'DELIVERED' | 'FAILED';
+    onSuccess: (msg: string) => void;
+    onError?: (msg: string) => void;
 }
 
 export const InventoryDelivery: React.FC<Props> = ({ 
-    villageId, userEmail, onRefresh, initialFilter = 'ALL' 
+    villageId, userRole, userEmail, onRefresh, initialFilter = 'ALL', onSuccess, onError 
 }) => {
-    const [subTab, setSubTab] = useState<'warehouse' | 'delivery' | 'movement'>('warehouse');
-    const [logisticsFilter, setLogisticsFilter] = useState<'ALL' | 'SCHEDULED' | 'OUT_FOR_DELIVERY' | 'DELIVERED' | 'FAILED'>(initialFilter);
-    const [movementFilter, setMovementFilter] = useState<'ALL' | 'IN' | 'OUT' | 'ADJUSTMENT'>('ALL');
+    const [subTab, setSubTab] = useState<'warehouse' | 'delivery' | 'movement' | 'history'>('warehouse');
+    const [logisticsFilter, setLogisticsFilter] = useState<'ALL' | 'PENDING_SCHEDULE' | 'SCHEDULED' | 'OUT_FOR_DELIVERY' | 'DELIVERED' | 'FAILED'>(initialFilter);
+    const [movementFilter, setMovementFilter] = useState<'ALL' | 'IN' | 'OUT'>('ALL');
     const [loading, setLoading] = useState(false);
     
+    const isAdmin = userRole === 'admin';
+
     // States
     const [inventory, setInventory] = useState<InventoryItem[]>([]);
     const [deliveries, setDeliveries] = useState<DeliveryRecord[]>([]);
@@ -43,28 +47,19 @@ export const InventoryDelivery: React.FC<Props> = ({
     // Modal/Action States
     const [isProofModalOpen, setIsProofModalOpen] = useState(false);
     const [isProofViewerOpen, setIsProofViewerOpen] = useState(false);
-    const [isRescheduleModalOpen, setIsRescheduleModalOpen] = useState(false);
+    const [isScheduleModalOpen, setIsScheduleModalOpen] = useState(false);
     const [activeDelivery, setActiveDelivery] = useState<DeliveryRecord | null>(null);
     const [proofImage, setProofImage] = useState<string | null>(null);
     const [outcomeType, setOutcomeType] = useState<'DELIVERED' | 'FAILED'>('DELIVERED');
     const [selectedFailureReason, setSelectedFailureReason] = useState(FAILURE_REASONS[0]);
     const [otherReason, setOtherReason] = useState("");
 
-    // Reschedule States
-    const [newDate, setNewDate] = useState(new Date().toISOString().split('T')[0]);
-    const [newTime, setNewTime] = useState("09:00");
-    const [newDriver, setNewDriver] = useState(DRIVER_LIST[0]);
-
-    // Delivery Form States
-    const [deliveryDate, setDeliveryDate] = useState(new Date().toISOString().split('T')[0]);
-    const [deliveryTime, setDeliveryTime] = useState("09:00");
-    const [route, setRoute] = useState(ROUTE_LIST[0]);
-    const [driver, setDriver] = useState(DRIVER_LIST[0]);
-    const [vehicle, setVehicle] = useState(VEHICLE_LIST[0]);
-    const [customer, setCustomer] = useState(CUSTOMER_LIST[0]);
-    const [customerEmail, setCustomerEmail] = useState("");
-    const [customerPhone, setCustomerPhone] = useState("");
-    const [destination, setDestination] = useState("");
+    // Scheduling States
+    const [scheduleDate, setScheduleDate] = useState(new Date().toISOString().split('T')[0]);
+    const [scheduleTime, setScheduleTime] = useState("09:00");
+    const [scheduleDriver, setScheduleDriver] = useState(DRIVER_LIST[0]);
+    const [scheduleVehicle, setScheduleVehicle] = useState(VEHICLE_LIST[0]);
+    const [scheduleRoute, setScheduleRoute] = useState(ROUTE_LIST[0]);
     
     // Simulation help for Stock Out
     const [dispatchVariety, setDispatchVariety] = useState(MUSHROOM_VARIETIES[0]);
@@ -113,31 +108,29 @@ export const InventoryDelivery: React.FC<Props> = ({
         return () => { unsubInv(); unsubDel(); unsubMov(); };
     }, [villageId]);
 
-    const handleScheduleDelivery = async (e: React.FormEvent) => {
-        e.preventDefault();
+    const handleConfirmSchedule = async () => {
+        if (!activeDelivery) return;
         setLoading(true);
         try {
-            const newDelivery: Omit<DeliveryRecord, 'id'> = {
-                deliveryDate,
-                deliveryTime,
+            await updateDoc(doc(db, "delivery_records", activeDelivery.id), {
                 status: 'SCHEDULED',
-                route,
-                destinationAddress: destination,
-                customerEmail: customerEmail || `${customer.toLowerCase().replace(/\s/g, '')}@example.com`,
-                customerPhone: customerPhone || '012-3456789',
-                zone: route,
-                driverId: driver.id,
-                driverName: driver.name,
-                vehicleId: vehicle.id,
-                vehicleType: vehicle.type,
-                villageId
-            };
-            await addDoc(collection(db, "delivery_records"), newDelivery);
-            setDestination("");
-            setCustomerEmail("");
-            setCustomerPhone("");
-            alert("Delivery scheduled successfully.");
-        } catch (err) { console.error(err); } finally { setLoading(false); }
+                deliveryDate: scheduleDate,
+                deliveryTime: scheduleTime,
+                driverId: scheduleDriver.id,
+                driverName: scheduleDriver.name,
+                vehicleId: scheduleVehicle.id,
+                vehicleType: scheduleVehicle.type,
+                route: scheduleRoute,
+                zone: scheduleRoute,
+                failureReason: "" 
+            });
+            onSuccess(`Delivery scheduled for ${activeDelivery.customerName} on ${scheduleDate}.`);
+            setIsScheduleModalOpen(false);
+            setActiveDelivery(null);
+        } catch (err: any) { 
+            console.error(err);
+            if (onError) onError(err.message || "Failed to schedule delivery.");
+        } finally { setLoading(false); }
     };
 
     const handleStockOut = async (variety: string, grade: string, qty: number, refId: string) => {
@@ -168,8 +161,10 @@ export const InventoryDelivery: React.FC<Props> = ({
                 date: new Date().toISOString(),
                 referenceId: refId,
                 performedBy: userEmail,
-                villageId
-            });
+                villageId,
+                mushroomType: variety,
+                grade: grade
+            } as any);
         } catch (err) { console.error("Stock out failed:", err); }
     };
 
@@ -179,8 +174,11 @@ export const InventoryDelivery: React.FC<Props> = ({
             const qty = parseFloat(dispatchQty) || 20;
             await handleStockOut(dispatchVariety, dispatchGrade, qty, del.id);
             await updateDoc(doc(db, "delivery_records", del.id), { status: 'OUT_FOR_DELIVERY' });
-            alert(`Batch departed. Warehouse stock updated (-OUT: ${qty}kg ${dispatchVariety} Grade ${dispatchGrade}).`);
-        } catch (err) { console.error(err); } finally { setLoading(false); }
+            onSuccess(`Batch DO-${del.id.slice(-6).toUpperCase()} departed. Stock updated.`);
+        } catch (err: any) { 
+            console.error(err);
+            if (onError) onError(err.message || "Failed to log departure.");
+        } finally { setLoading(false); }
     };
 
     const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -194,10 +192,7 @@ export const InventoryDelivery: React.FC<Props> = ({
 
     const handleFinalizeOutcome = async () => {
         if (!activeDelivery) return;
-        
-        // Validation
         if (outcomeType === 'DELIVERED' && !proofImage) return alert("Please upload a photo as proof of delivery.");
-        
         const finalReason = selectedFailureReason === 'Other (please specify)' ? otherReason : selectedFailureReason;
         if (outcomeType === 'FAILED' && !finalReason) return alert("Please specify the reason for the failed delivery attempt.");
         
@@ -209,50 +204,22 @@ export const InventoryDelivery: React.FC<Props> = ({
                 deliveredAt: new Date().toISOString(),
                 failureReason: outcomeType === 'FAILED' ? finalReason : ""
             };
-            
             await updateDoc(doc(db, "delivery_records", activeDelivery.id), updateData);
-            
-            // SIMULATED EMAIL NOTIFICATION
-            const doRef = `DO-${activeDelivery.id.slice(-6).toUpperCase()}`;
-            const emailSubject = outcomeType === 'DELIVERED' ? `Delivery Successful: ${doRef}` : `Delivery Unsuccessful: ${doRef}`;
-            const emailBody = outcomeType === 'DELIVERED' 
-                ? `Dear Customer, your mushroom delivery to ${activeDelivery.destinationAddress} was successful. Thank you.`
-                : `Dear Customer, we attempted to deliver your order but were unsuccessful. Reason: ${finalReason}. We will reach out to reschedule.`;
-            
-            alert(`Status Logged: ${outcomeType}\n\n[SIMULATED EMAIL SENT]\nTo: ${activeDelivery.customerEmail}\nSubject: ${emailSubject}\n\n${emailBody}`);
-            
-            setIsProofModalOpen(false);
-            setProofImage(null);
-            setOtherReason("");
-            setActiveDelivery(null);
-        } catch (err) { console.error(err); } finally { setLoading(false); }
+            onSuccess(`Outcome logged: ${outcomeType} for DO-${activeDelivery.id.slice(-6).toUpperCase()}`);
+            setIsProofModalOpen(false); setProofImage(null); setOtherReason(""); setActiveDelivery(null);
+        } catch (err: any) { 
+            console.error(err);
+            if (onError) onError(err.message || "Failed to log delivery outcome.");
+        } finally { setLoading(false); }
     };
 
     const handleEmailDOToCustomer = (del: DeliveryRecord) => {
         setLoading(true);
         setTimeout(() => {
             const doRef = `DO-${del.id.slice(-6).toUpperCase()}`;
-            alert(`[SIMULATED EMAIL SENT]\nTo: ${del.customerEmail}\nSubject: Delivery Order ${doRef}\n\nDear Customer,\n\nPlease find your Delivery Order attached for your upcoming shipment. \n\nDriver: ${del.driverName}\nDate: ${del.deliveryDate}\n\nThank you for choosing Mushroom Village.`);
+            onSuccess(`[MOCK] Email sent to ${del.customerEmail} for ${doRef}.`);
             setLoading(false);
-        }, 1000);
-    };
-
-    const handleReschedule = async () => {
-        if (!activeDelivery) return;
-        setLoading(true);
-        try {
-            await updateDoc(doc(db, "delivery_records", activeDelivery.id), {
-                status: 'SCHEDULED',
-                deliveryDate: newDate,
-                deliveryTime: newTime,
-                driverId: newDriver.id,
-                driverName: newDriver.name,
-                failureReason: "" // Reset reason
-            });
-            alert(`Rescheduling successful.\n\nOrder #DO-${activeDelivery.id.slice(-6).toUpperCase()} assigned to ${newDriver.name} for ${newDate}.`);
-            setIsRescheduleModalOpen(false);
-            setActiveDelivery(null);
-        } catch (err) { console.error(err); } finally { setLoading(false); }
+        }, 800);
     };
 
     const printDeliveryOrder = (del: DeliveryRecord) => {
@@ -292,6 +259,7 @@ export const InventoryDelivery: React.FC<Props> = ({
                     <div class="info-grid">
                         <div>
                             <div class="label">Delivery To</div>
+                            <div class="value">${del.customerName || 'N/A'}</div>
                             <div class="value">${del.destinationAddress}</div>
                             <div class="label" style="margin-top: 10px;">Contact Information</div>
                             <div class="value">${del.customerEmail}</div>
@@ -299,9 +267,9 @@ export const InventoryDelivery: React.FC<Props> = ({
                         </div>
                         <div>
                             <div class="label">Dispatch Details</div>
-                            <div class="value">Date: ${del.deliveryDate}</div>
-                            <div class="value">Time: ${del.deliveryTime}</div>
-                            <div class="value">Route: ${del.route}</div>
+                            <div class="value">Date: ${del.deliveryDate || 'TBD'}</div>
+                            <div class="value">Time: ${del.deliveryTime || 'TBD'}</div>
+                            <div class="value">Route: ${del.route || 'TBD'}</div>
                         </div>
                     </div>
 
@@ -309,23 +277,19 @@ export const InventoryDelivery: React.FC<Props> = ({
                         <thead>
                             <tr>
                                 <th>Item Description</th>
-                                <th>Grade</th>
-                                <th>Qty (kg)</th>
-                                <th>Units</th>
+                                <th>Quantity / Weight</th>
                             </tr>
                         </thead>
                         <tbody>
                             <tr>
-                                <td>Fresh Organic Mushrooms (Assorted Variety)</td>
-                                <td>Mixed</td>
-                                <td>${dispatchQty}</td>
-                                <td>${Math.round(parseFloat(dispatchQty)/0.2)} Packs</td>
+                                <td>${del.orderSummary || 'Fresh Organic Mushrooms (Assorted Variety)'}</td>
+                                <td>${dispatchQty} kg (Approx)</td>
                             </tr>
                         </tbody>
                     </table>
 
                     <div class="footer">
-                        <div class="sig-box">Issued By (Driver: ${del.driverName})</div>
+                        <div class="sig-box">Issued By (Driver: ${del.driverName || 'Unassigned'})</div>
                         <div class="sig-box">Received By (Customer)</div>
                     </div>
                     
@@ -352,10 +316,173 @@ export const InventoryDelivery: React.FC<Props> = ({
         return deliveries.filter(d => d.status === logisticsFilter);
     }, [deliveries, logisticsFilter]);
 
+    const unscheduledItems = useMemo(() => deliveries.filter(d => d.status === 'PENDING_SCHEDULE'), [deliveries]);
+
     const filteredMovements = useMemo(() => {
         if (movementFilter === 'ALL') return movements;
         return movements.filter(m => m.type === movementFilter);
     }, [movements, movementFilter]);
+
+    const handleExportMovementsCSV = () => {
+        if (!isAdmin) return;
+        const headers = ["Timestamp", "Action", "Reference ID", "Details", "Net Weight (kg)", "Performed By"];
+        const rows = filteredMovements.sort((a, b) => b.date.localeCompare(a.date)).map(mov => [
+            new Date(mov.date).toLocaleString(),
+            `Stock ${mov.type}`,
+            mov.referenceId,
+            (mov as any).mushroomType ? `${(mov as any).mushroomType} Grade ${(mov as any).grade}` : (mov as any).details || `Batch #${mov.batchId}`,
+            `${mov.type === 'IN' ? '+' : '-'}${mov.quantity.toFixed(2)}`,
+            mov.performedBy.split('@')[0]
+        ]);
+        const csvContent = "data:text/csv;charset=utf-8," + [headers.join(','), ...rows.map(e => e.join(','))].join('\n');
+        const encodedUri = encodeURI(csvContent);
+        const link = document.createElement("a");
+        link.setAttribute("href", encodedUri);
+        link.setAttribute("download", `stock_movements_${villageId.replace(/\s/g, '_')}_${new Date().toISOString().split('T')[0]}.csv`);
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+    };
+
+    const handlePrintMovementsPDF = () => {
+        if (!isAdmin) return;
+        const printWindow = window.open('', '_blank');
+        if (!printWindow) return;
+        
+        let rowsHtml = filteredMovements.sort((a, b) => b.date.localeCompare(a.date)).map(mov => `
+            <tr>
+                <td style="padding: 10px; border-bottom: 1px solid #eee; font-family: monospace; font-size: 11px;">${new Date(mov.date).toLocaleString()}</td>
+                <td style="padding: 10px; border-bottom: 1px solid #eee;"><span style="font-weight: bold; color: ${mov.type === 'IN' ? '#059669' : mov.type === 'OUT' ? '#dc2626' : '#d97706'}">Stock ${mov.type}</span></td>
+                <td style="padding: 10px; border-bottom: 1px solid #eee;">
+                    <div style="font-weight: bold;">${mov.referenceId}</div>
+                    <div style="font-size: 10px; color: #666; text-transform: uppercase;">
+                        ${(mov as any).mushroomType ? `${(mov as any).mushroomType} Grade ${(mov as any).grade}` : (mov as any).details || `Batch #${mov.batchId}`}
+                    </div>
+                </td>
+                <td style="padding: 10px; border-bottom: 1px solid #eee; text-align: right; font-weight: bold;">${mov.type === 'IN' ? '+' : '-'}${mov.quantity.toFixed(2)} kg</td>
+                <td style="padding: 10px; border-bottom: 1px solid #eee; text-align: right; font-size: 11px;">${mov.performedBy.split('@')[0]}</td>
+            </tr>
+        `).join('');
+
+        printWindow.document.write(`
+            <html>
+                <head>
+                    <title>Stock Movement Report - ${villageId}</title>
+                    <style>
+                        body { font-family: 'Inter', 'Helvetica', sans-serif; padding: 40px; color: #333; }
+                        .header { border-bottom: 3px solid #1e40af; padding-bottom: 20px; margin-bottom: 30px; }
+                        .title { font-size: 24px; font-weight: 900; text-transform: uppercase; color: #1e40af; }
+                        table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+                        th { background: #f8fafc; text-align: left; padding: 12px; font-size: 11px; text-transform: uppercase; color: #64748b; border-bottom: 2px solid #e2e8f0; }
+                    </style>
+                </head>
+                <body>
+                    <div class="header">
+                        <div class="title">Stock Movement Ledger</div>
+                        <div style="font-size: 12px; color: #64748b; font-weight: bold; margin-top: 5px;">${villageId} &bull; Generated: ${new Date().toLocaleString()}</div>
+                    </div>
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Timestamp</th>
+                                <th>Action</th>
+                                <th>Reference & Details</th>
+                                <th style="text-align: right;">Net Mass</th>
+                                <th style="text-align: right;">User</th>
+                            </tr>
+                        </thead>
+                        <tbody>${rowsHtml}</tbody>
+                    </table>
+                    <script>window.onload=()=>{window.print();window.close();}</script>
+                </body>
+            </html>
+        `);
+        printWindow.document.close();
+    };
+
+    const handleExportDeliveryHistoryCSV = () => {
+        if (!isAdmin) return;
+        const headers = ["DO ID", "Date", "Customer", "Address", "Driver", "Vehicle", "Status", "Reason", "Delivered At"];
+        const rows = deliveries.sort((a, b) => (b.deliveryDate || '').localeCompare(a.deliveryDate || '')).map(del => [
+            `DO-${del.id.slice(-6).toUpperCase()}`,
+            del.deliveryDate,
+            del.customerName || 'N/A',
+            del.destinationAddress.replace(/,/g, ';'),
+            del.driverName,
+            del.vehicleType,
+            del.status,
+            (del.failureReason || '').replace(/,/g, ';'),
+            del.deliveredAt || ''
+        ]);
+        const csvContent = "data:text/csv;charset=utf-8," + [headers.join(','), ...rows.map(e => e.join(','))].join('\n');
+        const encodedUri = encodeURI(csvContent);
+        const link = document.createElement("a");
+        link.setAttribute("href", encodedUri);
+        link.setAttribute("download", `delivery_history_${villageId.replace(/\s/g, '_')}_${new Date().toISOString().split('T')[0]}.csv`);
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+    };
+
+    const handlePrintDeliveryHistoryPDF = () => {
+        if (!isAdmin) return;
+        const printWindow = window.open('', '_blank');
+        if (!printWindow) return;
+        
+        let rowsHtml = deliveries.sort((a, b) => (b.deliveryDate || '').localeCompare(a.deliveryDate || '')).map(del => `
+            <tr>
+                <td style="padding: 10px; border-bottom: 1px solid #eee; font-family: monospace;">DO-${del.id.slice(-6).toUpperCase()}</td>
+                <td style="padding: 10px; border-bottom: 1px solid #eee;">${del.deliveryDate || 'TBD'}</td>
+                <td style="padding: 10px; border-bottom: 1px solid #eee;">
+                    <div style="font-weight: bold;">${del.customerName || 'N/A'}</div>
+                    <div style="font-size: 9px; color: #666;">${del.destinationAddress}</div>
+                </td>
+                <td style="padding: 10px; border-bottom: 1px solid #eee;">${del.driverName}</td>
+                <td style="padding: 10px; border-bottom: 1px solid #eee; text-align: center;">
+                    <span style="padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: bold; background: ${del.status === 'DELIVERED' ? '#dcfce7' : del.status === 'FAILED' ? '#fee2e2' : '#fef9c3'}; color: ${del.status === 'DELIVERED' ? '#166534' : del.status === 'FAILED' ? '#991b1b' : '#854d0e'};">
+                        ${del.status}
+                    </span>
+                </td>
+                <td style="padding: 10px; border-bottom: 1px solid #eee; font-size: 10px;">${del.deliveredAt ? new Date(del.deliveredAt).toLocaleTimeString() : '-'}</td>
+            </tr>
+        `).join('');
+
+        printWindow.document.write(`
+            <html>
+                <head>
+                    <title>Delivery Fulfillment Report - ${villageId}</title>
+                    <style>
+                        body { font-family: 'Inter', sans-serif; padding: 40px; color: #333; }
+                        .header { border-bottom: 3px solid #1e40af; padding-bottom: 20px; margin-bottom: 30px; }
+                        .title { font-size: 24px; font-weight: 900; text-transform: uppercase; color: #1e40af; }
+                        table { width: 100%; border-collapse: collapse; margin-top: 20px; font-size: 12px; }
+                        th { background: #f8fafc; text-align: left; padding: 12px; font-size: 11px; text-transform: uppercase; color: #64748b; border-bottom: 2px solid #e2e8f0; }
+                    </style>
+                </head>
+                <body>
+                    <div class="header">
+                        <div class="title">Logistics Fulfillment Registry</div>
+                        <div style="font-size: 12px; color: #64748b; font-weight: bold; margin-top: 5px;">${villageId} Hub &bull; Audited: ${new Date().toLocaleString()}</div>
+                    </div>
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>DO #</th>
+                                <th>Planned Date</th>
+                                <th>Consignee</th>
+                                <th>Courier</th>
+                                <th style="text-align: center;">Result</th>
+                                <th>Completion</th>
+                            </tr>
+                        </thead>
+                        <tbody>${rowsHtml}</tbody>
+                    </table>
+                    <script>window.onload=()=>{window.print();window.close();}</script>
+                </body>
+            </html>
+        `);
+        printWindow.document.close();
+    };
 
     return (
         <div className="space-y-6 animate-fade-in-up">
@@ -363,8 +490,10 @@ export const InventoryDelivery: React.FC<Props> = ({
                 {[
                     { id: 'warehouse', label: 'Warehouse Stock' },
                     { id: 'delivery', label: 'Logistics & Dispatch' },
+                    { id: 'history', label: 'Delivery History' },
                     { id: 'movement', label: 'Stock Movements' }
-                ].map(tab => (
+                ].filter(tab => (tab.id !== 'history' && tab.id !== 'movement') || isAdmin)
+                .map(tab => (
                     <button 
                         key={tab.id} 
                         onClick={() => setSubTab(tab.id as any)}
@@ -377,14 +506,17 @@ export const InventoryDelivery: React.FC<Props> = ({
 
             {subTab === 'warehouse' && (
                 <div className="space-y-6">
-                    <div className="grid md:grid-cols-4 gap-4">
-                        <div className="p-4 bg-white rounded-xl border shadow-sm">
-                            <div className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Total Stock (kg)</div>
-                            <div className="text-2xl font-black text-gray-800">{inventory.reduce((a,b)=>a+b.currentStock,0).toFixed(1)}</div>
-                        </div>
-                        <div className="p-4 bg-blue-50 rounded-xl border border-blue-100">
-                            <div className="text-[10px] font-bold text-blue-400 uppercase tracking-widest mb-1">Total Units (200g)</div>
-                            <div className="text-2xl font-black text-blue-600">{Math.floor(inventory.reduce((a,b)=>a+b.currentStock,0)/0.2)}</div>
+                    <div className="flex justify-between items-center bg-white p-4 rounded-xl border border-gray-200 shadow-sm">
+                        <div className="flex gap-4">
+                            <div className="p-2">
+                                <div className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Total Stock (kg)</div>
+                                <div className="text-2xl font-black text-gray-800">{inventory.reduce((a,b)=>a+b.currentStock,0).toFixed(1)}</div>
+                            </div>
+                            <div className="w-px bg-gray-100 h-10 self-center"></div>
+                            <div className="p-2">
+                                <div className="text-[10px] font-bold text-blue-400 uppercase tracking-widest mb-1">TOTAL UNITS (200G PER PACK)</div>
+                                <div className="text-2xl font-black text-blue-600">{Math.floor(inventory.reduce((a,b)=>a+b.currentStock,0)/0.2)}</div>
+                            </div>
                         </div>
                     </div>
 
@@ -393,27 +525,28 @@ export const InventoryDelivery: React.FC<Props> = ({
                             <thead className="bg-gray-50 text-[10px] font-bold text-gray-400 uppercase tracking-widest">
                                 <tr>
                                     <th className="px-6 py-4">Mushroom Variety</th>
-                                    <th className="px-6 py-4 text-center">Grade A (kg)</th>
-                                    <th className="px-6 py-4 text-center">Grade B (kg)</th>
-                                    <th className="px-6 py-4 text-center">Grade C (kg)</th>
-                                    <th className="px-6 py-4 text-right">Total Variety Stock</th>
+                                    <th className="px-6 py-4 text-center">GRADE A (PER PACK)</th>
+                                    <th className="px-6 py-4 text-center">GRADE B (PER PACK)</th>
+                                    <th className="px-6 py-4 text-center">GRADE C (PER PACK)</th>
+                                    <th className="px-6 py-4 text-right">TOTAL STOCK</th>
                                 </tr>
                             </thead>
                             <tbody className="divide-y divide-gray-100">
                                 {MUSHROOM_VARIETIES.map(variety => {
                                     const grades = varietyStock[variety] || { A: 0, B: 0, C: 0 };
+                                    const totalVarietyPacks = Math.floor((grades.A + grades.B + grades.C) / 0.2);
                                     return (
                                         <tr key={variety} className="hover:bg-gray-50 transition-colors">
                                             <td className="px-6 py-4 font-bold text-gray-800 flex items-center gap-2">
                                                 <div className="w-2 h-2 rounded-full bg-blue-500"></div>
                                                 {variety}
                                             </td>
-                                            <td className="px-6 py-4 text-center font-mono font-bold text-green-600">{grades.A.toFixed(1)}</td>
-                                            <td className="px-6 py-4 text-center font-mono font-bold text-blue-600">{grades.B.toFixed(1)}</td>
-                                            <td className="px-6 py-4 text-center font-mono font-bold text-orange-600">{grades.C.toFixed(1)}</td>
+                                            <td className="px-6 py-4 text-center font-mono font-bold text-green-600">{Math.floor(grades.A / 0.2)}</td>
+                                            <td className="px-6 py-4 text-center font-mono font-bold text-blue-600">{Math.floor(grades.B / 0.2)}</td>
+                                            <td className="px-6 py-4 text-center font-mono font-bold text-orange-600">{Math.floor(grades.C / 0.2)}</td>
                                             <td className="px-6 py-4 text-right">
                                                 <span className="bg-slate-100 px-3 py-1 rounded-full font-black text-slate-700 text-xs">
-                                                    {(grades.A + grades.B + grades.C).toFixed(1)} kg
+                                                    {totalVarietyPacks} Packs
                                                 </span>
                                             </td>
                                         </tr>
@@ -426,104 +559,174 @@ export const InventoryDelivery: React.FC<Props> = ({
             )}
 
             {subTab === 'delivery' && (
-                <div className="grid md:grid-cols-4 gap-8">
-                    <div className="col-span-1 space-y-4">
-                        <form onSubmit={handleScheduleDelivery} className="bg-white p-6 rounded-2xl border shadow-sm space-y-4">
-                            <h3 className="text-xs font-black text-gray-800 uppercase tracking-widest border-b pb-3 mb-4">New Dispatch</h3>
-                            <div className="grid grid-cols-2 gap-3">
-                                <div><label className="block text-[8px] font-bold text-gray-400 uppercase mb-1">Date</label><input type="date" value={deliveryDate} onChange={e=>setDeliveryDate(e.target.value)} className="w-full p-2 border rounded-lg text-xs" required /></div>
-                                <div><label className="block text-[8px] font-bold text-gray-400 uppercase mb-1">Time</label><input type="time" value={deliveryTime} onChange={e=>setDeliveryTime(e.target.value)} className="w-full p-2 border rounded-lg text-xs" required /></div>
+                <div className="flex flex-col gap-8">
+                    
+                    {/* Unscheduled Orders Tray */}
+                    {unscheduledItems.length > 0 && (
+                        <div className="bg-orange-50 border-2 border-orange-100 p-6 rounded-[2.5rem] shadow-sm animate-fade-in-down">
+                            <div className="flex justify-between items-center mb-6 px-2">
+                                <div>
+                                    <h3 className="text-sm font-black text-orange-900 uppercase tracking-[0.2em] flex items-center gap-2">
+                                        <span className="w-2.5 h-2.5 bg-orange-500 rounded-full animate-pulse"></span>
+                                        Unscheduled Orders Tray
+                                    </h3>
+                                    <p className="text-[10px] text-orange-700 font-bold uppercase mt-1">Pending driver assignment & delivery window</p>
+                                </div>
+                                <span className="bg-orange-200 text-orange-900 px-4 py-1.5 rounded-full text-xs font-black shadow-sm">
+                                    {unscheduledItems.length} TASK(S)
+                                </span>
                             </div>
-                            <div><label className="block text-[8px] font-bold text-gray-400 uppercase mb-1">Customer / Client</label><select value={customer} onChange={e=>setCustomer(e.target.value)} className="w-full p-2 border rounded-lg text-xs bg-white">{CUSTOMER_LIST.map(r=><option key={r} value={r}>{r}</option>)}</select></div>
-                            <div><label className="block text-[8px] font-bold text-gray-400 uppercase mb-1">Contact Email</label><input type="email" value={customerEmail} onChange={e=>setCustomerEmail(e.target.value)} className="w-full p-2 border rounded-lg text-xs" placeholder="client@email.com" /></div>
-                            <div><label className="block text-[8px] font-bold text-gray-400 uppercase mb-1">Contact Phone</label><input type="tel" value={customerPhone} onChange={e=>setCustomerPhone(e.target.value)} className="w-full p-2 border rounded-lg text-xs" placeholder="012-3456789" /></div>
-                            <div className="grid grid-cols-2 gap-3">
-                                <div><label className="block text-[8px] font-bold text-gray-400 uppercase mb-1">Route</label><select value={route} onChange={e=>setRoute(e.target.value)} className="w-full p-2 border rounded-lg text-xs bg-white">{ROUTE_LIST.map(r=><option key={r} value={r}>{r}</option>)}</select></div>
-                                <div><label className="block text-[8px] font-bold text-gray-400 uppercase mb-1">Driver</label><select value={driver.id} onChange={e=>{const d=DRIVER_LIST.find(x=>x.id===e.target.value); if(d) setDriver(d);}} className="w-full p-2 border rounded-lg text-xs bg-white">{DRIVER_LIST.map(d=><option key={d.id} value={d.id}>{d.name}</option>)}</select></div>
+                            
+                            <div className="flex gap-4 overflow-x-auto pb-4 scrollbar-thin scrollbar-thumb-orange-200">
+                                {unscheduledItems.map(del => (
+                                    <div key={del.id} className="min-w-[320px] bg-white p-6 rounded-3xl border border-orange-200 shadow-lg hover:shadow-xl transition-all group relative overflow-hidden">
+                                        <div className="absolute top-0 right-0 p-3 opacity-5 pointer-events-none group-hover:opacity-10 transition-opacity">
+                                            <svg className="w-24 h-24 text-orange-600" fill="currentColor" viewBox="0 0 24 24"><path d="M19 7h-8v6h8V7zm2-4H3c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h18c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H3V5h18v14z"/></svg>
+                                        </div>
+                                        <div className="flex justify-between items-start mb-4">
+                                            <div className="text-[10px] font-mono font-black text-orange-400 uppercase">#DO-{del.id.slice(-6).toUpperCase()}</div>
+                                            <button 
+                                                onClick={() => { setActiveDelivery(del); setIsScheduleModalOpen(true); }}
+                                                className="bg-orange-600 text-white text-[10px] font-black px-4 py-1.5 rounded-xl uppercase hover:bg-orange-700 shadow-md transform hover:-translate-y-0.5 active:scale-95 transition-all"
+                                            >
+                                                Assign & Schedule
+                                            </button>
+                                        </div>
+                                        <h4 className="text-base font-black text-slate-900 mb-1 truncate">{del.customerName}</h4>
+                                        <p className="text-[11px] text-slate-500 font-bold uppercase leading-relaxed line-clamp-2 min-h-[32px] mb-4 italic">"{del.orderSummary}"</p>
+                                        <div className="flex items-center gap-3 pt-4 border-t border-slate-50">
+                                            <div className="flex-1">
+                                                <div className="text-[9px] font-black text-slate-400 uppercase mb-0.5">Sale Reference</div>
+                                                <div className="text-xs font-black text-slate-700">{del.saleId}</div>
+                                            </div>
+                                            <button 
+                                                onClick={() => printDeliveryOrder(del)}
+                                                className="p-2.5 bg-slate-50 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-2xl transition-all"
+                                                title="Preview Order"
+                                            >
+                                                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z"/></svg>
+                                            </button>
+                                        </div>
+                                    </div>
+                                ))}
                             </div>
-                            <div><label className="block text-[8px] font-bold text-gray-400 uppercase mb-1">Address</label><input type="text" value={destination} onChange={e=>setDestination(e.target.value)} className="w-full p-2 border rounded-lg text-xs" placeholder="Full address" required /></div>
-                            <button type="submit" disabled={loading} className="w-full py-2.5 bg-gray-900 text-white rounded-xl font-bold uppercase text-[10px] hover:bg-black transition-all shadow-lg">Schedule</button>
-                        </form>
-                    </div>
+                        </div>
+                    )}
 
-                    <div className="col-span-3 space-y-4">
-                        <div className="flex bg-gray-100 p-1 rounded-xl w-fit">
-                            {[
-                                { id: 'ALL', label: 'All Status' },
-                                { id: 'SCHEDULED', label: 'Scheduled' },
-                                { id: 'OUT_FOR_DELIVERY', label: 'In Transit' },
-                                { id: 'DELIVERED', label: 'Delivered' },
-                                { id: 'FAILED', label: 'Unsuccessful' }
-                            ].map(filter => (
-                                <button key={filter.id} onClick={() => setLogisticsFilter(filter.id as any)} className={`px-4 py-2 rounded-lg text-[10px] font-black uppercase transition-all whitespace-nowrap ${logisticsFilter === filter.id ? 'bg-white text-blue-600 shadow-md' : 'text-gray-400 hover:text-gray-600'}`}>{filter.label}</button>
-                            ))}
+                    <div className="space-y-4">
+                        <div className="flex justify-between items-center bg-white/50 p-2 rounded-2xl border border-white shadow-sm flex-wrap gap-4">
+                            <div className="flex gap-1 flex-wrap">
+                                {[
+                                    { id: 'ALL', label: 'All Logs' },
+                                    { id: 'PENDING_SCHEDULE', label: 'Unscheduled' },
+                                    { id: 'SCHEDULED', label: 'Scheduled' },
+                                    { id: 'OUT_FOR_DELIVERY', label: 'In Transit' },
+                                    { id: 'DELIVERED', label: 'Completed' },
+                                    { id: 'FAILED', label: 'Reschedule' }
+                                ].map(filter => (
+                                    <button 
+                                        key={filter.id} 
+                                        onClick={() => setLogisticsFilter(filter.id as any)} 
+                                        className={`px-4 py-2.5 rounded-xl text-[10px] font-black uppercase transition-all whitespace-nowrap ${logisticsFilter === filter.id ? 'bg-white text-blue-600 shadow-md ring-1 ring-blue-100' : 'text-gray-400 hover:text-gray-600'}`}
+                                    >
+                                        {filter.label}
+                                    </button>
+                                ))}
+                            </div>
+                            {isAdmin && (
+                                <div className="flex gap-2">
+                                    <button onClick={handleExportDeliveryHistoryCSV} className="px-4 py-2 bg-white border border-slate-200 rounded-xl text-[10px] font-black uppercase hover:bg-slate-50 transition-all flex items-center gap-2 shadow-sm">
+                                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
+                                        Export Excel
+                                    </button>
+                                    <button onClick={handlePrintDeliveryHistoryPDF} className="px-4 py-2 bg-indigo-600 text-white rounded-xl text-[10px] font-black uppercase hover:bg-indigo-700 transition-all flex items-center gap-2 shadow-lg">
+                                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z" /></svg>
+                                        Print Summary
+                                    </button>
+                                </div>
+                            )}
                         </div>
 
-                        <div className="bg-white rounded-xl border border-gray-100 overflow-hidden shadow-sm">
+                        <div className="bg-white rounded-[2.5rem] border border-gray-100 overflow-hidden shadow-sm">
                             <table className="min-w-full divide-y divide-gray-200 text-sm">
                                 <thead className="bg-gray-50 text-[10px] font-bold text-gray-400 uppercase tracking-widest">
                                     <tr>
-                                        <th className="px-6 py-4">Status & DO</th>
-                                        <th className="px-6 py-4">Client Contact</th>
-                                        <th className="px-6 py-4">Driver</th>
-                                        <th className="px-6 py-4">Schedule</th>
-                                        <th className="px-6 py-4 text-right">Actions</th>
+                                        <th className="px-8 py-6">Status & Identifier</th>
+                                        <th className="px-8 py-6">Consignee & Order</th>
+                                        <th className="px-8 py-6 text-center">Schedule</th>
+                                        <th className="px-8 py-6">Personnel</th>
+                                        <th className="px-8 py-6 text-right">Actions</th>
                                     </tr>
                                 </thead>
                                 <tbody className="divide-y divide-gray-100">
                                     {filteredDeliveries.map(del => (
-                                        <tr key={del.id} className="hover:bg-gray-50">
-                                            <td className="px-6 py-4">
-                                                <div className="flex flex-col gap-1">
-                                                    <span className={`w-fit px-2 py-0.5 rounded-full text-[8px] font-black uppercase ${
-                                                        del.status === 'DELIVERED' ? 'bg-green-100 text-green-700' : 
-                                                        del.status === 'OUT_FOR_DELIVERY' ? 'bg-blue-100 text-blue-700' : 
-                                                        del.status === 'FAILED' ? 'bg-red-100 text-red-700' : 'bg-yellow-100 text-yellow-700'
+                                        <tr key={del.id} className="hover:bg-slate-50/50 transition-colors">
+                                            <td className="px-8 py-6">
+                                                <div className="flex flex-col gap-1.5">
+                                                    <span className={`w-fit px-3 py-1 rounded-full text-[9px] font-black uppercase border ${
+                                                        del.status === 'DELIVERED' ? 'bg-green-50 text-green-700 border-green-100' : 
+                                                        del.status === 'OUT_FOR_DELIVERY' ? 'bg-blue-50 text-blue-700 border-blue-100' : 
+                                                        del.status === 'FAILED' ? 'bg-red-50 text-red-700 border-red-100' : 
+                                                        del.status === 'PENDING_SCHEDULE' ? 'bg-orange-50 text-orange-700 border-orange-100 animate-pulse' :
+                                                        'bg-gray-50 text-gray-700 border-gray-100'
                                                     }`}>
                                                         {del.status.replace(/_/g, ' ')}
                                                     </span>
-                                                    <div className="text-[10px] font-mono font-bold text-gray-400 uppercase">#DO-{del.id.slice(-6).toUpperCase()}</div>
+                                                    <div className="text-[11px] font-mono font-black text-slate-300 uppercase tracking-tighter">#DO-{del.id.slice(-6).toUpperCase()}</div>
                                                 </div>
                                             </td>
-                                            <td className="px-6 py-4">
-                                                <div className="font-bold text-gray-700 truncate max-w-[120px]">{del.destinationAddress}</div>
-                                                <div className="text-[10px] text-blue-500 italic font-medium">{del.customerPhone}</div>
+                                            <td className="px-8 py-6">
+                                                <div className="font-black text-slate-900 truncate max-w-[200px] text-sm">
+                                                    {del.customerName || del.destinationAddress}
+                                                </div>
+                                                {del.orderSummary && (
+                                                    <div className="text-[10px] text-slate-400 font-bold truncate max-w-[200px] uppercase mt-0.5">{del.orderSummary}</div>
+                                                )}
+                                                <div className="text-[10px] text-indigo-500 italic font-bold mt-1">{del.customerPhone}</div>
                                             </td>
-                                            <td className="px-6 py-4">
-                                                <div className="font-bold text-gray-700 text-xs">{del.driverName}</div>
-                                                <div className="text-[10px] text-gray-400 font-bold uppercase">{del.vehicleType}</div>
+                                            <td className="px-8 py-6 text-center">
+                                                {del.deliveryDate ? (
+                                                    <>
+                                                        <div className="text-sm font-black text-slate-700">{new Date(del.deliveryDate).toLocaleDateString()}</div>
+                                                        <div className="text-[10px] text-slate-400 font-black tracking-widest">{del.deliveryTime}</div>
+                                                    </>
+                                                ) : <span className="text-[10px] font-black text-slate-300 italic">WAITING SCHEDULE</span>}
                                             </td>
-                                            <td className="px-6 py-4">
-                                                <div className="text-xs font-bold text-gray-600">{new Date(del.deliveryDate).toLocaleDateString()}</div>
-                                                <div className="text-[10px] text-gray-400 font-bold">{del.deliveryTime}</div>
+                                            <td className="px-8 py-6">
+                                                <div className="font-black text-slate-700 text-xs">{del.driverName}</div>
+                                                <div className="text-[10px] text-slate-400 font-bold uppercase">{del.vehicleType}</div>
                                             </td>
-                                            <td className="px-6 py-4 text-right">
-                                                <div className="flex justify-end items-center gap-2">
-                                                    <button title="Print Delivery Order" onClick={() => printDeliveryOrder(del)} className="p-1.5 bg-gray-50 rounded text-gray-500 hover:bg-gray-200 transition-colors">
-                                                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z"/></svg>
-                                                    </button>
-                                                    <button title="Email DO to Customer" onClick={() => handleEmailDOToCustomer(del)} className="p-1.5 bg-gray-50 rounded text-gray-500 hover:bg-gray-200 transition-colors">
-                                                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>
+                                            <td className="px-8 py-6 text-right">
+                                                <div className="flex justify-end items-center gap-3">
+                                                    <button title="Print Order" onClick={() => printDeliveryOrder(del)} className="p-2.5 bg-slate-50 rounded-2xl text-slate-400 hover:text-blue-600 hover:bg-blue-50 transition-all">
+                                                        <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z"/></svg>
                                                     </button>
                                                     
+                                                    {del.status === 'PENDING_SCHEDULE' && (
+                                                        <button onClick={() => { setActiveDelivery(del); setIsScheduleModalOpen(true); }} className="px-4 py-2 bg-orange-600 text-white text-[10px] font-black rounded-xl uppercase hover:bg-orange-700 shadow-md">Schedule</button>
+                                                    )}
+
                                                     {del.status === 'SCHEDULED' && (
-                                                        <button onClick={() => handleDepart(del)} className="px-2 py-1 bg-blue-600 text-white text-[8px] font-black rounded uppercase hover:bg-blue-700">Depart</button>
+                                                        <>
+                                                            <button onClick={() => { setActiveDelivery(del); setIsScheduleModalOpen(true); }} className="px-3 py-1.5 bg-slate-100 text-slate-600 text-[10px] font-black rounded-xl uppercase hover:bg-slate-200">Edit</button>
+                                                            <button onClick={() => handleDepart(del)} className="px-4 py-2 bg-blue-600 text-white text-[10px] font-black rounded-xl uppercase hover:bg-blue-700 shadow-md">Depart</button>
+                                                        </>
                                                     )}
                                                     
                                                     {del.status === 'OUT_FOR_DELIVERY' && (
-                                                        <div className="flex gap-1">
-                                                            <button onClick={() => { setActiveDelivery(del); setOutcomeType('DELIVERED'); setIsProofModalOpen(true); }} className="px-2 py-1 bg-green-600 text-white text-[8px] font-black rounded uppercase">Deliver</button>
-                                                            <button onClick={() => { setActiveDelivery(del); setOutcomeType('FAILED'); setIsProofModalOpen(true); }} className="px-2 py-1 bg-red-600 text-white text-[8px] font-black rounded uppercase">Failed</button>
+                                                        <div className="flex gap-2">
+                                                            <button onClick={() => { setActiveDelivery(del); setOutcomeType('DELIVERED'); setIsProofModalOpen(true); }} className="px-3 py-1.5 bg-emerald-600 text-white text-[10px] font-black rounded-xl uppercase shadow-md">Deliver</button>
+                                                            <button onClick={() => { setActiveDelivery(del); setOutcomeType('FAILED'); setIsProofModalOpen(true); }} className="px-3 py-1.5 bg-rose-600 text-white text-[10px] font-black rounded-xl uppercase shadow-md">Failed</button>
                                                         </div>
                                                     )}
                                                     
                                                     {del.status === 'FAILED' && (
-                                                        <button onClick={() => { setActiveDelivery(del); setIsRescheduleModalOpen(true); }} className="px-2 py-1 bg-blue-500 text-white text-[8px] font-black rounded uppercase">Reschedule</button>
+                                                        <button onClick={() => { setActiveDelivery(del); setIsScheduleModalOpen(true); }} className="px-4 py-2 bg-blue-500 text-white text-[10px] font-black rounded-xl uppercase shadow-md">Reschedule</button>
                                                     )}
 
                                                     {(del.status === 'DELIVERED' || del.status === 'FAILED') && (
-                                                        <button title="View Details" onClick={() => { setActiveDelivery(del); setProofImage(del.evidenceImage || null); setIsProofViewerOpen(true); }} className={`p-1.5 rounded transition-colors ${del.status === 'DELIVERED' ? 'bg-green-50 text-green-600 hover:bg-green-100 border-green-200' : 'bg-red-50 text-red-600 hover:bg-red-100 border-red-200'} border`}>
-                                                            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" /></svg>
+                                                        <button title="View Outcome" onClick={() => { setActiveDelivery(del); setProofImage(del.evidenceImage || null); setIsProofViewerOpen(true); }} className={`p-2.5 rounded-2xl transition-all border ${del.status === 'DELIVERED' ? 'bg-emerald-50' : 'bg-rose-50'}`}>
+                                                            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268-2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542 7-4.477 0-8.268-2.943-9.542-7z" /></svg>
                                                         </button>
                                                     )}
                                                 </div>
@@ -531,7 +734,7 @@ export const InventoryDelivery: React.FC<Props> = ({
                                         </tr>
                                     ))}
                                     {filteredDeliveries.length === 0 && (
-                                        <tr><td colSpan={5} className="px-6 py-10 text-center text-gray-300 italic">No matching delivery logs.</td></tr>
+                                        <tr><td colSpan={5} className="px-8 py-20 text-center text-slate-300 italic font-medium">No activity records found for this segment.</td></tr>
                                     )}
                                 </tbody>
                             </table>
@@ -540,60 +743,72 @@ export const InventoryDelivery: React.FC<Props> = ({
                 </div>
             )}
 
-            {subTab === 'movement' && (
-                <div className="space-y-4">
-                    <div className="flex bg-gray-100 p-1 rounded-xl w-fit">
-                        {[
-                            { id: 'ALL', label: 'All Transactions' },
-                            { id: 'IN', label: 'Stock In' },
-                            { id: 'OUT', label: 'Stock Out' },
-                            { id: 'ADJUSTMENT', label: 'Adjustments' }
-                        ].map(f => (
-                            <button 
-                                key={f.id} 
-                                onClick={() => setMovementFilter(f.id as any)} 
-                                className={`px-4 py-2 rounded-lg text-[10px] font-black uppercase transition-all whitespace-nowrap ${movementFilter === f.id ? 'bg-white text-blue-600 shadow-md' : 'text-gray-400 hover:text-gray-600'}`}
-                            >
-                                {f.label}
+            {(subTab === 'history' && isAdmin) && (
+                <div className="space-y-4 animate-fade-in">
+                    <div className="flex justify-between items-center bg-white p-4 rounded-xl border border-gray-200 shadow-sm">
+                        <div>
+                            <h3 className="text-sm font-black text-slate-700 uppercase tracking-widest">Delivery Fulfillment History</h3>
+                            <p className="text-[10px] text-slate-400 font-bold uppercase mt-1">Audit log of all completed and attempted dispatches</p>
+                        </div>
+                        <div className="flex gap-2">
+                            <button onClick={handleExportDeliveryHistoryCSV} className="px-4 py-2 bg-white border border-slate-200 rounded-xl text-[10px] font-black uppercase hover:bg-slate-50 transition-all flex items-center gap-2">
+                                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
+                                Export CSV
                             </button>
-                        ))}
+                            <button onClick={handlePrintDeliveryHistoryPDF} className="px-4 py-2 bg-indigo-600 text-white rounded-xl text-[10px] font-black uppercase hover:bg-indigo-700 transition-all flex items-center gap-2 shadow-lg">
+                                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z" /></svg>
+                                Print Summary
+                            </button>
+                        </div>
                     </div>
-
-                    <div className="bg-white rounded-xl border border-gray-100 overflow-hidden shadow-sm">
+                    <div className="bg-white rounded-[2.5rem] border border-gray-100 overflow-hidden shadow-sm">
                         <table className="min-w-full divide-y divide-gray-200 text-sm">
                             <thead className="bg-gray-50 text-[10px] font-bold text-gray-400 uppercase tracking-widest">
                                 <tr>
-                                    <th className="px-6 py-4">Timestamp</th>
-                                    <th className="px-6 py-4">Action</th>
-                                    <th className="px-6 py-4">Product Ref</th>
-                                    <th className="px-6 py-4 text-center">Qty Change</th>
-                                    <th className="px-6 py-4 text-right">Performed By</th>
+                                    <th className="px-8 py-6 text-left">Date & ID</th>
+                                    <th className="px-8 py-6 text-left">Consignee Details</th>
+                                    <th className="px-8 py-6 text-left">Fleet Personnel</th>
+                                    <th className="px-8 py-6 text-center">Outcome</th>
+                                    <th className="px-8 py-6 text-right">Details</th>
                                 </tr>
                             </thead>
                             <tbody className="divide-y divide-gray-100">
-                                {filteredMovements.sort((a,b)=>b.date.localeCompare(a.date)).map(mov => (
-                                    <tr key={mov.id} className="hover:bg-gray-50 transition-colors">
-                                        <td className="px-6 py-4 font-mono text-[10px] text-gray-400">{new Date(mov.date).toLocaleString()}</td>
-                                        <td className="px-6 py-4">
-                                            <span className={`px-2 py-0.5 rounded-full text-[8px] font-black uppercase ${
-                                                mov.type === 'IN' ? 'bg-green-100 text-green-700' : 
-                                                mov.type === 'OUT' ? 'bg-red-100 text-red-700' : 'bg-yellow-100 text-yellow-700'
-                                            }`}>
-                                                Stock {mov.type === 'IN' ? 'Added' : mov.type === 'OUT' ? 'Deducted' : 'Adjusted'}
+                                {deliveries.filter(d => d.status === 'DELIVERED' || d.status === 'FAILED')
+                                    .sort((a,b) => (b.deliveryDate || '').localeCompare(a.deliveryDate || ''))
+                                    .map(del => (
+                                    <tr key={del.id} className="hover:bg-slate-50/50 transition-colors">
+                                        <td className="px-8 py-6">
+                                            <div className="text-xs font-black text-slate-700">{del.deliveryDate}</div>
+                                            <div className="text-[10px] font-mono text-slate-400 uppercase">#DO-{del.id.slice(-6).toUpperCase()}</div>
+                                        </td>
+                                        <td className="px-8 py-6">
+                                            <div className="text-sm font-black text-slate-900">{del.customerName || 'N/A'}</div>
+                                            <div className="text-[10px] text-slate-400 font-bold uppercase truncate max-w-[200px]">{del.destinationAddress}</div>
+                                        </td>
+                                        <td className="px-8 py-6">
+                                            <div className="text-xs font-black text-slate-700">{del.driverName}</div>
+                                            <div className="text-[10px] text-slate-400 font-bold uppercase">{del.vehicleType}</div>
+                                        </td>
+                                        <td className="px-8 py-6 text-center">
+                                            <span className={`px-3 py-1 rounded-full text-[9px] font-black uppercase border ${del.status === 'DELIVERED' ? 'bg-green-50 text-green-700 border-green-100' : 'bg-red-50 text-red-700 border-red-100'}`}>
+                                                {del.status}
                                             </span>
+                                            {del.failureReason && <div className="text-[8px] text-red-400 font-bold mt-1 uppercase italic">{del.failureReason}</div>}
                                         </td>
-                                        <td className="px-6 py-4">
-                                            <div className="font-bold text-gray-700 text-xs">{mov.referenceId}</div>
-                                            <div className="text-[9px] text-gray-400 uppercase font-mono">#{mov.batchId}</div>
+                                        <td className="px-8 py-6 text-right">
+                                            <div className="flex justify-end gap-2">
+                                                <button onClick={() => { setActiveDelivery(del); setProofImage(del.evidenceImage || null); setIsProofViewerOpen(true); }} className="p-2 bg-slate-50 rounded-xl text-slate-400 hover:text-indigo-600 transition-colors border border-slate-100">
+                                                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268-2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542 7-4.477 0-8.268-2.943-9.542-7z" /></svg>
+                                                </button>
+                                                <button onClick={() => printDeliveryOrder(del)} className="p-2 bg-slate-50 rounded-xl text-slate-400 hover:text-blue-600 transition-colors border border-slate-100">
+                                                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z" /></svg>
+                                                </button>
+                                            </div>
                                         </td>
-                                        <td className="px-6 py-4 text-center font-black text-gray-800">
-                                            {mov.type === 'IN' ? '+' : '-'}{mov.quantity.toFixed(1)} kg
-                                        </td>
-                                        <td className="px-6 py-4 text-right text-[10px] text-gray-500">{mov.performedBy}</td>
                                     </tr>
                                 ))}
-                                {filteredMovements.length === 0 && (
-                                    <tr><td colSpan={5} className="px-6 py-10 text-center text-gray-300 italic">No transactions found for the selected filter.</td></tr>
+                                {deliveries.filter(d => d.status === 'DELIVERED' || d.status === 'FAILED').length === 0 && (
+                                    <tr><td colSpan={5} className="px-8 py-20 text-center text-slate-300 italic font-medium">No historical fulfillment records available.</td></tr>
                                 )}
                             </tbody>
                         </table>
@@ -601,63 +816,121 @@ export const InventoryDelivery: React.FC<Props> = ({
                 </div>
             )}
 
-            {/* Finalize Outcome Modal */}
+            {(subTab === 'movement' && isAdmin) && (
+                <div className="space-y-4">
+                    <div className="flex justify-between items-center bg-white p-4 rounded-xl border border-gray-200 shadow-sm">
+                        <div className="flex bg-gray-100 p-1 rounded-xl w-fit">
+                            {[
+                                { id: 'ALL', label: 'All Transactions' },
+                                { id: 'IN', label: 'Stock In' },
+                                { id: 'OUT', label: 'Stock Out' }
+                            ].map(f => (
+                                <button key={f.id} onClick={() => setMovementFilter(f.id as any)} className={`px-6 py-2.5 rounded-xl text-[10px] font-black uppercase transition-all whitespace-nowrap ${movementFilter === f.id ? 'bg-white text-blue-600 shadow-md ring-1 ring-blue-100' : 'text-gray-400 hover:text-gray-600'}`}>{f.label}</button>
+                            ))}
+                        </div>
+                        <div className="flex gap-2">
+                            <button onClick={handleExportMovementsCSV} className="px-4 py-2 bg-white border border-slate-200 rounded-xl text-[10px] font-black uppercase hover:bg-slate-50 transition-all flex items-center gap-2">
+                                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
+                                Export CSV
+                            </button>
+                            <button onClick={handlePrintMovementsPDF} className="px-4 py-2 bg-indigo-600 text-white rounded-xl text-[10px] font-black uppercase hover:bg-indigo-700 transition-all flex items-center gap-2 shadow-lg">
+                                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z" /></svg>
+                                Print Report
+                            </button>
+                        </div>
+                    </div>
+                    <div className="bg-white rounded-[2.5rem] border border-gray-100 overflow-hidden shadow-sm">
+                        <table className="min-w-full divide-y divide-gray-200 text-sm">
+                            <thead className="bg-gray-50 text-[10px] font-bold text-gray-400 uppercase tracking-widest">
+                                <tr><th className="px-8 py-6 text-left">Timestamp</th><th className="px-8 py-6 text-left">Action</th><th className="px-8 py-6 text-left">Reference & Detail</th><th className="px-8 py-6 text-center">Net Weight</th><th className="px-8 py-6 text-right">Performed By</th></tr>
+                            </thead>
+                            <tbody className="divide-y divide-gray-100">
+                                {filteredMovements.sort((a,b)=>b.date.localeCompare(a.date)).map(mov => (
+                                    <tr key={mov.id} className="hover:bg-slate-50/50 transition-colors">
+                                        <td className="px-8 py-6 font-mono text-[11px] text-slate-400">{new Date(mov.date).toLocaleString()}</td>
+                                        <td className="px-8 py-6">
+                                            <span className={`px-3 py-1 rounded-full text-[9px] font-black uppercase border ${mov.type === 'IN' ? 'bg-emerald-50 text-emerald-700 border-emerald-100' : mov.type === 'OUT' ? 'bg-rose-50 text-rose-700 border-rose-100' : 'bg-amber-50 text-amber-700 border-amber-100'}`}>
+                                                Stock {mov.type.replace('_',' ')}
+                                            </span>
+                                        </td>
+                                        <td className="px-8 py-6">
+                                            <div className="font-black text-slate-700 text-sm">{mov.referenceId}</div>
+                                            <div className="text-[10px] text-slate-400 font-bold uppercase">
+                                                {(mov as any).mushroomType && `${(mov as any).mushroomType} Grade ${(mov as any).grade}`}
+                                                {(mov as any).details && (mov as any).details}
+                                                {!(mov as any).mushroomType && !(mov as any).details && `Batch #${mov.batchId}`}
+                                            </div>
+                                        </td>
+                                        <td className="px-8 py-6 text-center font-black text-slate-900">{mov.type === 'IN' ? '+' : '-'}{mov.quantity.toFixed(1)} kg</td>
+                                        <td className="px-8 py-6 text-right text-[11px] font-bold text-slate-400 uppercase">{mov.performedBy.split('@')[0]}</td>
+                                    </tr>
+                                ))}
+                                {filteredMovements.length === 0 && (
+                                    <tr><td colSpan={5} className="px-8 py-20 text-center text-slate-300 italic font-medium">No ledger entries matching criteria.</td></tr>
+                                )}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            )}
+
+            {/* Finalize Outcome Modal (Deliver/Fail) */}
             {isProofModalOpen && (
                 <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-[100] p-4 backdrop-blur-sm">
-                    <div className="bg-white rounded-3xl shadow-2xl w-full max-w-md overflow-hidden animate-scale-up">
-                        <div className={`p-6 ${outcomeType === 'DELIVERED' ? 'bg-green-600' : 'bg-red-600'} text-white flex justify-between items-center`}>
-                            <h3 className="font-black uppercase tracking-widest text-xs">{outcomeType === 'DELIVERED' ? 'Confirm Delivery' : 'Log Delivery Failure'}</h3>
-                            <button onClick={() => setIsProofModalOpen(false)} className="text-white hover:text-white/80 font-bold text-2xl">×</button>
+                    <div className="bg-white rounded-[2.5rem] shadow-2xl w-full max-w-md overflow-hidden animate-scale-up">
+                        <div className={`p-8 ${outcomeType === 'DELIVERED' ? 'bg-emerald-600' : 'bg-rose-600'} text-white flex justify-between items-center`}>
+                            <h3 className="font-black uppercase tracking-[0.2em] text-xs">{outcomeType === 'DELIVERED' ? 'Confirm Delivery' : 'Log Delivery Failure'}</h3>
+                            <button onClick={() => setIsProofModalOpen(false)} className="text-white hover:text-white/80 font-bold text-3xl">×</button>
                         </div>
-                        <div className="p-8 space-y-6">
+                        <div className="p-10 space-y-8">
                             <div className="text-center">
-                                <p className="text-[10px] text-gray-400 font-bold uppercase mb-2">Required Action</p>
-                                <p className="text-sm text-gray-700 leading-relaxed italic">
+                                <p className="text-[10px] text-slate-400 font-black uppercase tracking-widest mb-2">Protocol Requirement</p>
+                                <p className="text-sm text-slate-700 leading-relaxed italic font-medium">
                                     {outcomeType === 'DELIVERED' 
-                                        ? '"Upload a clear photo of the delivered goods to notify client."' 
-                                        : '"Select the reason for the unsuccessful delivery attempt below."'}
+                                        ? '"Upload photographic evidence of arrival to notify client."' 
+                                        : '"Select the primary reason for unsuccessful fulfillment below."'}
                                 </p>
                             </div>
 
                             {outcomeType === 'FAILED' ? (
                                 <div className="space-y-4">
                                     <div>
-                                        <label className="block text-[10px] font-bold text-gray-400 uppercase mb-1">Reason for Failure</label>
+                                        <label className="block text-[10px] font-black text-slate-500 uppercase ml-1 mb-1.5 tracking-widest">Reason for Interruption</label>
                                         <select 
                                             value={selectedFailureReason}
                                             onChange={e => setSelectedFailureReason(e.target.value)}
-                                            className="w-full p-2.5 border rounded-xl text-sm bg-gray-50 font-medium"
+                                            className="w-full p-4 rounded-2xl border-none bg-slate-100 text-sm font-bold shadow-inner"
                                         >
                                             {FAILURE_REASONS.map(r => <option key={r} value={r}>{r}</option>)}
                                         </select>
                                     </div>
                                     {selectedFailureReason === 'Other (please specify)' && (
                                         <div className="animate-fade-in-up">
-                                            <label className="block text-[10px] font-bold text-gray-400 uppercase mb-1">Please specify</label>
+                                            <label className="block text-[10px] font-black text-slate-500 uppercase ml-1 mb-1.5 tracking-widest">Detailed Memo</label>
                                             <textarea 
                                                 value={otherReason}
                                                 onChange={e => setOtherReason(e.target.value)}
-                                                className="w-full p-3 border rounded-xl text-sm min-h-[80px]"
-                                                placeholder="Details of the unsuccessful attempt..."
+                                                className="w-full p-4 rounded-2xl border-none bg-slate-100 text-sm font-medium shadow-inner min-h-[100px]"
+                                                placeholder="Enter observations..."
                                             />
                                         </div>
                                     )}
                                 </div>
                             ) : (
-                                <div className="border-2 border-dashed border-gray-200 rounded-2xl p-4 text-center hover:border-blue-400 transition-colors bg-gray-50">
+                                <div className="border-2 border-dashed border-slate-200 rounded-[2rem] p-4 text-center hover:border-blue-400 transition-colors bg-slate-50">
                                     {proofImage ? (
                                         <div className="relative">
-                                            <img src={proofImage} className="w-full h-48 object-cover rounded-xl shadow-inner border border-white" alt="Evidence" />
-                                            <button onClick={() => setProofImage(null)} className="absolute top-2 right-2 bg-red-500 text-white p-1.5 rounded-full hover:bg-red-600 shadow-lg">
-                                                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12"/></svg>
+                                            <img src={proofImage} className="w-full h-56 object-cover rounded-[1.5rem] shadow-inner border border-white" alt="Evidence" />
+                                            <button onClick={() => setProofImage(null)} className="absolute top-2 right-2 bg-rose-500 text-white p-2 rounded-full hover:bg-rose-600 shadow-xl">
+                                                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M6 18L18 6M6 6l12 12"/></svg>
                                             </button>
                                         </div>
                                     ) : (
-                                        <label className="cursor-pointer flex flex-col items-center py-12">
-                                            <div className="bg-white p-4 rounded-full mb-3 shadow-sm text-green-500">
-                                                <svg className="w-10 h-10" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z"/><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+                                        <label className="cursor-pointer flex flex-col items-center py-16">
+                                            <div className="bg-white p-6 rounded-3xl mb-4 shadow-sm text-emerald-500">
+                                                <svg className="w-12 h-12" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z"/><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
                                             </div>
-                                            <span className="text-[10px] font-black text-gray-400 uppercase tracking-widest">Select Proof Image</span>
+                                            <span className="text-[11px] font-black text-slate-400 uppercase tracking-[0.2em]">Capture Evidence</span>
                                             <input type="file" accept="image/*" onChange={handleFileUpload} className="hidden" />
                                         </label>
                                     )}
@@ -666,58 +939,90 @@ export const InventoryDelivery: React.FC<Props> = ({
 
                             <button 
                                 onClick={handleFinalizeOutcome} 
-                                disabled={loading || (outcomeType === 'DELIVERED' && !proofImage) || (outcomeType === 'FAILED' && selectedFailureReason === 'Other (please specify)' && !otherReason)}
-                                className={`w-full py-4 rounded-xl font-black uppercase text-xs shadow-xl transition-all flex items-center justify-center gap-2 ${loading ? 'opacity-50' : (outcomeType === 'DELIVERED' ? 'bg-green-600 hover:bg-green-700 text-white' : 'bg-red-600 hover:bg-red-700 text-white')}`}
+                                disabled={loading}
+                                className={`w-full py-5 rounded-3xl font-black uppercase text-sm shadow-xl transition-all flex items-center justify-center gap-3 active:scale-95 disabled:opacity-30 disabled:grayscale ${loading ? 'opacity-50' : (outcomeType === 'DELIVERED' ? 'bg-emerald-600 hover:bg-emerald-700 text-white' : 'bg-rose-600 hover:bg-rose-700 text-white')}`}
                             >
-                                {loading ? 'Finalizing...' : `Log Result & Notify Client`}
+                                {loading ? 'Syncing...' : `Finalize & Log Result`}
                             </button>
                         </div>
                     </div>
                 </div>
             )}
 
-            {/* Reschedule Modal */}
-            {isRescheduleModalOpen && activeDelivery && (
+            {/* Unified Scheduling & Rescheduling Modal */}
+            {isScheduleModalOpen && activeDelivery && (
                 <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-[100] p-4 backdrop-blur-sm">
-                    <div className="bg-white rounded-3xl shadow-2xl w-full max-w-md overflow-hidden animate-scale-up">
-                        <div className="p-6 bg-blue-600 text-white flex justify-between items-center">
-                            <h3 className="font-black uppercase tracking-widest text-xs">Reschedule Delivery</h3>
-                            <button onClick={() => setIsRescheduleModalOpen(false)} className="text-white hover:text-white/80 font-bold text-2xl">×</button>
+                    <div className="bg-white rounded-[2.5rem] shadow-2xl w-full max-w-md overflow-hidden animate-scale-up">
+                        <div className="p-8 bg-indigo-600 text-white flex justify-between items-center">
+                            <h3 className="font-black uppercase tracking-[0.2em] text-xs">
+                                {activeDelivery.status === 'PENDING_SCHEDULE' ? 'Fleet Assignment' : 'Reschedule Order'}
+                            </h3>
+                            <button onClick={() => setIsScheduleModalOpen(false)} className="text-white hover:text-white/80 font-bold text-3xl">×</button>
                         </div>
-                        <div className="p-8 space-y-6">
-                            <div className="p-4 bg-blue-50 rounded-xl border border-blue-100 text-xs">
-                                <p className="font-bold text-blue-800 mb-1">Previous Failure Reason:</p>
-                                <p className="text-blue-600 italic">"{activeDelivery.failureReason}"</p>
+                        <div className="p-10 space-y-8">
+                            <div className="p-5 bg-indigo-50 rounded-[1.5rem] border border-indigo-100">
+                                <p className="text-[10px] font-black text-indigo-400 uppercase tracking-widest mb-2">Customer Order Information</p>
+                                <p className="text-slate-900 font-black text-lg mb-1 leading-tight">{activeDelivery.customerName}</p>
+                                <p className="text-indigo-700 font-bold italic text-xs leading-relaxed">"{activeDelivery.orderSummary || 'No items listed'}"</p>
                             </div>
-                            <div className="grid grid-cols-2 gap-4">
+                            
+                            <div className="grid grid-cols-2 gap-5">
                                 <div>
-                                    <label className="block text-[10px] font-bold text-gray-400 uppercase mb-1">New Date</label>
-                                    <input type="date" value={newDate} onChange={e=>setNewDate(e.target.value)} className="w-full p-2.5 border rounded-xl text-sm" />
+                                    <label className="block text-[10px] font-black text-slate-500 uppercase ml-1 mb-1.5 tracking-widest">Delivery Date</label>
+                                    <input type="date" value={scheduleDate} onChange={e=>setScheduleDate(e.target.value)} className="w-full p-4 rounded-2xl bg-slate-100 border-none text-sm font-bold shadow-inner" />
                                 </div>
                                 <div>
-                                    <label className="block text-[10px] font-bold text-gray-400 uppercase mb-1">New Time</label>
-                                    <input type="time" value={newTime} onChange={e=>setNewTime(e.target.value)} className="w-full p-2.5 border rounded-xl text-sm" />
+                                    <label className="block text-[10px] font-black text-slate-500 uppercase ml-1 mb-1.5 tracking-widest">Dispatch Time</label>
+                                    <input type="time" value={scheduleTime} onChange={e=>setScheduleTime(e.target.value)} className="w-full p-4 rounded-2xl bg-slate-100 border-none text-sm font-bold shadow-inner font-mono" />
                                 </div>
                             </div>
+                            
+                            <div className="grid grid-cols-2 gap-5">
+                                <div>
+                                    <label className="block text-[10px] font-black text-slate-500 uppercase ml-1 mb-1.5 tracking-widest">Assigned Driver</label>
+                                    <select 
+                                        value={scheduleDriver.id} 
+                                        onChange={e => {
+                                            const d = DRIVER_LIST.find(x => x.id === e.target.value);
+                                            if (d) setScheduleDriver(d);
+                                        }} 
+                                        className="w-full p-4 rounded-2xl bg-slate-100 border-none text-sm font-bold shadow-inner"
+                                    >
+                                        {DRIVER_LIST.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
+                                    </select>
+                                </div>
+                                <div>
+                                    <label className="block text-[10px] font-black text-slate-500 uppercase ml-1 mb-1.5 tracking-widest">Vehicle Asset</label>
+                                    <select 
+                                        value={scheduleVehicle.id} 
+                                        onChange={e => {
+                                            const v = VEHICLE_LIST.find(x => x.id === e.target.value);
+                                            if (v) setScheduleVehicle(v);
+                                        }} 
+                                        className="w-full p-4 rounded-2xl bg-slate-100 border-none text-sm font-bold shadow-inner"
+                                    >
+                                        {VEHICLE_LIST.map(v => <option key={v.id} value={v.id}>{v.type}</option>)}
+                                    </select>
+                                </div>
+                            </div>
+                            
                             <div>
-                                <label className="block text-[10px] font-bold text-gray-400 uppercase mb-1">Assign Driver</label>
+                                <label className="block text-[10px] font-black text-slate-500 uppercase ml-1 mb-1.5 tracking-widest">Optimized Route</label>
                                 <select 
-                                    value={newDriver.id} 
-                                    onChange={e => {
-                                        const d = DRIVER_LIST.find(x => x.id === e.target.value);
-                                        if (d) setNewDriver(d);
-                                    }} 
-                                    className="w-full p-2.5 border rounded-xl text-sm bg-gray-50"
+                                    value={scheduleRoute} 
+                                    onChange={e => setScheduleRoute(e.target.value)} 
+                                    className="w-full p-4 rounded-2xl bg-slate-100 border-none text-sm font-bold shadow-inner"
                                 >
-                                    {DRIVER_LIST.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
+                                    {ROUTE_LIST.map(r => <option key={r} value={r}>{r}</option>)}
                                 </select>
                             </div>
+                            
                             <button 
-                                onClick={handleReschedule}
+                                onClick={handleConfirmSchedule} 
                                 disabled={loading}
-                                className="w-full py-4 rounded-xl font-black uppercase text-xs bg-blue-600 hover:bg-blue-700 text-white shadow-xl transition-all"
+                                className="w-full py-5 rounded-3xl font-black uppercase text-sm bg-indigo-600 hover:bg-indigo-700 text-white shadow-xl transition-all active:scale-95 disabled:opacity-30"
                             >
-                                {loading ? 'Updating...' : 'Confirm Reschedule'}
+                                {loading ? 'Committing...' : 'Commit Assignment'}
                             </button>
                         </div>
                     </div>
@@ -727,43 +1032,52 @@ export const InventoryDelivery: React.FC<Props> = ({
             {/* Outcome Viewer Modal */}
             {isProofViewerOpen && activeDelivery && (
                 <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-[110] p-4 backdrop-blur-md">
-                    <div className="bg-white rounded-3xl shadow-2xl w-full max-w-2xl overflow-hidden animate-scale-up">
-                        <div className={`p-6 border-b flex justify-between items-center ${activeDelivery.status === 'DELIVERED' ? 'bg-green-50' : 'bg-red-50'}`}>
+                    <div className="bg-white rounded-[2.5rem] shadow-2xl w-full max-w-2xl overflow-hidden animate-scale-up">
+                        <div className={`p-8 border-b flex justify-between items-center ${activeDelivery.status === 'DELIVERED' ? 'bg-emerald-50' : 'bg-rose-50'}`}>
                             <div>
-                                <h3 className={`font-black uppercase tracking-widest text-xs ${activeDelivery.status === 'DELIVERED' ? 'text-green-800' : 'text-red-800'}`}>
-                                    {activeDelivery.status === 'DELIVERED' ? 'Delivery Success Report' : 'Unsuccessful Delivery Report'}
+                                <h3 className={`font-black uppercase tracking-[0.2em] text-xs ${activeDelivery.status === 'DELIVERED' ? 'text-emerald-800' : 'text-rose-800'}`}>
+                                    {activeDelivery.status === 'DELIVERED' ? 'Fulfillment Report' : 'Interruption Audit'}
                                 </h3>
-                                <p className="text-[9px] text-gray-400 font-bold uppercase tracking-widest mt-0.5">Ref: #DO-{activeDelivery.id.slice(-6).toUpperCase()} • Logged {activeDelivery.deliveredAt ? new Date(activeDelivery.deliveredAt).toLocaleString() : 'N/A'}</p>
+                                <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest mt-1">Ref: #DO-{activeDelivery.id.slice(-6).toUpperCase()} • Logged {activeDelivery.deliveredAt ? new Date(activeDelivery.deliveredAt).toLocaleString() : 'N/A'}</p>
                             </div>
-                            <button onClick={() => setIsProofViewerOpen(false)} className="text-gray-400 hover:text-gray-600 font-bold text-2xl">×</button>
+                            <button onClick={() => setIsProofViewerOpen(false)} className="text-gray-400 hover:text-gray-600 font-bold text-3xl">×</button>
                         </div>
-                        <div className="p-8 flex flex-col md:flex-row gap-8 items-start">
-                            <div className="flex-1 space-y-4 w-full text-left">
-                                <div className="p-4 bg-gray-50 rounded-2xl border border-gray-100">
-                                    <h4 className="text-[9px] font-bold text-gray-400 uppercase mb-2">Recipient Info</h4>
-                                    <div className="text-xs font-bold text-gray-700">{activeDelivery.destinationAddress}</div>
-                                    <div className="text-[10px] text-blue-600 font-bold mt-1 uppercase">Email: {activeDelivery.customerEmail}</div>
-                                    <div className="text-[10px] text-gray-600 font-medium">Phone: {activeDelivery.customerPhone}</div>
+                        <div className="p-10 flex flex-col md:flex-row gap-10 items-start">
+                            <div className="flex-1 space-y-6 w-full text-left">
+                                <div className="p-5 bg-slate-50 rounded-[1.5rem] border border-slate-100">
+                                    <h4 className="text-[10px] font-black text-slate-400 uppercase mb-3 tracking-widest">Recipient Identity</h4>
+                                    <div className="text-sm font-black text-slate-900">{activeDelivery.customerName || activeDelivery.destinationAddress}</div>
+                                    <div className="text-[11px] text-indigo-600 font-black mt-2 uppercase tracking-tighter">{activeDelivery.customerEmail}</div>
+                                    <div className="text-[11px] text-slate-500 font-bold mt-0.5">{activeDelivery.customerPhone}</div>
                                 </div>
-                                {activeDelivery.status === 'FAILED' && (
-                                    <div className="p-4 bg-red-100/50 rounded-2xl border border-red-200">
-                                        <h4 className="text-[9px] font-bold text-red-600 uppercase mb-2 tracking-widest">Failure Reason</h4>
-                                        <div className="text-xs font-medium text-red-900 leading-relaxed italic">"{activeDelivery.failureReason || 'Not specified'}"</div>
+                                {activeDelivery.orderSummary && (
+                                    <div className="p-5 bg-blue-50/50 rounded-[1.5rem] border border-blue-100">
+                                        <h4 className="text-[10px] font-black text-blue-400 uppercase mb-3 tracking-widest">Manifest Summary</h4>
+                                        <div className="text-xs font-bold text-blue-900 leading-relaxed italic">"{activeDelivery.orderSummary}"</div>
                                     </div>
                                 )}
-                                <div className="p-4 bg-gray-50 rounded-2xl border border-gray-100">
-                                    <h4 className="text-[9px] font-bold text-gray-400 uppercase mb-2 tracking-widest">Audit Trail</h4>
-                                    <div className="text-xs font-bold text-gray-700">Driver: {activeDelivery.driverName}</div>
-                                    <div className="text-[10px] text-gray-500 font-medium uppercase mt-1">Vehicle: {activeDelivery.vehicleType}</div>
+                                {activeDelivery.status === 'FAILED' && (
+                                    <div className="p-5 bg-rose-100/50 rounded-[1.5rem] border border-rose-200">
+                                        <h4 className="text-[10px] font-black text-rose-600 uppercase mb-3 tracking-widest">Audit Note</h4>
+                                        <div className="text-xs font-bold text-rose-900 leading-relaxed">"{activeDelivery.failureReason || 'Unspecified Error'}"</div>
+                                    </div>
+                                )}
+                                <div className="p-5 bg-slate-50 rounded-[1.5rem] border border-slate-100 flex items-center gap-4">
+                                    <div className="w-10 h-10 bg-white rounded-xl flex items-center justify-center text-slate-400 font-black border border-slate-200 uppercase">{activeDelivery.driverName.charAt(0)}</div>
+                                    <div>
+                                        <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Authorized Courier</h4>
+                                        <div className="text-xs font-black text-slate-700">{activeDelivery.driverName}</div>
+                                    </div>
                                 </div>
                             </div>
-                            <div className="flex-1 w-full text-center">
-                                <h4 className="text-[9px] font-bold text-gray-400 uppercase mb-2 text-center md:text-left tracking-widest">Evidence Snapshot</h4>
+                            <div className="flex-1 w-full">
+                                <h4 className="text-[10px] font-black text-slate-400 uppercase mb-4 tracking-widest">Final Site Asset Evidence</h4>
                                 {activeDelivery.evidenceImage ? (
-                                    <img src={activeDelivery.evidenceImage} className="w-full h-auto rounded-2xl shadow-xl border border-gray-100 hover:scale-[1.02] transition-transform cursor-pointer" alt="Evidence" onClick={() => window.open(activeDelivery.evidenceImage, '_blank')} />
+                                    <img src={activeDelivery.evidenceImage} className="w-full h-auto rounded-[2rem] shadow-2xl border-4 border-white hover:scale-[1.02] transition-transform cursor-zoom-in" alt="Evidence" onClick={() => window.open(activeDelivery.evidenceImage || "", '_blank')} />
                                 ) : (
-                                    <div className="h-48 bg-gray-50 rounded-2xl border-2 border-dashed border-gray-200 flex items-center justify-center text-gray-300 italic text-xs">
-                                        {activeDelivery.status === 'FAILED' ? 'No photo required for failure' : 'No image logged'}
+                                    <div className="h-64 bg-slate-50 rounded-[2rem] border-4 border-dashed border-slate-100 flex flex-col items-center justify-center text-slate-200 gap-4">
+                                        <svg className="w-16 h-16 opacity-10" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
+                                        <span className="italic text-xs font-black uppercase tracking-[0.2em]">No Evidence Logged</span>
                                     </div>
                                 )}
                             </div>

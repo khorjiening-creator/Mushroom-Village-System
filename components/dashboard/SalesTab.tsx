@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { collection, onSnapshot, doc, setDoc, updateDoc, query, orderBy, limit, increment, addDoc, where, getDocs } from 'firebase/firestore';
 import { db } from '../../services/firebase';
-import { VillageType, Customer, Sale, Product, CartItem, FinancialRecord, UserRole, InventoryItem, ProcessingLog } from '../../types';
+import { VillageType, Customer, Sale, Product, CartItem, FinancialRecord, UserRole, InventoryItem, ProcessingLog, DeliveryRecord } from '../../types';
 import { MUSHROOM_VARIETIES } from './SharedComponents';
 import { MUSHROOM_PRICES } from '../../constants';
 
@@ -17,6 +17,8 @@ interface SalesTabProps {
     onError?: (msg: string) => void;
     financialRecords: FinancialRecord[];
 }
+
+const GRADES = ['A', 'B', 'C'];
 
 export const SalesTab: React.FC<SalesTabProps> = ({ 
     villageId, 
@@ -73,10 +75,14 @@ export const SalesTab: React.FC<SalesTabProps> = ({
         const collectionSuffix = villageId.replace(/\s/g, '');
         const unsubProd = onSnapshot(collection(db, `products_${collectionSuffix}`), (snap) => {
             const list = snap.docs.map(d => ({ id: d.id, ...d.data() } as Product));
-            // Check if we need to seed new products (simple check: if list is empty or doesn't contain a key type)
-            const hasOyster = list.some(p => p.name.includes('Oyster'));
-            if (list.length === 0 || !hasOyster) seedInitialProducts(list);
-            else setProducts(list);
+            
+            // Check for the 12 canonical products (4 varieties * 3 grades)
+            const canonicalProducts = list.filter(p => p.id.startsWith('VC-PROD-'));
+            if (canonicalProducts.length < 12) {
+                seedInitialProducts();
+            } else {
+                setProducts(canonicalProducts.sort((a, b) => a.name.localeCompare(b.name)));
+            }
         });
 
         const qInv = query(collection(db, "inventory_items"), where("villageId", "==", villageId));
@@ -99,7 +105,6 @@ export const SalesTab: React.FC<SalesTabProps> = ({
     // DERIVED: Map Sale records to their actual status based on Financial Records
     const salesWithSyncedStatus = useMemo(() => {
         return sales.map(sale => {
-            // Find the matching financial record by orderNumber
             const finRec = financialRecords.find(f => f.orderNumber === sale.id || f.transactionId === `TXN-S-${sale.id}`);
             const actualStatus = finRec?.status || sale.status || 'PENDING';
             return { ...sale, status: actualStatus as any };
@@ -108,27 +113,15 @@ export const SalesTab: React.FC<SalesTabProps> = ({
 
     const productsWithLiveStock = useMemo(() => {
         return products.map(p => {
-            // Determine relevant inventory items based on Product Name matching Mushroom Variety + Grade
+            // Match inventory items for variety + grade
             const matchingItems = inventoryItems.filter(item => 
-                p.name.includes(item.mushroomType) && 
-                (p.grade ? (item.grade === p.grade || p.name.includes(`Grade ${item.grade}`)) : true)
+                p.name.includes(item.mushroomType) && item.grade === p.grade
             );
 
-            // Sum up Inventory KG
             const totalKgInStock = matchingItems.reduce((acc, curr) => acc + curr.currentStock, 0);
+            const finalStock = Math.floor(totalKgInStock / 0.2); // 200g packets
 
-            // Convert to Product Units
-            let finalStock = 0;
-            if (p.unit === 'pack' || p.unit === 'pkt') {
-                // Assuming 200g packs
-                finalStock = Math.floor(totalKgInStock / 0.2);
-            } else if (p.unit === 'kg') {
-                finalStock = totalKgInStock;
-            } else {
-                finalStock = totalKgInStock; // Default fallback
-            }
-
-            // Calculate In-Process Stock (WIP) from Processing Logs
+            // Calculate WIP from Processing Floor
             const inProcessKg = activeProcessing
                 .filter(log => p.name.includes(log.mushroomType))
                 .reduce((acc, curr) => {
@@ -136,19 +129,23 @@ export const SalesTab: React.FC<SalesTabProps> = ({
                         const gradeKey = `grade${p.grade || 'A'}` as keyof typeof curr.grades;
                         return acc + (curr.grades[gradeKey] || 0);
                     }
-                    return acc + curr.actualWeight;
+                    // For Intake/QC steps, we assume distribution based on intake, but better to use Accepted weight
+                    return acc + (curr.acceptedWeight || curr.actualWeight || 0) * (1/3); // Est. 1/3 for each grade if not yet graded
                 }, 0);
             
-            // Convert WIP to Product Units
-            let inProcessStock = 0;
-            if (p.unit === 'pack' || p.unit === 'pkt') {
-                inProcessStock = Math.floor(inProcessKg / 0.2);
-            } else {
-                inProcessStock = inProcessKg;
-            }
+            const inProcessStock = Math.floor(inProcessKg / 0.2);
+
+            // Costing + 15% Margin
+            const variety = MUSHROOM_VARIETIES.find(v => p.name.includes(v)) || 'Oyster';
+            const rawCostPerKg = MUSHROOM_PRICES[variety] || 15;
+            const unitRawCost = rawCostPerKg * 0.2;
+            const packagingOverhead = 0.85; 
+            const totalUnitCost = unitRawCost + packagingOverhead;
+            const calculatedPrice = Number((totalUnitCost * 1.15).toFixed(2));
 
             return { 
                 ...p, 
+                unitPrice: calculatedPrice,
                 packagedStock: finalStock, 
                 inProcessStock,
                 stock: finalStock 
@@ -156,52 +153,31 @@ export const SalesTab: React.FC<SalesTabProps> = ({
         });
     }, [products, inventoryItems, activeProcessing]);
 
-    const seedInitialProducts = async (currentList: Product[] = []) => {
-        const defaults: Product[] = [];
+    const seedInitialProducts = async () => {
+        const colSuffix = villageId.replace(/\s/g, '');
         
-        MUSHROOM_VARIETIES.forEach(variety => {
-            // Check if already exists to avoid overwriting or duplicates
-            const hasPack = currentList.some(p => p.name.includes(variety) && p.unit === 'pack');
-            const hasBulk = currentList.some(p => p.name.includes(variety) && p.unit === 'kg');
-            
-            const pricePerKg = MUSHROOM_PRICES[variety] || 15;
-            const packPrice = (pricePerKg * 0.2) + 0.50; // Base + Packaging Premium
-            
-            if (!hasPack) {
-                defaults.push({
-                    id: `P-${variety.substring(0,3).toUpperCase()}-PKT-A`,
-                    name: `${variety} (200g Pack) - Grade A`,
+        for (const variety of MUSHROOM_VARIETIES) {
+            for (const grade of GRADES) {
+                const productName = `${variety} (200g Pack) - Grade ${grade}`;
+                const productId = `VC-PROD-${variety.replace(/\s/g, '')}-${grade}`;
+                
+                const rawCostPerKg = MUSHROOM_PRICES[variety] || 15;
+                const totalUnitCost = (rawCostPerKg * 0.2) + 0.85;
+                const calculatedPrice = Number((totalUnitCost * 1.15).toFixed(2));
+
+                const pData = {
+                    id: productId,
+                    name: productName,
                     category: 'FRESH',
-                    grade: 'A',
-                    unitPrice: Number(packPrice.toFixed(2)),
+                    grade: grade,
+                    unitPrice: calculatedPrice,
                     stock: 0,
                     unit: 'pack',
                     villageId
-                });
+                };
+                
+                await setDoc(doc(db, `products_${colSuffix}`, productId), pData);
             }
-            
-            if (!hasBulk) {
-                defaults.push({
-                    id: `P-${variety.substring(0,3).toUpperCase()}-BLK-A`,
-                    name: `${variety} Bulk - Grade A`,
-                    category: 'WHOLESALE',
-                    grade: 'A',
-                    unitPrice: pricePerKg,
-                    stock: 0,
-                    unit: 'kg',
-                    villageId
-                });
-            }
-        });
-
-        // Add special items if missing
-        if (!currentList.some(p => p.category === 'DRIED')) {
-            defaults.push({ id: 'P-DRI-S', name: 'Dried Shiitake - Premium', category: 'DRIED', grade: 'A', unitPrice: 45.00, stock: 0, unit: 'kg', villageId });
-        }
-
-        const colSuffix = villageId.replace(/\s/g, '');
-        for (const p of defaults) { 
-            await setDoc(doc(db, `products_${colSuffix}`, p.id), p); 
         }
     };
 
@@ -209,7 +185,6 @@ export const SalesTab: React.FC<SalesTabProps> = ({
         const printWindow = window.open('', '_blank');
         if (!printWindow) return;
 
-        // Use derived status for document decision
         const finRec = financialRecords.find(f => f.orderNumber === sale.id || f.transactionId === `TXN-S-${sale.id}`);
         const actualStatus = finRec?.status || sale.status || 'PENDING';
         const isPending = actualStatus === 'PENDING';
@@ -349,7 +324,6 @@ export const SalesTab: React.FC<SalesTabProps> = ({
         setIsProcessing(true);
         try {
             const customer = customers.find(c => c.id === selectedCustomerId)!;
-            // Updated prefix to SALE to match user preference/screenshot
             const saleId = `SALE-${Date.now().toString().slice(-6)}`;
             const timestamp = new Date().toISOString();
             const collectionSuffix = villageId.replace(/\s/g, '');
@@ -358,26 +332,15 @@ export const SalesTab: React.FC<SalesTabProps> = ({
                 const product = products.find(p => p.id === item.productId);
                 if (!product) continue;
                 
-                // Determine deduction amount in KG
-                let kgToDeduct = 0;
-                if (product.unit === 'pack') {
-                    kgToDeduct = item.quantity * 0.2; // 200g per pack
-                } else {
-                    kgToDeduct = item.quantity; // Assuming kg
-                }
-
-                // Match relevant inventory batches (FIFO)
+                const kgToDeduct = item.quantity * 0.2;
                 const matchingInventory = inventoryItems
-                    .filter(i => product.name.includes(i.mushroomType) && (product.grade ? (i.grade === product.grade || product.name.includes(`Grade ${product.grade}`)) : true))
+                    .filter(i => product.name.includes(i.mushroomType) && i.grade === product.grade)
                     .sort((a, b) => a.harvestDate.localeCompare(b.harvestDate)); // FIFO
 
                 let remainingToDeduct = kgToDeduct;
                 for (const invBatch of matchingInventory) {
                     if (remainingToDeduct <= 0.001) break;
-                    
-                    const availableInBatch = invBatch.currentStock;
-                    const deductAmount = Math.min(availableInBatch, remainingToDeduct);
-                    
+                    const deductAmount = Math.min(invBatch.currentStock, remainingToDeduct);
                     await updateDoc(doc(db, "inventory_items", invBatch.id), {
                         currentStock: increment(-deductAmount),
                         lastUpdated: timestamp
@@ -401,14 +364,8 @@ export const SalesTab: React.FC<SalesTabProps> = ({
                 loyaltyPoints: increment(Math.floor(cartTotal / 10)) 
             });
 
-            // DEFINE COLLECTIONS FOR DUAL WRITE
-            let suffix = 'C';
-            if (villageId === VillageType.A) suffix = 'A';
-            if (villageId === VillageType.B) suffix = 'B';
-            
-            const finCol = `financialRecords_${suffix}`;
-            const incomeCol = `income_${suffix}`;
-            
+            const finCol = `financialRecords_C`;
+            const incomeCol = `income_C`;
             const txnId = `TXN-S-${saleId}`;
             const txnData = {
                 transactionId: txnId, type: 'INCOME', category: 'Sales',
@@ -418,7 +375,6 @@ export const SalesTab: React.FC<SalesTabProps> = ({
                 orderNumber: saleId 
             };
 
-            // DUAL WRITE: Main Collection AND Specific Income Collection
             await setDoc(doc(db, finCol, txnId), txnData);
             await setDoc(doc(db, incomeCol, txnId), txnData);
 
@@ -455,16 +411,10 @@ export const SalesTab: React.FC<SalesTabProps> = ({
         try {
             const product = products.find(p => p.id === adjProductId);
             if (product) {
-                const matchingInventory = inventoryItems.filter(i => product.name.includes(i.mushroomType) && (product.grade ? product.name.includes(`Grade ${product.grade}`) : true));
+                const matchingInventory = inventoryItems.filter(i => product.name.includes(i.mushroomType) && i.grade === product.grade);
                 if (matchingInventory.length > 0) {
                     const latestBatch = matchingInventory.sort((a,b) => b.lastUpdated.localeCompare(a.lastUpdated))[0];
-                    
-                    // Logic: Difference in units converted to KG if necessary, but here stock correction is usually direct KG in inventory items
-                    // For simplicity, assuming user inputs KG adjustment directly if looking at Inventory Tab, 
-                    // but if this modal is "Product Stock", we should probably adjust based on product unit logic or direct kg.
-                    // Given previous impl adjusted inventory item directly, let's assume input is in inventory unit (KG).
-                    const diff = parseFloat(adjNewQty) - (product.stock * (product.unit === 'pack' ? 0.2 : 1)); // Back to kg estimate for diff
-                    
+                    const diff = (parseFloat(adjNewQty) * 0.2) - latestBatch.currentStock;
                     await updateDoc(doc(db, "inventory_items", latestBatch.id), { currentStock: increment(diff), lastUpdated: new Date().toISOString() });
                 }
             }
@@ -477,13 +427,13 @@ export const SalesTab: React.FC<SalesTabProps> = ({
     };
 
     const openNewCustomerModal = () => {
+        // Fix: Changed 'setEditingUser' to 'setEditingCustomer' to resolve 'Cannot find name' error.
         setEditingCustomer(null); setCustName(''); setCustEmail(''); setCustPhone(''); setCustType('RETAIL'); setShowCustomerModal(true);
     };
 
     const filteredProducts = productsWithLiveStock.filter(p => p.name.toLowerCase().includes(searchQuery.toLowerCase()));
     const filteredSales = useMemo(() => {
-        const list = channelFilter === 'ALL' ? salesWithSyncedStatus : salesWithSyncedStatus.filter(s => s.channel === channelFilter);
-        return list;
+        return channelFilter === 'ALL' ? salesWithSyncedStatus : salesWithSyncedStatus.filter(s => s.channel === channelFilter);
     }, [salesWithSyncedStatus, channelFilter]);
 
     return (
@@ -513,7 +463,7 @@ export const SalesTab: React.FC<SalesTabProps> = ({
                                         <div className="mt-3 flex items-center gap-2">
                                             <span className={`h-2 w-2 rounded-full ${p.stock > 10 ? 'bg-emerald-500' : 'bg-rose-500'}`}></span>
                                             <span className="text-[10px] font-black text-slate-500 uppercase">
-                                                {p.stock} Available {p.unit === 'pack' ? 'Packets' : p.unit}
+                                                {p.stock} Available Packets
                                             </span>
                                         </div>
                                     </div>
@@ -585,48 +535,68 @@ export const SalesTab: React.FC<SalesTabProps> = ({
                 <div className="bg-white rounded-[3rem] shadow-sm border border-slate-200 overflow-hidden animate-fade-in">
                     <div className="p-8 border-b border-slate-100 flex justify-between items-center bg-slate-50/30">
                         <div>
-                            <h3 className="text-xl font-black text-slate-900 tracking-tight">Global Stock Ledger</h3>
-                            <p className="text-xs text-slate-400 font-bold uppercase tracking-widest mt-1">Auto-Synced with Processing & Inbound (A/B)</p>
+                            <h3 className="text-xl font-black text-slate-900 tracking-tight">Stock Check</h3>
+                            <p className="text-xs text-slate-400 font-bold uppercase tracking-widest mt-1">Real-time sync for the 12 primary hub products</p>
                         </div>
-                        <button onClick={() => setShowAdjModal(true)} className="px-6 py-2.5 bg-slate-900 text-white rounded-xl text-xs font-black uppercase tracking-widest shadow-lg hover:bg-slate-800 transition-all">Manual Correction</button>
+                        <button onClick={() => setShowAdjModal(true)} className="px-6 py-2.5 bg-slate-900 text-white rounded-xl text-xs font-black uppercase tracking-widest shadow-lg hover:bg-slate-800 transition-all">Manual Adjustment</button>
                     </div>
-                    <table className="min-w-full">
-                        <thead className="bg-slate-50">
-                            <tr className="text-[10px] font-black text-slate-400 uppercase tracking-widest">
-                                <th className="px-8 py-6 text-left">Mushroom SKU</th>
-                                <th className="px-8 py-6 text-left">Sub-Category</th>
-                                <th className="px-8 py-6 text-right">Available (Packaged)</th>
-                                <th className="px-8 py-6 text-right">In-Process (WIP)</th>
-                                <th className="px-8 py-6 text-right">Total Hub Asset</th>
-                                <th className="px-8 py-6 text-center">Lifecycle</th>
-                            </tr>
-                        </thead>
-                        <tbody className="divide-y divide-slate-100">
-                            {productsWithLiveStock.map(p => (
-                                <tr key={p.id} className="hover:bg-slate-50 transition-colors">
-                                    <td className="px-8 py-6"><p className="text-sm font-black text-slate-900">{p.name}</p><p className="text-[10px] text-slate-400 font-bold font-mono uppercase">{p.id}</p></td>
-                                    <td className="px-8 py-6"><span className="px-3 py-1 rounded-full text-[9px] font-black uppercase bg-slate-100 text-slate-600 border border-slate-200">{p.category}</span></td>
-                                    <td className="px-8 py-6 text-right font-black text-emerald-600">{p.packagedStock?.toFixed(1)} {p.unit}</td>
-                                    <td className="px-8 py-6 text-right font-black text-orange-500">+{p.inProcessStock?.toFixed(1)} {p.unit}</td>
-                                    <td className="px-8 py-6 text-right">
-                                        <p className="text-sm font-black text-slate-900">{(p.packagedStock + p.inProcessStock).toFixed(1)} {p.unit}</p>
-                                        <div className="mt-1 w-full bg-slate-100 h-1 rounded-full overflow-hidden">
-                                            <div className="h-full bg-indigo-500" style={{ width: `${Math.min(100, ((p.packagedStock + p.inProcessStock) / 300) * 100)}%` }}></div>
-                                        </div>
-                                    </td>
-                                    <td className="px-8 py-6 text-center">
-                                        {p.packagedStock > 0 ? (
-                                            <span className="px-3 py-1 rounded-full text-[9px] font-black uppercase bg-emerald-100 text-emerald-700">Stocked</span>
-                                        ) : p.inProcessStock > 0 ? (
-                                            <span className="px-3 py-1 rounded-full text-[9px] font-black uppercase bg-orange-100 text-orange-700">WIP</span>
-                                        ) : (
-                                            <span className="px-3 py-1 rounded-full text-[9px] font-black uppercase bg-rose-100 text-rose-700">Empty</span>
-                                        )}
-                                    </td>
+                    <div className="overflow-x-auto">
+                        <table className="min-w-full">
+                            <thead className="bg-slate-50">
+                                <tr className="text-[10px] font-black text-slate-400 uppercase tracking-widest">
+                                    <th className="px-8 py-6 text-left">Mushroom SKU & Grade</th>
+                                    <th className="px-8 py-6 text-center">Available Packets (200g)</th>
+                                    <th className="px-8 py-6 text-center">WIP Units (Est.)</th>
+                                    <th className="px-8 py-6 text-right">Total Hub Asset (kg)</th>
+                                    <th className="px-8 py-6 text-center">Protocol Status</th>
                                 </tr>
-                            ))}
-                        </tbody>
-                    </table>
+                            </thead>
+                            <tbody className="divide-y divide-slate-100">
+                                {productsWithLiveStock.map(p => (
+                                    <tr key={p.id} className="hover:bg-slate-50 transition-colors">
+                                        <td className="px-8 py-6">
+                                            <div className="flex items-center gap-4">
+                                                <div className="p-3 bg-indigo-50 rounded-2xl text-indigo-600">
+                                                    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" /></svg>
+                                                </div>
+                                                <div>
+                                                    <p className="text-sm font-black text-slate-900">{p.name}</p>
+                                                    <p className="text-[10px] text-slate-400 font-mono font-bold uppercase">{p.id}</p>
+                                                </div>
+                                            </div>
+                                        </td>
+                                        <td className="px-8 py-6 text-center">
+                                            <div className={`text-lg font-black ${p.packagedStock > 0 ? 'text-emerald-600' : 'text-slate-300'}`}>
+                                                {p.packagedStock} <span className="text-[9px] uppercase">Packets</span>
+                                            </div>
+                                        </td>
+                                        <td className="px-8 py-6 text-center">
+                                            <div className={`text-lg font-black ${p.inProcessStock > 0 ? 'text-orange-500' : 'text-slate-300'}`}>
+                                                +{p.inProcessStock} <span className="text-[9px] uppercase">WIP</span>
+                                            </div>
+                                        </td>
+                                        <td className="px-8 py-6 text-right">
+                                            <p className="text-sm font-black text-slate-900">{((p.packagedStock + p.inProcessStock) * 0.2).toFixed(1)} kg</p>
+                                            <div className="mt-1 w-24 ml-auto bg-slate-100 h-1.5 rounded-full overflow-hidden">
+                                                <div className="h-full bg-indigo-500" style={{ width: `${Math.min(100, ((p.packagedStock + p.inProcessStock) / 250) * 100)}%` }}></div>
+                                            </div>
+                                        </td>
+                                        <td className="px-8 py-6 text-center">
+                                            {p.packagedStock > 50 ? (
+                                                <span className="px-3 py-1 rounded-full text-[9px] font-black uppercase bg-emerald-100 text-emerald-700 border border-emerald-200">Surplus</span>
+                                            ) : p.packagedStock > 0 ? (
+                                                <span className="px-3 py-1 rounded-full text-[9px] font-black uppercase bg-blue-100 text-blue-700 border border-blue-200">Optimal</span>
+                                            ) : p.inProcessStock > 0 ? (
+                                                <span className="px-3 py-1 rounded-full text-[9px] font-black uppercase bg-orange-100 text-orange-700 border border-orange-200">Refilling</span>
+                                            ) : (
+                                                <span className="px-3 py-1 rounded-full text-[9px] font-black uppercase bg-rose-100 text-rose-700 border border-rose-200">Out of Stock</span>
+                                            )}
+                                        </td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
                 </div>
             )}
 
@@ -646,8 +616,8 @@ export const SalesTab: React.FC<SalesTabProps> = ({
                     <div className="bg-white rounded-[3rem] shadow-2xl w-full max-w-md p-10 animate-scale-in">
                         <div className="flex justify-between items-center mb-8"><div><h3 className="text-2xl font-black text-slate-900 tracking-tight">Stock Correction</h3><p className="text-xs text-slate-400 uppercase font-black tracking-widest mt-1">Manual Inventory Override</p></div><button onClick={() => setShowAdjModal(false)} className="p-2 hover:bg-slate-100 rounded-full"><svg className="w-6 h-6 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" /></svg></button></div>
                         <form onSubmit={handleSaveAdjustment} className="space-y-6">
-                            <select required value={adjProductId} onChange={e => setAdjProductId(e.target.value)} className="w-full p-4 rounded-2xl bg-slate-100 border-none text-sm font-bold"><option value="">-- Choose Item --</option>{productsWithLiveStock.map(p => <option key={p.id} value={p.id}>{p.name} (Ready: {p.stock})</option>)}</select>
-                            <input type="number" required value={adjNewQty} onChange={e => setAdjNewQty(e.target.value)} className="w-full p-4 rounded-2xl bg-slate-100 border-none text-sm font-bold" placeholder="New Quantity (Kg)" />
+                            <select required value={adjProductId} onChange={e => setAdjProductId(e.target.value)} className="w-full p-4 rounded-2xl bg-slate-100 border-none text-sm font-bold"><option value="">-- Choose Item --</option>{productsWithLiveStock.map(p => <option key={p.id} value={p.id}>{p.name} (Ready: {p.stock}pkts)</option>)}</select>
+                            <input type="number" required value={adjNewQty} onChange={e => setAdjNewQty(e.target.value)} className="w-full p-4 rounded-2xl bg-slate-100 border-none text-sm font-bold" placeholder="New Quantity (Units)" />
                             <select value={adjReason} onChange={e => setAdjReason(e.target.value)} className="w-full p-4 rounded-2xl bg-slate-100 border-none text-sm font-bold"><option value="Stock Count Correction">Audit Check</option><option value="Damaged/Spoiled">Spoilage/Damage</option><option value="Other">Miscellaneous</option></select>
                             <button type="submit" disabled={isSubmittingAdj} className="w-full py-5 bg-slate-900 text-white rounded-3xl font-black uppercase tracking-widest text-sm shadow-xl active:scale-95 disabled:opacity-30">{isSubmittingAdj ? 'Syncing...' : 'Commit Change'}</button>
                         </form>
@@ -661,8 +631,8 @@ export const SalesTab: React.FC<SalesTabProps> = ({
                     <div className="bg-white rounded-[3rem] shadow-2xl w-full max-w-lg p-10 animate-scale-in max-h-[90vh] overflow-y-auto">
                         <div className="flex justify-between items-center mb-8"><h3 className="text-2xl font-black text-slate-900 tracking-tight">{editingCustomer ? 'Edit Profile' : 'Enroll Client'}</h3><button onClick={() => setShowCustomerModal(false)} className="p-2 hover:bg-slate-100 rounded-full transition-colors"><svg className="w-6 h-6 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" /></svg></button></div>
                         <form onSubmit={handleSaveCustomer} className="space-y-5">
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4"><div><label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1.5 ml-1">Legal Identity / Name</label><input type="text" required value={custName} onChange={e => setCustName(e.target.value)} className="w-full p-4 rounded-2xl bg-slate-100 border-none text-sm font-bold" placeholder="e.g. John Trading Co." /></div><div><label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1.5 ml-1">Segment Type</label><select value={custType} onChange={e => setCustType(e.target.value as any)} className="w-full p-4 rounded-2xl bg-slate-100 border-none text-sm font-bold"><option value="RETAIL">Retail Consumer</option><option value="WHOLESALE">Wholesale Distributor</option><option value="LOCAL">Local Vendor</option></select></div></div>
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4"><div><label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1.5 ml-1">Email Address</label><input type="email" value={custEmail} onChange={e => setCustEmail(e.target.value)} className="w-full p-4 rounded-2xl bg-slate-100 border-none text-sm font-bold" placeholder="client@email.com" /></div><div><label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1.5 ml-1">Contact Number</label><input type="tel" value={custPhone} onChange={e => setCustPhone(e.target.value)} className="w-full p-4 rounded-2xl bg-slate-100 border-none text-sm font-bold" placeholder="+60..." /></div></div>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4"><div><label className="block text-[10px] font-black text-slate-500 uppercase ml-1 mb-1.5">Legal Identity / Name</label><input type="text" required value={custName} onChange={e => setCustName(e.target.value)} className="w-full p-4 rounded-2xl bg-slate-100 border-none text-sm font-bold" placeholder="e.g. John Trading Co." /></div><div><label className="block text-[10px] font-black text-slate-500 uppercase ml-1 mb-1.5">Segment Type</label><select value={custType} onChange={e => setCustType(e.target.value as any)} className="w-full p-4 rounded-2xl bg-slate-100 border-none text-sm font-bold"><option value="RETAIL">Retail Consumer</option><option value="WHOLESALE">Wholesale Distributor</option><option value="LOCAL">Local Vendor</option></select></div></div>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4"><div><label className="block text-[10px] font-black text-slate-500 uppercase ml-1 mb-1.5">Email Address</label><input type="email" value={custEmail} onChange={e => setCustEmail(e.target.value)} className="w-full p-4 rounded-2xl bg-slate-100 border-none text-sm font-bold" placeholder="client@email.com" /></div><div><label className="block text-[10px] font-black text-slate-500 uppercase ml-1 mb-1.5">Contact Number</label><input type="tel" value={custPhone} onChange={e => setCustPhone(e.target.value)} className="w-full p-4 rounded-2xl bg-slate-100 border-none text-sm font-bold" placeholder="+60..." /></div></div>
                             {editingCustomer && (<div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2"><div className="p-4 bg-slate-50 rounded-2xl border border-slate-100"><label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Accumulated Points</label><div className="text-lg font-black text-amber-600">{editingCustomer.loyaltyPoints || 0} pts</div></div><div className="p-4 bg-slate-50 rounded-2xl border border-slate-100"><label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Lifetime Value (Spent)</label><div className="text-lg font-black text-emerald-600">RM {(editingCustomer.totalSpent || 0).toLocaleString()}</div></div></div>)}
                             <button type="submit" disabled={isSubmittingCustomer} className="w-full py-5 bg-indigo-600 text-white rounded-3xl font-black uppercase tracking-widest text-sm shadow-xl active:scale-95 disabled:opacity-30 mt-4">{isSubmittingCustomer ? 'Syncing...' : editingCustomer ? 'Update Profile' : 'Enroll Customer'}</button>
                         </form>

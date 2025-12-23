@@ -9,9 +9,80 @@ interface Props {
 }
 
 export const Reports: React.FC<Props> = ({ processingLogs, packagingHistory, deliveryLogs, allDeliveries }) => {
-    const [view, setView] = useState<'Production' | 'Audit' | 'Logistics'>('Production');
+    const [view, setView] = useState<'Production' | 'Processing' | 'Packaging' | 'Logistics'>('Production');
     const [activeRecord, setActiveRecord] = useState<DeliveryRecord | null>(null);
     const [isProofViewerOpen, setIsProofViewerOpen] = useState(false);
+    const [expandedBatches, setExpandedBatches] = useState<Set<string>>(new Set());
+
+    const toggleBatchExpansion = (batchId: string) => {
+        const next = new Set(expandedBatches);
+        if (next.has(batchId)) next.delete(batchId);
+        else next.add(batchId);
+        setExpandedBatches(next);
+    };
+
+    const handleExportProcessing = () => {
+        const headers = [
+            "Batch ID", "Variety", "Source", "Status",
+            "Intake Stated (kg)", "Intake Actual (kg)", "Intake Variance (kg)", "Received By", "Intake Time",
+            "QC Inspector", "QC Time", "QC Notes", "Accepted Weight (kg)", "Rejected Weight (kg)",
+            "Grading Staff", "Grading Time", "Grade A (kg)", "Grade B (kg)", "Grade C (kg)",
+            "Cleaning Staff", "Cleaning Time"
+        ];
+        const rows = processingLogs.map(l => [
+            l.batchId,
+            l.mushroomType,
+            l.sourceVillage,
+            l.status,
+            l.statedWeight?.toFixed(2) || '0.00',
+            l.actualWeight?.toFixed(2) || '0.00',
+            l.variance?.toFixed(2) || '0.00',
+            l.receivedBy || 'N/A',
+            l.intakeTimestamp ? new Date(l.intakeTimestamp).toLocaleString() : 'N/A',
+            l.qcStaff || 'N/A',
+            l.qcTimestamp ? new Date(l.qcTimestamp).toLocaleString() : 'N/A',
+            l.qcVisualNotes?.replace(/,/g, ';') || 'N/A',
+            l.acceptedWeight?.toFixed(2) || '0.00',
+            l.rejectedWeight?.toFixed(2) || '0.00',
+            l.gradingStaff || 'N/A',
+            l.gradingTimestamp ? new Date(l.gradingTimestamp).toLocaleString() : 'N/A',
+            l.grades?.gradeA.toFixed(2) || '0.00',
+            l.grades?.gradeB.toFixed(2) || '0.00',
+            l.grades?.gradeC.toFixed(2) || '0.00',
+            l.cleaningStaff || 'N/A',
+            l.cleaningTimestamp ? new Date(l.cleaningTimestamp).toLocaleString() : 'N/A'
+        ]);
+        const csvContent = "data:text/csv;charset=utf-8," + [headers.join(','), ...rows.map(e => e.join(','))].join('\n');
+        const encodedUri = encodeURI(csvContent);
+        const link = document.createElement("a");
+        link.setAttribute("href", encodedUri);
+        link.setAttribute("download", `detailed_processing_report_${new Date().toISOString().split('T')[0]}.csv`);
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+    };
+
+    const handleExportPackaging = () => {
+        const headers = ["Batch ID", "Variety", "Grade", "Weight (kg)", "Units (200g)", "Operator", "Supervisor", "Packaging Date"];
+        const rows = packagingHistory.map(l => [
+            l.batchId,
+            l.mushroomType,
+            l.grade,
+            l.weight.toFixed(2),
+            l.units,
+            l.operator,
+            l.supervisor,
+            l.packagingDate
+        ]);
+        const csvContent = "data:text/csv;charset=utf-8," + [headers.join(','), ...rows.map(e => e.join(','))].join('\n');
+        const encodedUri = encodeURI(csvContent);
+        const link = document.createElement("a");
+        link.setAttribute("href", encodedUri);
+        link.setAttribute("download", `packaging_history_${new Date().toISOString().split('T')[0]}.csv`);
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+    };
 
     const printDeliveryOrder = (del: DeliveryRecord) => {
         const printWindow = window.open('', '_blank');
@@ -99,10 +170,11 @@ export const Reports: React.FC<Props> = ({ processingLogs, packagingHistory, del
 
     return (
         <div className="space-y-8 animate-fade-in-up">
-            <div className="flex bg-gray-100 p-1 rounded-xl w-fit">
+            <div className="flex bg-gray-100 p-1 rounded-xl w-fit overflow-x-auto scrollbar-hide">
                 {[
-                    { id: 'Production', label: 'Overview' },
-                    { id: 'Audit', label: 'Processing History' },
+                    { id: 'Production', label: 'Dashboard' },
+                    { id: 'Processing', label: 'Processing History' },
+                    { id: 'Packaging', label: 'Packaging History' },
                     { id: 'Logistics', label: 'Delivery History' }
                 ].map(v => (
                     <button 
@@ -149,22 +221,202 @@ export const Reports: React.FC<Props> = ({ processingLogs, packagingHistory, del
                         </div>
                     </div>
                 </div>
-            ) : view === 'Audit' ? (
-                <div className="bg-white rounded-2xl border border-gray-100 overflow-hidden shadow-sm">
+            ) : view === 'Processing' ? (
+                <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden animate-fade-in">
+                    <div className="p-6 border-b flex justify-between items-center bg-gray-50/50">
+                        <div>
+                            <h3 className="text-sm font-black text-slate-700 uppercase tracking-widest">Processing & Intake Audit Ledger</h3>
+                            <p className="text-[10px] text-slate-400 font-bold uppercase mt-1 italic">Click a batch for detailed step-by-step audit logs</p>
+                        </div>
+                        <button 
+                            onClick={handleExportProcessing}
+                            className="bg-white border border-slate-200 px-4 py-2 rounded-xl text-[10px] font-black uppercase hover:bg-slate-50 transition-all flex items-center gap-2"
+                        >
+                            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
+                            Export to Excel (Detailed)
+                        </button>
+                    </div>
                     <div className="overflow-x-auto">
                         <table className="min-w-full divide-y divide-gray-200 text-sm text-left">
                             <thead className="bg-gray-50 text-[10px] font-black text-gray-400 uppercase tracking-widest">
-                                <tr><th className="px-6 py-4">Timestamp</th><th className="px-6 py-4">Transaction Event</th><th className="px-6 py-4">Reference ID</th><th className="px-6 py-4">Authorized User</th></tr>
+                                <tr>
+                                    <th className="px-6 py-4">Batch ID & Variety</th>
+                                    <th className="px-6 py-4">Origin</th>
+                                    <th className="px-6 py-4">Intake Audit</th>
+                                    <th className="px-6 py-4">Variance</th>
+                                    <th className="px-6 py-4 text-center">Status</th>
+                                    <th className="px-6 py-4 text-right">Step Logs</th>
+                                </tr>
                             </thead>
                             <tbody className="divide-y divide-gray-100">
-                                {processingLogs.map(l => (
+                                {processingLogs.map(l => {
+                                    const isExpanded = expandedBatches.has(l.id);
+                                    const variance = (l.statedWeight || 0) - (l.actualWeight || 0);
+                                    const hasVariance = Math.abs(variance) > 0.001;
+
+                                    return (
+                                        <React.Fragment key={l.id}>
+                                            <tr className={`hover:bg-blue-50/30 transition-colors cursor-pointer ${isExpanded ? 'bg-blue-50/20' : ''}`} onClick={() => toggleBatchExpansion(l.id)}>
+                                                <td className="px-6 py-4">
+                                                    <div className="flex items-center gap-3">
+                                                        <span className="bg-slate-100 text-slate-700 px-2 py-1 rounded font-mono text-[10px] font-bold">{l.batchId}</span>
+                                                        <span className="font-bold text-gray-700">{l.mushroomType}</span>
+                                                    </div>
+                                                </td>
+                                                <td className="px-6 py-4 text-xs font-bold text-slate-400 uppercase">{l.sourceVillage}</td>
+                                                <td className="px-6 py-4">
+                                                    <div className="text-[11px] font-bold text-slate-600">
+                                                        <span className="text-slate-400 uppercase text-[9px] mr-1">Actual:</span>
+                                                        {l.actualWeight?.toFixed(2)} kg
+                                                    </div>
+                                                    <div className="text-[9px] text-slate-400 uppercase">
+                                                        Stated: {l.statedWeight?.toFixed(2)} kg
+                                                    </div>
+                                                </td>
+                                                <td className="px-6 py-4">
+                                                    <span className={`px-2 py-0.5 rounded text-[10px] font-black ${hasVariance ? 'bg-orange-50 text-orange-600 border border-orange-100' : 'bg-green-50 text-green-600'}`}>
+                                                        {hasVariance ? `${variance.toFixed(2)} kg` : '0.00 kg'}
+                                                    </span>
+                                                </td>
+                                                <td className="px-6 py-4 text-center">
+                                                    <span className={`px-2 py-0.5 rounded-full text-[8px] font-black uppercase ${
+                                                        l.status === 'COMPLETED' ? 'bg-green-100 text-green-700' : 'bg-blue-100 text-blue-700'
+                                                    }`}>
+                                                        {l.status}
+                                                    </span>
+                                                </td>
+                                                <td className="px-6 py-4 text-right">
+                                                    <button className="text-indigo-600 hover:text-indigo-800 transition-colors">
+                                                        {isExpanded ? (
+                                                            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 15l7-7 7 7" /></svg>
+                                                        ) : (
+                                                            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
+                                                        )}
+                                                    </button>
+                                                </td>
+                                            </tr>
+                                            {isExpanded && (
+                                                <tr className="bg-gray-50/50">
+                                                    <td colSpan={6} className="px-10 py-6">
+                                                        <div className="grid grid-cols-1 md:grid-cols-4 gap-6 relative">
+                                                            <div className="absolute top-1/2 left-0 w-full h-0.5 bg-gray-100 -z-0 hidden md:block"></div>
+                                                            
+                                                            {/* STEP 1: INTAKE */}
+                                                            <div className="relative bg-white p-4 rounded-xl border border-gray-100 shadow-sm z-10">
+                                                                <div className="text-[9px] font-black text-blue-500 uppercase mb-2 tracking-widest">Step 1: Intake</div>
+                                                                <p className="text-xs font-bold text-gray-700">{l.receivedBy}</p>
+                                                                <p className="text-[10px] text-gray-400 font-mono mt-1">
+                                                                    {l.intakeTimestamp ? new Date(l.intakeTimestamp).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' }) : 'N/A'}
+                                                                </p>
+                                                                <div className="mt-3 p-2 bg-blue-50 rounded-lg text-[9px] font-bold text-blue-700 border border-blue-100">
+                                                                    Variance: {variance.toFixed(2)} kg
+                                                                </div>
+                                                            </div>
+
+                                                            {/* STEP 2: QC */}
+                                                            <div className="relative bg-white p-4 rounded-xl border border-gray-100 shadow-sm z-10">
+                                                                <div className="text-[9px] font-black text-indigo-500 uppercase mb-2 tracking-widest">Step 2: QC Check</div>
+                                                                {l.qcStaff ? (
+                                                                    <>
+                                                                        <p className="text-xs font-bold text-gray-700">{l.qcStaff}</p>
+                                                                        <p className="text-[10px] text-gray-400 font-mono mt-1">
+                                                                            {l.qcTimestamp ? new Date(l.qcTimestamp).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' }) : 'N/A'}
+                                                                        </p>
+                                                                        <p className="text-[9px] text-indigo-600 mt-2 italic line-clamp-2">"{l.qcVisualNotes || 'No notes'}"</p>
+                                                                    </>
+                                                                ) : <p className="text-[10px] text-gray-300 italic py-2">Pending / Incomplete</p>}
+                                                            </div>
+
+                                                            {/* STEP 3: GRADING */}
+                                                            <div className="relative bg-white p-4 rounded-xl border border-gray-100 shadow-sm z-10">
+                                                                <div className="text-[9px] font-black text-purple-500 uppercase mb-2 tracking-widest">Step 3: Grading</div>
+                                                                {l.gradingStaff ? (
+                                                                    <>
+                                                                        <p className="text-xs font-bold text-gray-700">{l.gradingStaff}</p>
+                                                                        <p className="text-[10px] text-gray-400 font-mono mt-1">
+                                                                            {l.gradingTimestamp ? new Date(l.gradingTimestamp).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' }) : 'N/A'}
+                                                                        </p>
+                                                                        <div className="mt-2 flex gap-1">
+                                                                            <span className="text-[8px] bg-green-50 text-green-700 px-1 rounded border border-green-100">A: {l.grades?.gradeA}kg</span>
+                                                                            <span className="text-[8px] bg-blue-50 text-blue-700 px-1 rounded border border-blue-100">B: {l.grades?.gradeB}kg</span>
+                                                                        </div>
+                                                                    </>
+                                                                ) : <p className="text-[10px] text-gray-300 italic py-2">Pending / Incomplete</p>}
+                                                            </div>
+
+                                                            {/* STEP 4: CLEANING / FINAL */}
+                                                            <div className="relative bg-white p-4 rounded-xl border border-gray-100 shadow-sm z-10">
+                                                                <div className="text-[9px] font-black text-emerald-500 uppercase mb-2 tracking-widest">Step 4: Completion</div>
+                                                                {l.cleaningStaff ? (
+                                                                    <>
+                                                                        <p className="text-xs font-bold text-gray-700">{l.cleaningStaff}</p>
+                                                                        <p className="text-[10px] text-gray-400 font-mono mt-1">
+                                                                            {l.cleaningTimestamp ? new Date(l.cleaningTimestamp).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' }) : 'N/A'}
+                                                                        </p>
+                                                                        <div className="mt-2 text-[9px] font-black uppercase text-emerald-600">
+                                                                            Sent to Packaging Line
+                                                                        </div>
+                                                                    </>
+                                                                ) : <p className="text-[10px] text-gray-300 italic py-2">Pending / Incomplete</p>}
+                                                            </div>
+                                                        </div>
+                                                    </td>
+                                                </tr>
+                                            )}
+                                        </React.Fragment>
+                                    );
+                                })}
+                                {processingLogs.length === 0 && (
+                                    <tr><td colSpan={6} className="px-6 py-20 text-center text-gray-300 italic">No processing records available.</td></tr>
+                                )}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            ) : view === 'Packaging' ? (
+                <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden animate-fade-in">
+                    <div className="p-6 border-b flex justify-between items-center bg-gray-50/50">
+                        <h3 className="text-sm font-black text-slate-700 uppercase tracking-widest">Finished Goods Packaging Ledger</h3>
+                        <button 
+                            onClick={handleExportPackaging}
+                            className="bg-white border border-slate-200 px-4 py-2 rounded-xl text-[10px] font-black uppercase hover:bg-slate-50 transition-all flex items-center gap-2"
+                        >
+                            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
+                            Export to Excel (CSV)
+                        </button>
+                    </div>
+                    <div className="overflow-x-auto">
+                        <table className="min-w-full divide-y divide-gray-200 text-sm text-left">
+                            <thead className="bg-gray-50 text-[10px] font-black text-gray-400 uppercase tracking-widest">
+                                <tr>
+                                    <th className="px-6 py-4">Batch Ref</th>
+                                    <th className="px-6 py-4">Product Variety</th>
+                                    <th className="px-6 py-4 text-center">Grade</th>
+                                    <th className="px-6 py-4 text-right">Mass Used</th>
+                                    <th className="px-6 py-4 text-right">Units Output</th>
+                                    <th className="px-6 py-4">Operator</th>
+                                    <th className="px-6 py-4">Supervisor</th>
+                                    <th className="px-6 py-4">Pack Date</th>
+                                </tr>
+                            </thead>
+                            <tbody className="divide-y divide-gray-100">
+                                {packagingHistory.map(l => (
                                     <tr key={l.id} className="hover:bg-gray-50 transition-colors">
-                                        <td className="px-6 py-4 font-mono text-[11px] text-gray-400">{new Date(l.timestamp).toLocaleString()}</td>
-                                        <td className="px-6 py-4 font-bold text-gray-700">Intake Processing Entry</td>
-                                        <td className="px-6 py-4"><span className="bg-slate-100 px-2 py-1 rounded font-mono text-[10px] font-bold">{l.batchId}</span></td>
-                                        <td className="px-6 py-4 text-gray-500 text-[11px] font-medium">{l.receivedBy}</td>
+                                        <td className="px-6 py-4"><span className="bg-indigo-50 text-indigo-700 px-2 py-1 rounded font-mono text-[10px] font-bold">{l.batchId}</span></td>
+                                        <td className="px-6 py-4 font-bold text-gray-700">{l.mushroomType}</td>
+                                        <td className="px-6 py-4 text-center">
+                                            <span className="bg-slate-900 text-white px-2 py-0.5 rounded text-[10px] font-black">Grade {l.grade}</span>
+                                        </td>
+                                        <td className="px-6 py-4 text-right font-mono font-bold text-gray-500">{l.weight.toFixed(2)} kg</td>
+                                        <td className="px-6 py-4 text-right font-black text-indigo-600">{l.units} <span className="text-[10px] text-slate-400 font-normal">Packs</span></td>
+                                        <td className="px-6 py-4 text-gray-500 text-[11px] font-medium">{l.operator}</td>
+                                        <td className="px-6 py-4 text-gray-500 text-[11px] font-medium">{l.supervisor}</td>
+                                        <td className="px-6 py-4 font-mono text-[11px] text-gray-400">{l.packagingDate}</td>
                                     </tr>
                                 ))}
+                                {packagingHistory.length === 0 && (
+                                    <tr><td colSpan={8} className="px-6 py-20 text-center text-gray-300 italic">No packaging records available.</td></tr>
+                                )}
                             </tbody>
                         </table>
                     </div>
