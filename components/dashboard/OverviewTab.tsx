@@ -38,6 +38,7 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
     const [logisticsStats, setLogisticsStats] = useState({ scheduled: 0, delivering: 0, failed: 0 });
     const [latestEnvLog, setLatestEnvLog] = useState<any>(null);
     const [predictedYield, setPredictedYield] = useState(0);
+    const [yieldForecasts, setYieldForecasts] = useState<any[]>([]);
 
     useEffect(() => {
         const fetchData = async () => {
@@ -102,11 +103,40 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
                     });
                     setLogisticsStats(logStats);
 
-                    // Fetch Yield Forecasts
-                    const forecastQ = query(collection(db, "yield_forecasts"));
-                    const forecastSnap = await getDocs(forecastQ);
-                    const totalPredicted = forecastSnap.docs.reduce((acc, doc) => acc + (doc.data().predictedQty || 0), 0);
+                    // Fetch Yield Forecasts (Synced directly from Farming Logs A & B)
+                    const [farmingASnap, farmingBSnap] = await Promise.all([
+                        getDocs(query(collection(db, 'dailyfarming_logA'), orderBy('timestamp', 'desc'), limit(100))),
+                        getDocs(query(collection(db, 'dailyfarming_logB'), orderBy('timestamp', 'desc'), limit(100)))
+                    ]);
+
+                    const activeForecasts: any[] = [];
+
+                    const processBatch = (doc: any, vId: string) => {
+                        const d = doc.data();
+                        const predicted = d.predictedYield || 0;
+                        const actual = d.totalYield || 0;
+                        const wastage = d.totalWastage || 0;
+                        const isCompleted = d.batchStatus === 'COMPLETED' || (predicted > 0 && (actual + wastage) >= predicted);
+
+                        if (d.type === 'SUBSTRATE_PREP' && !isCompleted && predicted > 0) {
+                            activeForecasts.push({
+                                id: doc.id,
+                                batchId: d.batchId || doc.id,
+                                strain: d.mushroomStrain || 'Unknown',
+                                predictedQty: predicted,
+                                currentYield: actual,
+                                villageId: vId,
+                                status: 'IN_PROGRESS'
+                            });
+                        }
+                    };
+
+                    farmingASnap.forEach(d => processBatch(d, 'Village A'));
+                    farmingBSnap.forEach(d => processBatch(d, 'Village B'));
+                    
+                    const totalPredicted = activeForecasts.reduce((acc, curr) => acc + curr.predictedQty, 0);
                     setPredictedYield(totalPredicted);
+                    setYieldForecasts(activeForecasts);
                 }
             } catch (e) {
                 console.error("Overview data fetch error", e);
@@ -198,6 +228,7 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
                 processingStats={processingStats} 
                 logisticsStats={logisticsStats}
                 predictedYield={predictedYield}
+                yieldForecasts={yieldForecasts}
             />;
         }
     }

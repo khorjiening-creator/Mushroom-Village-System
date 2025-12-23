@@ -1,4 +1,3 @@
-
 export enum VillageType {
   A = 'Village A',
   B = 'Village B',
@@ -169,6 +168,7 @@ export interface DeliveryRecord {
   evidenceImage?: string;
   deliveredAt?: string;
   failureReason?: string;
+  pic?: string; // New Field: Person In Charge
 }
 
 // Added missing StockMovement interface
@@ -274,9 +274,11 @@ export interface Product {
 
 export interface Customer {
     id: string;
-    name: string;
+    name: string; // Company Name
     email: string;
     phone: string;
+    address: string; // New Field
+    pic: string;     // New Field (Person In Charge)
     type: 'WHOLESALE' | 'RETAIL' | 'LOCAL';
     loyaltyPoints: number;
     totalSpent: number;

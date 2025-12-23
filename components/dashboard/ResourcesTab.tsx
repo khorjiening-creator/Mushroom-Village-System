@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useMemo } from 'react';
 import { collection, onSnapshot, doc, updateDoc, addDoc, setDoc, query, where, getDocs, increment, Timestamp, orderBy, limit } from 'firebase/firestore';
 import { db } from '../../services/firebase';
@@ -61,12 +62,6 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({
     // Environment Context for Equipment Status
     const [latestEnvLog, setLatestEnvLog] = useState<{temperature: number, humidity: number} | null>(null);
 
-    // Aggregation states for Village C
-    const [harvestLogsA, setHarvestLogsA] = useState<HarvestLog[]>([]);
-    const [harvestLogsB, setHarvestLogsB] = useState<HarvestLog[]>([]);
-    const [finRecordsA, setFinRecordsA] = useState<FinancialRecord[]>([]);
-    const [finRecordsB, setFinRecordsB] = useState<FinancialRecord[]>([]);
-
     // KPIs
     const [todayProduction, setTodayProduction] = useState(0);
     const [inventoryOutCount, setInventoryOutCount] = useState(0); 
@@ -118,14 +113,13 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({
     const [loadingHistory, setLoadingHistory] = useState(false);
 
     // --- Helpers ---
-    const getResourceColName = (vid: VillageType) => vid === VillageType.A ? 'resourcesA' : vid === VillageType.B ? 'resourcesB' : 'resourcesC';
-    const getInventoryColName = (vid: VillageType) => vid === VillageType.A ? 'inventoryA' : vid === VillageType.B ? 'inventoryB' : 'inventoryC';
-    const getHarvestColName = (vid: VillageType) => vid === VillageType.A ? 'harvestYield_A' : vid === VillageType.B ? 'harvestYield_B' : 'harvestYield_A';
+    const getResourceColName = (vid: VillageType) => vid === VillageType.A ? 'resourcesA' : 'resourcesB';
+    const getInventoryColName = (vid: VillageType) => vid === VillageType.A ? 'inventoryA' : 'inventoryB';
+    const getHarvestColName = (vid: VillageType) => vid === VillageType.A ? 'harvestYield_A' : 'harvestYield_B';
     
     // Updated Helper: Returns both Main and Expense collections
     const getFinancialCollections = (vid: VillageType) => {
-        let suffix = 'C';
-        if (vid === VillageType.A) suffix = 'A';
+        let suffix = 'A';
         if (vid === VillageType.B) suffix = 'B';
         return {
             main: `financialRecords_${suffix}`,
@@ -201,8 +195,6 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({
 
     // --- Auto-cleanup Equipment Locations ---
     useEffect(() => {
-        if (villageId === VillageType.C) return;
-        
         const cleanupEquipmentLocations = async () => {
             try {
                 const farmingCol = villageId === VillageType.A ? 'dailyfarming_logA' : 'dailyfarming_logB';
@@ -270,50 +262,26 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({
         }
     }, [selectedPurchaseResource, purchaseQty]);
 
-    // --- Aggregation Logic: Unified Supply Chain View for Village C ---
-    const activeHarvestSource = useMemo(() => {
-        if (villageId === VillageType.C) {
-            return [...harvestLogsA, ...harvestLogsB];
-        }
-        return harvestLogs;
-    }, [villageId, harvestLogs, harvestLogsA, harvestLogsB]);
-
-    const activeFinSource = useMemo(() => {
-        if (villageId === VillageType.C) {
-            return [...financialRecords, ...finRecordsA, ...finRecordsB];
-        }
-        return financialRecords;
-    }, [villageId, financialRecords, finRecordsA, finRecordsB]);
-
     // Track pending deliveries from financial records
     const pendingReceipts = useMemo(() => {
-        return activeFinSource.filter(rec => 
+        return financialRecords.filter(rec => 
             rec.category === 'Supplies' && 
             rec.type === 'EXPENSE' && 
             rec.status === 'COMPLETED' && 
             rec.receivedInStock === false &&
             rec.materialId // Must have a linked material
         );
-    }, [activeFinSource]);
-
-    // Track receipts with discrepancies
-    const discrepancyReceipts = useMemo(() => {
-        return activeFinSource.filter(rec => {
-            const hasVariance = rec.orderQty !== undefined && rec.actualReceivedQty !== undefined && rec.orderQty !== rec.actualReceivedQty;
-            const notResolved = !(rec as any).varianceResolved;
-            return rec.category === 'Supplies' && rec.receivedInStock === true && hasVariance && notResolved;
-        });
-    }, [activeFinSource]);
+    }, [financialRecords]);
 
     // History of received supplies
     const receivedSuppliesHistory = useMemo(() => {
-        return activeFinSource.filter(rec => 
+        return financialRecords.filter(rec => 
             rec.category === 'Supplies' && 
             rec.type === 'EXPENSE' && 
             rec.receivedInStock === true &&
             rec.materialId
         ).sort((a,b) => (b.updatedAt || b.date).localeCompare(a.updatedAt || a.date)).slice(0, 10);
-    }, [activeFinSource]);
+    }, [financialRecords]);
 
     // Map pending weights to resource ID for the "Pending Received" column
     const pendingWeightsByResource = useMemo(() => {
@@ -331,87 +299,12 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({
         return mapping;
     }, [pendingReceipts]);
 
-    // --- Core Logic: Inventory Calculation ---
-    const processedOutputInventory = useMemo(() => {
-        const harvestTotals: Record<string, { batchId: string, strain: string, totalHarvest: number, lastTimestamp: string }> = {};
-        
-        activeHarvestSource.forEach(log => {
-            const batchId = log.batchId;
-            const weight = log.weightKg || log.totalYield || 0;
-            if (!harvestTotals[batchId]) {
-                harvestTotals[batchId] = { 
-                    batchId, 
-                    strain: log.strain, 
-                    totalHarvest: 0, 
-                    lastTimestamp: log.timestamp 
-                };
-            }
-            harvestTotals[batchId].totalHarvest += weight;
-            if (new Date(log.timestamp) > new Date(harvestTotals[batchId].lastTimestamp)) {
-                harvestTotals[batchId].lastTimestamp = log.timestamp;
-            }
-        });
-
-        const salesTotals: Record<string, number> = {};
-        activeFinSource.forEach(rec => {
-            if (rec.category === 'Sales' && rec.batchId && rec.weightKg && rec.type === 'INCOME') {
-                salesTotals[rec.batchId] = (salesTotals[rec.batchId] || 0) + rec.weightKg;
-            }
-        });
-
-        return Object.values(harvestTotals).map(item => {
-            const sold = salesTotals[item.batchId] || 0;
-            const remaining = Math.max(0, item.totalHarvest - sold);
-            return {
-                ...item,
-                soldWeight: sold,
-                remainingWeight: remaining
-            };
-        }).sort((a, b) => new Date(b.lastTimestamp).getTime() - new Date(a.lastTimestamp).getTime());
-    }, [activeHarvestSource, activeFinSource]);
-
-    const totalCurrentStock = useMemo(() => {
-        return processedOutputInventory.reduce((acc, curr) => acc + curr.remainingWeight, 0);
-    }, [processedOutputInventory]);
-
     const totalResourceValue = useMemo(() => {
         return resources.reduce((acc, curr) => {
             const factor = curr.unit === 'L' ? 10 : 1;
             return acc + ((curr.quantity || 0) / factor * (curr.unitCost || 0));
         }, 0);
     }, [resources]);
-
-    // --- New Action-Oriented KPI Logic ---
-    const yieldStats = useMemo(() => {
-        const total = processedOutputInventory.reduce((a, c) => a + c.totalHarvest, 0);
-        if (processedOutputInventory.length < 2) return { total, change: 0 };
-        const latest = processedOutputInventory[0].totalHarvest;
-        const previous = processedOutputInventory[1].totalHarvest;
-        const change = previous > 0 ? ((latest - previous) / previous) * 100 : 0;
-        return { total, change };
-    }, [processedOutputInventory]);
-
-    const salesRevenue = useMemo(() => {
-        const totalWeight = processedOutputInventory.reduce((a, c) => a + c.soldWeight, 0);
-        const revenue = activeFinSource
-            .filter(rec => rec.category === 'Sales' && rec.type === 'INCOME' && rec.status === 'COMPLETED')
-            .reduce((acc, curr) => acc + curr.amount, 0);
-        return { totalWeight, revenue };
-    }, [processedOutputInventory, activeFinSource]);
-
-    const supplyDays = useMemo(() => {
-        const sevenDaysAgo = new Date();
-        sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
-        const recentSales = activeFinSource.filter(rec => 
-            rec.category === 'Sales' && 
-            rec.type === 'INCOME' && 
-            new Date(rec.date) >= sevenDaysAgo
-        );
-        const weeklyWeight = recentSales.reduce((acc, curr) => acc + (curr.weightKg || 0), 0);
-        const dailyBurnRate = weeklyWeight / 7;
-        const days = dailyBurnRate > 0 ? totalCurrentStock / dailyBurnRate : 0;
-        return days;
-    }, [activeFinSource, totalCurrentStock]);
 
     const resourceAtRisk = useMemo(() => {
         return resources.reduce((acc, curr) => {
@@ -434,9 +327,9 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({
             
             // Check if equipment needs seeding (auto-generate requirement)
             const hasEquipment = list.some(i => i.category === 'Equipment');
-            if (!hasEquipment && list.length > 0 && villageId !== VillageType.C) {
+            if (!hasEquipment && list.length > 0) {
                 seedDefaultResources(list);
-            } else if (list.length === 0 && villageId !== VillageType.C) {
+            } else if (list.length === 0) {
                 seedDefaultResources([]);
             } else {
                 setResources(list);
@@ -450,76 +343,26 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({
              setInventory(list);
         });
 
-        // Harvest logic based on village
-        if (villageId === VillageType.C) {
-            // Aggregated view for C
-            const unsubA = onSnapshot(query(collection(db, 'harvestYield_A'), orderBy('timestamp', 'desc'), limit(150)), (snap) => {
-                setHarvestLogsA(snap.docs.map(d => ({id: d.id, ...d.data()} as HarvestLog)));
-            });
-            const unsubB = onSnapshot(query(collection(db, 'harvestYield_B'), orderBy('timestamp', 'desc'), limit(150)), (snap) => {
-                setHarvestLogsB(snap.docs.map(d => ({id: d.id, ...d.data()} as HarvestLog)));
-            });
-            const unsubFinA = onSnapshot(query(collection(db, 'financialRecords_A'), where('category', '==', 'Sales')), (snap) => {
-                setFinRecordsA(snap.docs.map(d => ({id: d.id, ...d.data()} as FinancialRecord)));
-            });
-            const unsubFinB = onSnapshot(query(collection(db, 'financialRecords_B'), where('category', '==', 'Sales')), (snap) => {
-                setFinRecordsB(snap.docs.map(d => ({id: d.id, ...d.data()} as FinancialRecord)));
-            });
+        const harvCol = collection(db, getHarvestColName(villageId));
+        const qHarvest = query(harvCol, orderBy('timestamp', 'desc'), limit(150));
+        const unsubHarvest = onSnapshot(qHarvest, (snapshot) => {
+            const list: HarvestLog[] = [];
+            snapshot.forEach(doc => list.push({ id: doc.id, ...doc.data() } as HarvestLog));
+            setHarvestLogs(list);
+        });
 
-            return () => { unsubRes(); unsubInv(); unsubA(); unsubB(); unsubFinA(); unsubFinB(); };
-        } else {
-            const harvCol = collection(db, getHarvestColName(villageId));
-            const qHarvest = query(harvCol, orderBy('timestamp', 'desc'), limit(150));
-            const unsubHarvest = onSnapshot(qHarvest, (snapshot) => {
-                const list: HarvestLog[] = [];
-                snapshot.forEach(doc => list.push({ id: doc.id, ...doc.data() } as HarvestLog));
-                setHarvestLogs(list);
-            });
-
-            // Fetch Environment snapshot for Equipment Status
-            const envColName = `environmentLogs_${villageId.replace(/\s/g, '')}`;
-            const qEnv = query(collection(db, envColName), orderBy('timestamp', 'desc'), limit(1));
-            const unsubEnv = onSnapshot(qEnv, (snap) => {
-                if (!snap.empty) {
-                    const d = snap.docs[0].data();
-                    setLatestEnvLog({ temperature: d.temperature, humidity: d.humidity });
-                }
-            });
-
-            return () => { unsubRes(); unsubInv(); unsubHarvest(); unsubEnv(); };
-        }
-    }, [villageId]);
-
-    useEffect(() => {
-        fetchKPIs();
-    }, [villageId]);
-
-    const fetchKPIs = async () => {
-        try {
-            if (villageId === VillageType.C) {
-                setTodayProduction(0); 
-                setInventoryOutCount(0);
-                return;
+        // Fetch Environment snapshot for Equipment Status
+        const envColName = `environmentLogs_${villageId.replace(/\s/g, '')}`;
+        const qEnv = query(collection(db, envColName), orderBy('timestamp', 'desc'), limit(1));
+        const unsubEnv = onSnapshot(qEnv, (snap) => {
+            if (!snap.empty) {
+                const d = snap.docs[0].data();
+                setLatestEnvLog({ temperature: d.temperature, humidity: d.humidity });
             }
-            const harvestColName = getHarvestColName(villageId);
-            const harvestCol = collection(db, harvestColName);
-            const startOfDay = new Date();
-            startOfDay.setHours(0,0,0,0);
-            const qToday = query(harvestCol, where('timestamp', '>=', startOfDay.toISOString()));
-            const snapToday = await getDocs(qToday);
-            let todayTotal = 0;
-            snapToday.forEach(doc => todayTotal += (doc.data().totalYield || doc.data().weightKg || 0));
-            setTodayProduction(todayTotal);
+        });
 
-            const { main } = getFinancialCollections(villageId);
-            const finCol = collection(db, main);
-            const qSales = query(finCol, where('villageId', '==', villageId), where('type', '==', 'INCOME'), where('category', '==', 'Sales'));
-            const snapSales = await getDocs(qSales);
-            setInventoryOutCount(snapSales.size);
-        } catch (e) {
-            console.error("Error fetching KPIs", e);
-        }
-    };
+        return () => { unsubRes(); unsubInv(); unsubHarvest(); unsubEnv(); };
+    }, [villageId]);
 
     const seedDefaultResources = async (existingList: FirestoreResource[] = []) => {
         const materialDefaults = [
@@ -606,6 +449,7 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({
                 quantity: initialQty,
                 lowStockThreshold: threshold,
                 unitCost: unitCost,
+                condition: 'N/A',
                 updatedAt: new Date().toISOString()
             });
             if (initialQty > 0) {
@@ -735,9 +579,6 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({
             // DUAL UPDATE: Update both specific expense collection AND main collection
             await updateDoc(mainFinRef, updateData);
             
-            // Check if exists in expense collection before updating (just in case)
-            // Or assume valid data structure. Since we just created it in purchase request, it should exist.
-            // If it's a very old record it might not exist in split collection, but we assume migrated data or new system.
             try {
                 await updateDoc(expFinRef, updateData);
             } catch (err) {
@@ -758,12 +599,8 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({
         }
     };
 
-    const totalProcessedStock = inventory.reduce((acc, item) => acc + (item.quantity || 0), 0);
-    const totalAvailableStock = totalProcessedStock + totalCurrentStock;
-    const ringClass = theme?.ring || "focus:ring-indigo-500";
-
-    const equipmentList = resources.filter(r => r.category === 'Equipment');
     const materialList = resources.filter(r => r.category !== 'Equipment');
+    const equipmentList = resources.filter(r => r.category === 'Equipment');
 
     return (
         <div className="space-y-6 animate-fade-in-up relative">
@@ -870,68 +707,26 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({
             )}
 
             {/* KPI Section */}
-            <div className={`grid grid-cols-1 ${villageId === VillageType.C ? 'md:grid-cols-3' : 'md:grid-cols-4'} gap-4`}>
-                <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm relative overflow-hidden">
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm relative overflow-hidden border-l-4 border-l-indigo-500">
                     <div className="relative z-10">
-                        <h3 className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1">Total Yield (Aggregate)</h3>
-                        <div className="flex items-baseline gap-2">
-                            <span className="text-3xl font-black text-green-600">{yieldStats.total.toFixed(1)}</span>
-                            <span className="text-sm text-gray-400 font-bold">kg</span>
-                            {yieldStats.change !== 0 && (
-                                <span className={`text-[10px] font-black px-1.5 py-0.5 rounded-lg flex items-center gap-0.5 ${yieldStats.change > 0 ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
-                                    {yieldStats.change > 0 ? '▲' : '▼'} {Math.abs(yieldStats.change).toFixed(1)}%
-                                </span>
-                            )}
-                        </div>
-                        <p className="text-[9px] text-gray-400 font-bold uppercase mt-1">vs last batch cycle</p>
-                    </div>
-                </div>
-
-                <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm relative overflow-hidden">
-                    <div className="relative z-10">
-                        <h3 className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1">Total Sold (Aggregate)</h3>
+                        <h3 className="text-[10px] font-black text-indigo-500 uppercase tracking-widest mb-1">Inventory Assets</h3>
                         <div className="flex items-baseline gap-1">
-                            <span className="text-3xl font-black text-indigo-600">{salesRevenue.totalWeight.toFixed(1)}</span>
-                            <span className="text-sm text-gray-400 font-bold">kg</span>
+                            <span className="text-sm font-bold text-gray-400">RM</span>
+                            <span className="text-3xl font-black text-indigo-700">{(totalResourceValue || 0).toLocaleString(undefined, {minimumFractionDigits: 2})}</span>
                         </div>
-                        <p className="text-[10px] text-indigo-500 font-black uppercase mt-1">Revenue: RM{salesRevenue.revenue.toLocaleString()}</p>
+                        {resourceAtRisk > 0 && (
+                            <p className="text-[10px] text-red-600 font-black uppercase mt-1 flex items-center gap-1">
+                                <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" /></svg>
+                                RM{resourceAtRisk.toLocaleString()} at risk (low stock)
+                            </p>
+                        )}
                     </div>
                 </div>
-
-                <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm relative overflow-hidden">
-                    <div className="relative z-10">
-                        <h3 className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1">Available Hub Supply</h3>
-                        <div className="flex items-baseline gap-1">
-                            <span className="text-3xl font-black text-blue-600">{(totalAvailableStock || 0).toFixed(1)}</span>
-                            <span className="text-sm text-gray-400 font-bold">kg</span>
-                        </div>
-                        <p className={`text-[10px] font-black uppercase mt-1 ${supplyDays < 5 ? 'text-red-600 animate-pulse' : 'text-blue-500'}`}>
-                            ≈ {supplyDays > 0 ? supplyDays.toFixed(0) : '--'} days of supply remaining
-                        </p>
-                    </div>
-                </div>
-
-                {villageId !== VillageType.C && (
-                    <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm relative overflow-hidden border-l-4 border-l-indigo-500">
-                        <div className="relative z-10">
-                            <h3 className="text-[10px] font-black text-indigo-500 uppercase tracking-widest mb-1">Inventory Assets</h3>
-                            <div className="flex items-baseline gap-1">
-                                <span className="text-sm font-bold text-gray-400">RM</span>
-                                <span className="text-3xl font-black text-indigo-700">{(totalResourceValue || 0).toLocaleString(undefined, {minimumFractionDigits: 2})}</span>
-                            </div>
-                            {resourceAtRisk > 0 && (
-                                <p className="text-[10px] text-red-600 font-black uppercase mt-1 flex items-center gap-1">
-                                    <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" /></svg>
-                                    RM{resourceAtRisk.toLocaleString()} at risk (low stock)
-                                </p>
-                            )}
-                        </div>
-                    </div>
-                )}
             </div>
 
             {/* Pending Receipts Logic */}
-            {villageId !== VillageType.C && pendingReceipts.length > 0 && (
+            {pendingReceipts.length > 0 && (
                 <div className="bg-orange-50 rounded-xl border border-orange-100 overflow-hidden animate-fade-in shadow-sm">
                     <div className="px-6 py-4 border-b border-orange-200 bg-orange-100/50 flex justify-between items-center">
                         <div>
@@ -1007,191 +802,204 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({
             )}
 
             {/* Material Table and Action Buttons */}
-            {villageId !== VillageType.C && (
-                <>
-                    <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-                        <div className="px-6 py-4 border-b border-gray-200 bg-gray-50 flex flex-col sm:flex-row justify-between items-start sm:items-center">
-                            <div>
-                                <h2 className="text-lg font-black text-gray-900 tracking-tight">Material Availability (Inputs)</h2>
-                                <p className="text-xs text-gray-400 font-medium">Costing and quantity control for raw supplies.</p>
-                            </div>
-                            <div className="mt-2 sm:mt-0 flex gap-2 flex-wrap">
-                                <button onClick={handleAutoSetThresholds} className="px-4 py-2.5 bg-orange-50 text-orange-600 border border-orange-200 text-xs font-black uppercase rounded-xl shadow-sm hover:bg-orange-100 transition-all flex items-center gap-2">
-                                    Enforce Safe Limits (30kg)
-                                </button>
-                                <button onClick={() => setShowSupplyHistory(!showSupplyHistory)} className="px-4 py-2.5 bg-white text-blue-600 border border-blue-200 text-xs font-black uppercase rounded-xl shadow-sm hover:bg-blue-50 transition-all flex items-center gap-2">
-                                    {showSupplyHistory ? 'Hide History' : 'Supply History'}
-                                </button>
-                                <button onClick={() => { setIsAddMatModalOpen(true); }} className="px-4 py-2.5 bg-white text-gray-700 border border-gray-200 text-xs font-black uppercase rounded-xl shadow-sm hover:bg-gray-50 transition-all flex items-center gap-2">
-                                    New Material
-                                </button>
-                                <button onClick={() => { setPurchaseItemId(''); setIsPurchaseModalOpen(true); }} className="px-4 py-2.5 bg-indigo-600 text-white hover:bg-indigo-700 text-xs font-black uppercase rounded-xl shadow-lg transition-all flex items-center gap-2">
-                                    Purchase
-                                </button>
-                            </div>
-                        </div>
+            
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+                <div className="px-6 py-4 border-b border-gray-200 bg-gray-50 flex flex-col sm:flex-row justify-between items-start sm:items-center">
+                    <div>
+                        <h2 className="text-lg font-black text-gray-900 tracking-tight">Material Availability (Inputs)</h2>
+                        <p className="text-xs text-gray-400 font-medium">Costing and quantity control for raw supplies.</p>
+                    </div>
+                    <div className="mt-2 sm:mt-0 flex gap-2 flex-wrap">
+                        <button onClick={handleAutoSetThresholds} className="px-4 py-2.5 bg-orange-50 text-orange-600 border border-orange-200 text-xs font-black uppercase rounded-xl shadow-sm hover:bg-orange-100 transition-all flex items-center gap-2">
+                            Enforce Safe Limits (30kg)
+                        </button>
+                        <button onClick={() => setShowSupplyHistory(!showSupplyHistory)} className="px-4 py-2.5 bg-white text-blue-600 border border-blue-200 text-xs font-black uppercase rounded-xl shadow-sm hover:bg-blue-50 transition-all flex items-center gap-2">
+                            {showSupplyHistory ? 'Hide History' : 'Supply History'}
+                        </button>
+                        <button onClick={() => { setIsAddMatModalOpen(true); }} className="px-4 py-2.5 bg-white text-gray-700 border border-gray-200 text-xs font-black uppercase rounded-xl shadow-sm hover:bg-gray-50 transition-all flex items-center gap-2">
+                            New Material
+                        </button>
+                        <button onClick={() => { setPurchaseItemId(''); setIsPurchaseModalOpen(true); }} className="px-4 py-2.5 bg-indigo-600 text-white hover:bg-indigo-700 text-xs font-black uppercase rounded-xl shadow-lg transition-all flex items-center gap-2">
+                            Purchase
+                        </button>
+                    </div>
+                </div>
 
-                        {showSupplyHistory && (
-                            <div className="bg-slate-50 border-b border-gray-200 p-4 animate-fade-in">
-                                <h4 className="text-xs font-bold text-gray-500 uppercase mb-3 ml-2">Recent Confirmed Arrivals</h4>
-                                <div className="overflow-x-auto">
-                                    <table className="min-w-full divide-y divide-gray-200 text-xs bg-white rounded-lg border border-gray-200 shadow-sm">
-                                        <thead className="bg-gray-100">
-                                            <tr><th className="px-4 py-2 text-left text-gray-500">Date Received</th><th className="px-4 py-2 text-left text-gray-500">Transaction ID</th><th className="px-4 py-2 text-left text-gray-500">Item</th><th className="px-4 py-2 text-right text-gray-500">Qty Received</th><th className="px-4 py-2 text-right text-gray-500">Cost</th></tr>
-                                        </thead>
-                                        <tbody className="divide-y divide-gray-100">
-                                            {receivedSuppliesHistory.map(rec => {
-                                                const res = resources.find(r => r.id === rec.materialId);
-                                                return (
-                                                    <tr key={rec.id} className="hover:bg-gray-50">
-                                                        <td className="px-4 py-2 text-gray-500">{new Date(rec.updatedAt || rec.date).toLocaleDateString()}</td>
-                                                        <td className="px-4 py-2 font-mono">{rec.transactionId}</td>
-                                                        <td className="px-4 py-2 font-bold">{res?.name || 'Unknown'}</td>
-                                                        <td className="px-4 py-2 text-right text-green-600 font-bold">+{rec.actualReceivedQty || rec.orderQty} {res?.unit}</td>
-                                                        <td className="px-4 py-2 text-right">RM{rec.amount.toFixed(2)}</td>
-                                                    </tr>
-                                                );
-                                            })}
-                                            {receivedSuppliesHistory.length === 0 && <tr><td colSpan={5} className="text-center py-4 text-gray-400 italic">No history available</td></tr>}
-                                        </tbody>
-                                    </table>
-                                </div>
-                            </div>
-                        )}
-
+                {showSupplyHistory && (
+                    <div className="bg-slate-50 border-b border-gray-200 p-4 animate-fade-in">
+                        <h4 className="text-xs font-bold text-gray-500 uppercase mb-3 ml-2">Recent Confirmed Arrivals</h4>
                         <div className="overflow-x-auto">
-                            <table className="min-w-full divide-y divide-gray-100">
-                                <thead className="bg-gray-50/50">
-                                    <tr className="text-[10px] font-black text-gray-400 uppercase tracking-widest">
-                                        <th className="px-6 py-4 text-left">Item Details</th>
-                                        <th className="px-6 py-4 text-left">Category</th>
-                                        <th className="px-6 py-4 text-right">Quantity</th>
-                                        <th className="px-6 py-4 text-right">Pending Received</th>
-                                        <th className="px-6 py-4 text-right">Unit Cost (RM)</th>
-                                        <th className="px-6 py-4 text-center">Availability</th>
-                                        <th className="px-6 py-4 text-center">Low Stock Limit</th>
-                                    </tr>
+                            <table className="min-w-full divide-y divide-gray-200 text-xs bg-white rounded-lg border border-gray-200 shadow-sm">
+                                <thead className="bg-gray-100">
+                                    <tr><th className="px-4 py-2 text-left text-gray-500">Date Received</th><th className="px-4 py-2 text-left text-gray-500">Transaction ID</th><th className="px-4 py-2 text-left text-gray-500">Item</th><th className="px-4 py-2 text-right text-gray-500">Qty Received</th><th className="px-4 py-2 text-right text-gray-500">Cost</th></tr>
                                 </thead>
-                                <tbody className="bg-white divide-y divide-gray-100">
-                                    {loading ? (
-                                        <tr><td colSpan={7} className="px-6 py-12 text-center text-sm text-gray-400 italic">Loading resources...</td></tr>
-                                    ) : materialList.length === 0 ? (
-                                        <tr><td colSpan={7} className="px-6 py-12 text-center text-sm text-gray-400 italic">No resources tracked for {villageId} yet.</td></tr>
-                                    ) : (
-                                        materialList.map((item) => {
-                                            const quantity = item.quantity || 0;
-                                            const pending = pendingWeightsByResource[item.id] || 0;
-                                            const unitCost = item.unitCost || 0;
-                                            const isLow = quantity <= item.lowStockThreshold;
-                                            const isCritical = quantity <= (item.lowStockThreshold * 0.2);
-                                            return (
-                                                <tr key={item.id} className="hover:bg-gray-50 transition-colors">
-                                                    <td className="px-6 py-5 whitespace-nowrap cursor-pointer group" onClick={() => handleViewHistory(item)}>
-                                                        <div className="text-sm font-black text-gray-900 group-hover:text-indigo-600 transition-colors flex items-center gap-2">
-                                                            {item.name}
-                                                            <svg className="w-4 h-4 text-gray-300 group-hover:text-indigo-400 opacity-0 group-hover:opacity-100 transition-all" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 00-2-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" /></svg>
-                                                        </div>
-                                                        <div className="text-[10px] text-gray-400 font-bold uppercase tracking-tight">{item.materialId || item.id}</div>
-                                                    </td>
-                                                    <td className="px-6 py-5 whitespace-nowrap">
-                                                        <span className="px-2.5 py-1 rounded-lg text-[10px] font-black uppercase bg-gray-100 text-gray-500 border border-gray-200">{item.category}</span>
-                                                    </td>
-                                                    <td className="px-6 py-5 whitespace-nowrap text-sm font-black text-right text-gray-900">
-                                                        {quantity.toLocaleString()} <span className="text-gray-400 font-bold text-[10px] ml-0.5">{item.unit}</span>
-                                                    </td>
-                                                    <td className="px-6 py-5 whitespace-nowrap text-sm font-black text-right text-orange-600">
-                                                        {pending > 0 ? `+${pending.toLocaleString()} ${item.unit}` : '-'}
-                                                    </td>
-                                                    <td className="px-6 py-5 whitespace-nowrap text-sm font-bold text-right text-gray-500">
-                                                        {unitCost.toFixed(2)} <span className="text-[9px] text-gray-400">/ {item.unit === 'L' ? '10L' : item.unit}</span>
-                                                    </td>
-                                                    <td className="px-6 py-5 whitespace-nowrap text-center">
-                                                        {isCritical ? (
-                                                            <span className="px-3 py-1 text-[10px] font-black uppercase rounded-full bg-red-100 text-red-700 border border-red-200 animate-pulse">Critical</span>
-                                                        ) : isLow ? (
-                                                            <span className="px-3 py-1 text-[10px] font-black uppercase rounded-full bg-yellow-100 text-yellow-800 border border-yellow-200">Low Stock</span>
-                                                        ) : (
-                                                            <span className="px-3 py-1 text-[10px] font-black uppercase rounded-full bg-green-100 text-green-800 border border-green-200">OK</span>
-                                                        )}
-                                                    </td>
-                                                    <td className="px-6 py-5 whitespace-nowrap text-center text-xs font-bold text-gray-500">
-                                                        {item.lowStockThreshold} {item.unit}
-                                                    </td>
-                                                </tr>
-                                            );
-                                        })
-                                    )}
+                                <tbody className="divide-y divide-gray-100">
+                                    {receivedSuppliesHistory.map(rec => {
+                                        const res = resources.find(r => r.id === rec.materialId);
+                                        return (
+                                            <tr key={rec.id} className="hover:bg-gray-50">
+                                                <td className="px-4 py-2 text-gray-500">{new Date(rec.updatedAt || rec.date).toLocaleDateString()}</td>
+                                                <td className="px-4 py-2 font-mono">{rec.transactionId}</td>
+                                                <td className="px-4 py-2 font-bold">{res?.name || 'Unknown'}</td>
+                                                <td className="px-4 py-2 text-right text-green-600 font-bold">+{rec.actualReceivedQty || rec.orderQty} {res?.unit}</td>
+                                                <td className="px-4 py-2 text-right">RM{rec.amount.toFixed(2)}</td>
+                                            </tr>
+                                        );
+                                    })}
+                                    {receivedSuppliesHistory.length === 0 && <tr><td colSpan={5} className="text-center py-4 text-gray-400 italic">No history available</td></tr>}
                                 </tbody>
                             </table>
                         </div>
                     </div>
+                )}
 
-                    {/* Equipment Table */}
-                    <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden mt-6">
-                        <div className="px-6 py-4 border-b border-gray-200 bg-gray-50 flex justify-between items-center">
-                            <div>
-                                <h2 className="text-lg font-black text-gray-900 tracking-tight">Facility Equipment & Hardware</h2>
-                                <p className="text-xs text-gray-400 font-medium">Active environmental control systems.</p>
-                            </div>
-                            <div className="text-[10px] font-bold uppercase text-gray-400 bg-gray-100 px-3 py-1 rounded-full">
-                                System Status: {latestEnvLog ? `Monitoring (${latestEnvLog.temperature}°C / ${latestEnvLog.humidity}%)` : 'Syncing...'}
-                            </div>
-                        </div>
-                        <div className="overflow-x-auto">
-                            <table className="min-w-full divide-y divide-gray-100">
-                                <thead className="bg-gray-50/50">
-                                    <tr className="text-[10px] font-black text-gray-400 uppercase tracking-widest">
-                                        <th className="px-6 py-4 text-left">Equipment Name</th>
-                                        <th className="px-6 py-4 text-left">Location (Linked)</th>
-                                        <th className="px-6 py-4 text-center">Availability</th>
-                                        <th className="px-6 py-4 text-right">Quantity</th>
-                                    </tr>
-                                </thead>
-                                <tbody className="bg-white divide-y divide-gray-100">
-                                    {equipmentList.length === 0 ? (
-                                        <tr><td colSpan={4} className="px-6 py-12 text-center text-sm text-gray-400 italic">No equipment logged.</td></tr>
-                                    ) : (
-                                        equipmentList.map((item) => {
-                                            // Availability Calculation
-                                            const totalQty = item.quantity || 0;
-                                            const locations = item.location ? item.location.split(',').map(s => s.trim()).filter(Boolean) : [];
-                                            const inUseCount = locations.length;
-                                            const availableCount = Math.max(0, totalQty - inUseCount);
-                                            const isUnavailable = availableCount === 0;
+                <div className="overflow-x-auto">
+                    <table className="min-w-full divide-y divide-gray-100">
+                        <thead className="bg-gray-50/50">
+                            <tr className="text-[10px] font-black text-gray-400 uppercase tracking-widest">
+                                <th className="px-6 py-4 text-left">Item Details</th>
+                                <th className="px-6 py-4 text-left">Category</th>
+                                <th className="px-6 py-4 text-center">Unit</th>
+                                <th className="px-6 py-4 text-right">Pending Received</th>
+                                <th className="px-6 py-4 text-right">Quantity</th>
+                                <th className="px-6 py-4 text-right">Unit Cost (RM)</th>
+                                <th className="px-6 py-4 text-center">Availability</th>
+                                <th className="px-6 py-4 text-center">Low Stock Limit</th>
+                            </tr>
+                        </thead>
+                        <tbody className="bg-white divide-y divide-gray-100">
+                            {loading ? (
+                                <tr><td colSpan={8} className="px-6 py-12 text-center text-sm text-gray-400 italic">Loading resources...</td></tr>
+                            ) : materialList.length === 0 ? (
+                                <tr><td colSpan={8} className="px-6 py-12 text-center text-sm text-gray-400 italic">No resources tracked for {villageId} yet.</td></tr>
+                            ) : (
+                                materialList.map((item) => {
+                                    const quantity = item.quantity || 0;
+                                    const pending = pendingWeightsByResource[item.id] || 0;
+                                    const unitCost = item.unitCost || 0;
+                                    const isLow = quantity <= item.lowStockThreshold;
+                                    const isCritical = quantity <= (item.lowStockThreshold * 0.2);
+                                    return (
+                                        <tr key={item.id} className="hover:bg-gray-50 transition-colors">
+                                            <td className="px-6 py-5 whitespace-nowrap cursor-pointer group" onClick={() => handleViewHistory(item)}>
+                                                <div className="text-sm font-black text-gray-900 group-hover:text-indigo-600 transition-colors flex items-center gap-2">
+                                                    {item.name}
+                                                    <svg className="w-4 h-4 text-gray-300 group-hover:text-indigo-400 opacity-0 group-hover:opacity-100 transition-all" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 00-2-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" /></svg>
+                                                </div>
+                                                <div className="text-[10px] text-gray-400 font-bold uppercase tracking-tight">{item.materialId || item.id}</div>
+                                            </td>
+                                            <td className="px-6 py-5 whitespace-nowrap">
+                                                <span className="px-2.5 py-1 rounded-lg text-[10px] font-black uppercase bg-gray-100 text-gray-500 border border-gray-200">{item.category}</span>
+                                            </td>
+                                            <td className="px-6 py-5 whitespace-nowrap text-center text-xs font-bold text-gray-700">
+                                                {item.unit}
+                                            </td>
+                                            <td className="px-6 py-5 whitespace-nowrap text-sm font-bold text-right text-orange-600">
+                                                {pending > 0 ? `+${pending.toLocaleString()}` : '-'}
+                                            </td>
+                                            <td className="px-6 py-5 whitespace-nowrap text-sm font-black text-right text-gray-900">
+                                                {quantity.toLocaleString()} 
+                                            </td>
+                                            <td className="px-6 py-5 whitespace-nowrap text-sm font-bold text-right text-gray-500">
+                                                {unitCost.toFixed(2)}
+                                            </td>
+                                            <td className="px-6 py-5 whitespace-nowrap text-center">
+                                                {isCritical ? (
+                                                    <span className="px-3 py-1 text-[10px] font-black uppercase rounded-full bg-red-100 text-red-700 border border-red-200 animate-pulse">Critical</span>
+                                                ) : isLow ? (
+                                                    <span className="px-3 py-1 text-[10px] font-black uppercase rounded-full bg-yellow-100 text-yellow-800 border border-yellow-200">Low Stock</span>
+                                                ) : (
+                                                    <span className="px-3 py-1 text-[10px] font-black uppercase rounded-full bg-green-100 text-green-800 border border-green-200">OK</span>
+                                                )}
+                                            </td>
+                                            <td className="px-6 py-5 whitespace-nowrap text-center text-xs font-bold text-gray-500">
+                                                {item.lowStockThreshold}
+                                            </td>
+                                        </tr>
+                                    );
+                                })
+                            )}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
 
-                                            return (
-                                                <tr key={item.id} className="hover:bg-gray-50 transition-colors">
-                                                    <td className="px-6 py-5 whitespace-nowrap">
-                                                        <div className="text-sm font-black text-gray-900">{item.name}</div>
-                                                        <div className="text-[10px] text-gray-400 font-bold uppercase tracking-tight">{item.materialId || item.id}</div>
-                                                    </td>
-                                                    <td className="px-6 py-5 whitespace-nowrap text-xs font-bold text-gray-600">
-                                                        {locations.length > 0 ? (
-                                                            <div className="flex flex-wrap gap-1 max-w-[200px]">
-                                                                {locations.map((loc, i) => (
-                                                                    <span key={i} className="px-2 py-0.5 bg-blue-50 text-blue-600 rounded border border-blue-100 uppercase text-[9px]">{loc}</span>
-                                                                ))}
-                                                            </div>
-                                                        ) : <span className="text-gray-400 italic">Storage</span>}
-                                                    </td>
-                                                    <td className="px-6 py-5 whitespace-nowrap text-center">
-                                                        <span className={`px-2.5 py-1 rounded-full text-[10px] font-black uppercase ${isUnavailable ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-800'}`}>
-                                                            {isUnavailable ? 'In Use' : 'Available'}
-                                                        </span>
-                                                    </td>
-                                                    <td className="px-6 py-5 whitespace-nowrap text-right text-sm font-black text-gray-900">
-                                                        {availableCount} <span className="text-gray-400 font-bold text-[10px]">/ {totalQty}</span>
-                                                    </td>
-                                                </tr>
-                                            );
-                                        })
-                                    )}
-                                </tbody>
-                            </table>
-                        </div>
+            {/* Equipment Table */}
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden mt-6">
+                <div className="px-6 py-4 border-b border-gray-200 bg-gray-50 flex justify-between items-center">
+                    <div>
+                        <h2 className="text-lg font-black text-gray-900 tracking-tight">Facility Equipment & Hardware</h2>
+                        <p className="text-xs text-gray-400 font-medium">Active environmental control systems.</p>
                     </div>
-                </>
-            )}
+                    <div className="text-[10px] font-bold uppercase text-gray-400 bg-gray-100 px-3 py-1 rounded-full">
+                        System Status: {latestEnvLog ? `Monitoring (${latestEnvLog.temperature}°C / ${latestEnvLog.humidity}%)` : 'Syncing...'}
+                    </div>
+                </div>
+                <div className="overflow-x-auto">
+                    <table className="min-w-full divide-y divide-gray-100">
+                        <thead className="bg-gray-50/50">
+                            <tr className="text-[10px] font-black text-gray-400 uppercase tracking-widest">
+                                <th className="px-6 py-4 text-left">Equipment Name</th>
+                                <th className="px-6 py-4 text-left">Location (Linked)</th>
+                                <th className="px-6 py-4 text-left">Condition</th>
+                                <th className="px-6 py-4 text-center">Unit</th>
+                                <th className="px-6 py-4 text-right">Quantity</th>
+                                <th className="px-6 py-4 text-right">Unit Cost (RM)</th>
+                                <th className="px-6 py-4 text-center">Availability</th>
+                            </tr>
+                        </thead>
+                        <tbody className="bg-white divide-y divide-gray-100">
+                            {equipmentList.length === 0 ? (
+                                <tr><td colSpan={7} className="px-6 py-12 text-center text-sm text-gray-400 italic">No equipment logged.</td></tr>
+                            ) : (
+                                equipmentList.map((item) => {
+                                    // Availability Calculation
+                                    const totalQty = item.quantity || 0;
+                                    const locations = item.location ? item.location.split(',').map(s => s.trim()).filter(Boolean) : [];
+                                    const inUseCount = locations.length;
+                                    const availableCount = Math.max(0, totalQty - inUseCount);
+                                    const isUnavailable = availableCount === 0;
+
+                                    return (
+                                        <tr key={item.id} className="hover:bg-gray-50 transition-colors">
+                                            <td className="px-6 py-5 whitespace-nowrap">
+                                                <div className="text-sm font-black text-gray-900">{item.name}</div>
+                                                <div className="text-[10px] text-gray-400 font-bold uppercase tracking-tight">{item.materialId || item.id}</div>
+                                            </td>
+                                            <td className="px-6 py-5 whitespace-nowrap text-xs font-bold text-gray-600">
+                                                {locations.length > 0 ? (
+                                                    <div className="flex flex-wrap gap-1 max-w-[200px]">
+                                                        {locations.map((loc, i) => (
+                                                            <span key={i} className="px-2 py-0.5 bg-blue-50 text-blue-600 rounded border border-blue-100 uppercase text-[9px]">{loc}</span>
+                                                        ))}
+                                                    </div>
+                                                ) : <span className="text-gray-400 italic">Storage</span>}
+                                            </td>
+                                            <td className="px-6 py-5 whitespace-nowrap text-xs font-bold">
+                                                {item.condition || 'Unknown'}
+                                            </td>
+                                            <td className="px-6 py-5 whitespace-nowrap text-center text-xs font-bold text-gray-700">
+                                                {item.unit}
+                                            </td>
+                                            <td className="px-6 py-5 whitespace-nowrap text-right text-sm font-black text-gray-900">
+                                                {availableCount} <span className="text-gray-400 font-bold text-[10px]">/ {totalQty}</span>
+                                            </td>
+                                            <td className="px-6 py-5 whitespace-nowrap text-right text-sm font-bold text-gray-500">
+                                                {item.unitCost ? item.unitCost.toFixed(2) : '0.00'}
+                                            </td>
+                                            <td className="px-6 py-5 whitespace-nowrap text-center">
+                                                <span className={`px-2.5 py-1 rounded-full text-[10px] font-black uppercase ${isUnavailable ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-800'}`}>
+                                                    {isUnavailable ? 'In Use' : 'Available'}
+                                                </span>
+                                            </td>
+                                        </tr>
+                                    );
+                                })
+                            )}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
 
             {/* Modals */}
             {/* Purchase Request Modal */}

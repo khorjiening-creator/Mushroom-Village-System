@@ -53,7 +53,6 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userE
     // External Weather Simulation State
     const [outsideTemp, setOutsideTemp] = useState(30);
     const [outsideHumidity, setOutsideHumidity] = useState(65);
-    const [outsideCondition, setOutsideCondition] = useState<'Sunny' | 'Rain' | 'Cloudy' | 'Night'>('Sunny');
 
     // Manual Input State
     const [inputTemp, setInputTemp] = useState('');
@@ -258,16 +257,32 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userE
 
     const rules = IDEAL_CONDITIONS[assignedStrain] || IDEAL_CONDITIONS['Oyster'];
 
+    // Updated Effect: Set Defaults to Latest Log Conditions
     useEffect(() => {
-        if (rules) {
+        // 1. Set Manual Input Defaults
+        if (roomLogs.length > 0) {
+            const last = roomLogs[0];
+            setInputTemp(last.temperature.toString());
+            setInputHumid(last.humidity.toString());
+            setInputMoist(last.moisture.toString());
+            
+            // 2. Set External Weather Simulation Defaults
+            setOutsideTemp(last.temperature);
+            setOutsideHumidity(last.humidity);
+        } else if (rules) {
+            // Fallback to Ideal Mid-points
             const targetTemp = (rules.minT + rules.maxT) / 2;
             const targetHumid = (rules.minH + rules.maxH) / 2;
             const targetMoist = (rules.minM + rules.maxM) / 2;
             setInputTemp(targetTemp.toFixed(1));
             setInputHumid(targetHumid.toFixed(1));
             setInputMoist(targetMoist.toFixed(1));
+            
+            // Fallback defaults for simulation
+            setOutsideTemp(targetTemp);
+            setOutsideHumidity(targetHumid);
         }
-    }, [activeRoom, assignedStrain]);
+    }, [activeRoom, assignedStrain, logs.length]); // Updated dependency to logs.length to trigger when data loads
 
     // Notification Logic (Alerts Only, No Automated Suggestion Buttons)
     useEffect(() => {
@@ -359,7 +374,7 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userE
         });
 
         setNotifications(newNotifs);
-    }, [outsideTemp, outsideHumidity, outsideCondition, activeRoom, batchesInRoom, rules, equipmentState]);
+    }, [outsideTemp, outsideHumidity, activeRoom, batchesInRoom, rules, equipmentState]);
 
     const aiAnalysis = useMemo(() => {
         let riskScore = 0;
@@ -578,12 +593,6 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({ villageId, userE
                                     <input type="number" value={outsideHumidity} onChange={e=>setOutsideHumidity(parseFloat(e.target.value))} className="w-full p-1 text-sm border rounded text-center font-bold" />
                                     <span className="text-xs font-bold text-gray-400">%</span>
                                 </div>
-                            </div>
-                            <div className="flex items-center gap-2">
-                                <label className="text-[10px] text-gray-500 font-bold">Cond:</label>
-                                <select value={outsideCondition} onChange={e=>setOutsideCondition(e.target.value as any)} className="w-full p-1 text-xs border rounded font-bold">
-                                    <option value="Sunny">Sunny</option><option value="Rain">Rain</option><option value="Cloudy">Cloudy</option><option value="Night">Night</option>
-                                </select>
                             </div>
                         </div>
                         

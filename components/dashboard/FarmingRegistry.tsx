@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useMemo } from 'react';
 import { addDoc, collection, query, orderBy, limit, getDocs, setDoc, doc, updateDoc, increment, getDoc, arrayUnion, where } from 'firebase/firestore';
 import { db } from '../../services/firebase';
@@ -358,13 +359,20 @@ export const FarmingRegistry: React.FC<FarmingRegistryProps> = ({
                     action: "BATCH_INITIATED"
                 });
                 
-                await addDoc(collection(db, "system_notifications"), {
-                    villageId,
-                    type: 'URGENT_LOG',
-                    message: `New Batch ${finalBatchId} in Room ${activityRoomId}: Please log initial environment readings immediately.`,
-                    read: false,
-                    timestamp: new Date().toISOString()
+                // --- DIRECT SYNC TO VILLAGE C ---
+                // Create entry in yield_forecasts automatically
+                await setDoc(doc(db, "yield_forecasts", finalBatchId), {
+                    batchId: finalBatchId,
+                    strain: batchStrain,
+                    predictedQty: parseFloat(predictedYield),
+                    currentYield: 0,
+                    villageId: villageId,
+                    status: 'IN_PROGRESS',
+                    timestamp: timestamp
                 });
+                // --------------------------------
+
+                // Removed System Notification saving logic here
                 
                 // --- AUTOMATIC RESOURCE DEDUCTION LOGIC ---
                 // Defined in ACTIVITY_RECIPES at top: Straw 20, Water 50
@@ -380,7 +388,7 @@ export const FarmingRegistry: React.FC<FarmingRegistryProps> = ({
                 if (triggerEnvPrompt) {
                     triggerEnvPrompt({ batchId: finalBatchId, room: activityRoomId });
                 }
-                onSuccess(`Batch created with date ${activityDate}. Materials deducted.`);
+                onSuccess(`Batch created with date ${activityDate}. Materials deducted & forecast sent.`);
 
             } else {
                 if (!finalBatchId) {
@@ -468,8 +476,13 @@ export const FarmingRegistry: React.FC<FarmingRegistryProps> = ({
                 await updateDoc(batchRef, { totalYield: increment(weight) });
                 await addDoc(collection(db, collectionName, harvestBatch, "activity_logs"), { type: 'HARVEST', details: `Harvested ${weight}kg of ${harvestStrain}`, userEmail, timestamp, villageId, batchId: harvestBatch, totalYield: weight });
             
-                // --- AUTO COMPLETION CHECK ---
+                // --- AUTO COMPLETION CHECK & SYNC ---
                 const batchSnap = await getDoc(batchRef);
+                const forecastRef = doc(db, "yield_forecasts", harvestBatch);
+                
+                // Update current yield in forecast registry
+                await updateDoc(forecastRef, { currentYield: increment(weight) });
+
                 if (batchSnap.exists()) {
                     const bData = batchSnap.data();
                     const totalYield = bData.totalYield || 0;
@@ -478,6 +491,8 @@ export const FarmingRegistry: React.FC<FarmingRegistryProps> = ({
                     
                     if (predicted > 0 && (totalYield + totalWastage) >= predicted) {
                         await updateDoc(batchRef, { batchStatus: 'COMPLETED' });
+                        // Update forecast status to remove from active predictions
+                        await updateDoc(forecastRef, { status: 'COMPLETED' });
                         onSuccess(`Harvest recorded on ${harvestDate}. Batch ${harvestBatch} marked COMPLETED (Target Yield Met).`);
                     } else {
                         onSuccess(`Harvest recorded on ${harvestDate}. Batch remains active.`);
@@ -645,7 +660,14 @@ export const FarmingRegistry: React.FC<FarmingRegistryProps> = ({
                 });
             }
 
-            // 3. Sync to Pending Shipments (Used by Village C Processing Floor)
+            // 3. Sync to Forecast Registry
+            const forecastRef = doc(db, "yield_forecasts", selectedBatch.id);
+            await setDoc(forecastRef, {
+                strain: editBatchStrain,
+                predictedQty: newPredicted
+            }, { merge: true });
+
+            // 4. Sync to Pending Shipments (Used by Village C Processing Floor)
             const qShipments = query(collection(db, "pending_shipments"), where("batchId", "==", selectedBatch.id), where("status", "==", "PENDING"));
             const shipSnap = await getDocs(qShipments);
             const shipPromises = shipSnap.docs.map(d => 

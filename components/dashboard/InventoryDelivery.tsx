@@ -1,11 +1,10 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { collection, addDoc, onSnapshot, query, where, updateDoc, doc, getDocs, limit } from '@firebase/firestore';
 import { db } from '../../services/firebase';
-import { VillageType, InventoryItem, DeliveryRecord, StockMovement, UserRole } from '../../types';
+import { VillageType, InventoryItem, DeliveryRecord, StockMovement, UserRole, Customer } from '../../types';
 import { 
   MUSHROOM_VARIETIES, 
   DRIVER_LIST, 
-  ROUTE_LIST,
   VEHICLE_LIST,
   STORAGE_LOCATIONS
 } from './SharedComponents';
@@ -38,11 +37,14 @@ export const InventoryDelivery: React.FC<Props> = ({
     const [loading, setLoading] = useState(false);
     
     const isAdmin = userRole === 'admin';
+    const canViewMovements = isAdmin || (villageId === VillageType.C && userRole === 'user');
+    const canViewHistory = isAdmin || (villageId === VillageType.C && userRole === 'user');
 
     // States
     const [inventory, setInventory] = useState<InventoryItem[]>([]);
     const [deliveries, setDeliveries] = useState<DeliveryRecord[]>([]);
     const [movements, setMovements] = useState<StockMovement[]>([]);
+    const [customers, setCustomers] = useState<Customer[]>([]);
 
     // Modal/Action States
     const [isProofModalOpen, setIsProofModalOpen] = useState(false);
@@ -59,7 +61,8 @@ export const InventoryDelivery: React.FC<Props> = ({
     const [scheduleTime, setScheduleTime] = useState("09:00");
     const [scheduleDriver, setScheduleDriver] = useState(DRIVER_LIST[0]);
     const [scheduleVehicle, setScheduleVehicle] = useState(VEHICLE_LIST[0]);
-    const [scheduleRoute, setScheduleRoute] = useState(ROUTE_LIST[0]);
+    const [schedulePIC, setSchedulePIC] = useState('');
+    const [scheduleAddress, setScheduleAddress] = useState('');
     
     // Simulation help for Stock Out
     const [dispatchVariety, setDispatchVariety] = useState(MUSHROOM_VARIETIES[0]);
@@ -104,9 +107,36 @@ export const InventoryDelivery: React.FC<Props> = ({
 
         const unsubDel = onSnapshot(qDel, (snap) => setDeliveries(snap.docs.map(d => ({id: d.id, ...d.data()} as DeliveryRecord))));
         const unsubMov = onSnapshot(qMov, (snap) => setMovements(snap.docs.map(d => ({id: d.id, ...d.data()} as StockMovement))));
+        const unsubCust = onSnapshot(collection(db, 'customers'), (snap) => {
+            setCustomers(snap.docs.map(d => ({ id: d.id, ...d.data() } as Customer)));
+        });
 
-        return () => { unsubInv(); unsubDel(); unsubMov(); };
+        return () => { unsubInv(); unsubDel(); unsubMov(); unsubCust(); };
     }, [villageId]);
+
+    // Handle modal population & PIC linkage with CRM
+    useEffect(() => {
+        if (activeDelivery && isScheduleModalOpen) {
+            // Find matched customer in CRM
+            const linkedCust = customers.find(c => c.name === activeDelivery.customerName);
+            
+            // Prioritize existing record data, then CRM data
+            setSchedulePIC(activeDelivery.pic || linkedCust?.pic || '');
+            setScheduleAddress(activeDelivery.destinationAddress || linkedCust?.address || '');
+            
+            setScheduleDate(activeDelivery.deliveryDate || new Date().toISOString().split('T')[0]);
+            setScheduleTime(activeDelivery.deliveryTime || "09:00");
+            
+            if (activeDelivery.driverId) {
+                const drv = DRIVER_LIST.find(d => d.id === activeDelivery.driverId);
+                if (drv) setScheduleDriver(drv);
+            }
+            if (activeDelivery.vehicleId) {
+                const vhc = VEHICLE_LIST.find(v => v.id === activeDelivery.vehicleId);
+                if (vhc) setScheduleVehicle(vhc);
+            }
+        }
+    }, [activeDelivery, isScheduleModalOpen, customers]);
 
     const handleConfirmSchedule = async () => {
         if (!activeDelivery) return;
@@ -120,8 +150,10 @@ export const InventoryDelivery: React.FC<Props> = ({
                 driverName: scheduleDriver.name,
                 vehicleId: scheduleVehicle.id,
                 vehicleType: scheduleVehicle.type,
-                route: scheduleRoute,
-                zone: scheduleRoute,
+                pic: schedulePIC,
+                destinationAddress: scheduleAddress,
+                route: '', // Deleted optimized route
+                zone: '',
                 failureReason: "" 
             });
             onSuccess(`Delivery scheduled for ${activeDelivery.customerName} on ${scheduleDate}.`);
@@ -213,15 +245,6 @@ export const InventoryDelivery: React.FC<Props> = ({
         } finally { setLoading(false); }
     };
 
-    const handleEmailDOToCustomer = (del: DeliveryRecord) => {
-        setLoading(true);
-        setTimeout(() => {
-            const doRef = `DO-${del.id.slice(-6).toUpperCase()}`;
-            onSuccess(`[MOCK] Email sent to ${del.customerEmail} for ${doRef}.`);
-            setLoading(false);
-        }, 800);
-    };
-
     const printDeliveryOrder = (del: DeliveryRecord) => {
         const printWindow = window.open('', '_blank');
         if (!printWindow) return;
@@ -261,6 +284,8 @@ export const InventoryDelivery: React.FC<Props> = ({
                             <div class="label">Delivery To</div>
                             <div class="value">${del.customerName || 'N/A'}</div>
                             <div class="value">${del.destinationAddress}</div>
+                            <div class="label" style="margin-top: 10px;">Contact (PIC)</div>
+                            <div class="value">${del.pic || 'N/A'}</div>
                             <div class="label" style="margin-top: 10px;">Contact Information</div>
                             <div class="value">${del.customerEmail}</div>
                             <div class="value">${del.customerPhone || 'N/A'}</div>
@@ -269,7 +294,6 @@ export const InventoryDelivery: React.FC<Props> = ({
                             <div class="label">Dispatch Details</div>
                             <div class="value">Date: ${del.deliveryDate || 'TBD'}</div>
                             <div class="value">Time: ${del.deliveryTime || 'TBD'}</div>
-                            <div class="value">Route: ${del.route || 'TBD'}</div>
                         </div>
                     </div>
 
@@ -312,8 +336,9 @@ export const InventoryDelivery: React.FC<Props> = ({
     }, [inventory]);
 
     const filteredDeliveries = useMemo(() => {
-        if (logisticsFilter === 'ALL') return deliveries;
-        return deliveries.filter(d => d.status === logisticsFilter);
+        const activeDeliveries = deliveries.filter(d => d.status !== 'DELIVERED');
+        if (logisticsFilter === 'ALL') return activeDeliveries;
+        return activeDeliveries.filter(d => d.status === logisticsFilter);
     }, [deliveries, logisticsFilter]);
 
     const unscheduledItems = useMemo(() => deliveries.filter(d => d.status === 'PENDING_SCHEDULE'), [deliveries]);
@@ -324,14 +349,14 @@ export const InventoryDelivery: React.FC<Props> = ({
     }, [movements, movementFilter]);
 
     const handleExportMovementsCSV = () => {
-        if (!isAdmin) return;
-        const headers = ["Timestamp", "Action", "Reference ID", "Details", "Net Weight (kg)", "Performed By"];
+        if (!canViewMovements) return;
+        const headers = ["Timestamp", "Action", "Reference ID", "Details", "Net Units (Packs)", "Performed By"];
         const rows = filteredMovements.sort((a, b) => b.date.localeCompare(a.date)).map(mov => [
             new Date(mov.date).toLocaleString(),
             `Stock ${mov.type}`,
             mov.referenceId,
             (mov as any).mushroomType ? `${(mov as any).mushroomType} Grade ${(mov as any).grade}` : (mov as any).details || `Batch #${mov.batchId}`,
-            `${mov.type === 'IN' ? '+' : '-'}${mov.quantity.toFixed(2)}`,
+            `${mov.type === 'IN' ? '+' : '-'}${Math.floor(mov.quantity / 0.2)}`,
             mov.performedBy.split('@')[0]
         ]);
         const csvContent = "data:text/csv;charset=utf-8," + [headers.join(','), ...rows.map(e => e.join(','))].join('\n');
@@ -345,7 +370,7 @@ export const InventoryDelivery: React.FC<Props> = ({
     };
 
     const handlePrintMovementsPDF = () => {
-        if (!isAdmin) return;
+        if (!canViewMovements) return;
         const printWindow = window.open('', '_blank');
         if (!printWindow) return;
         
@@ -359,7 +384,7 @@ export const InventoryDelivery: React.FC<Props> = ({
                         ${(mov as any).mushroomType ? `${(mov as any).mushroomType} Grade ${(mov as any).grade}` : (mov as any).details || `Batch #${mov.batchId}`}
                     </div>
                 </td>
-                <td style="padding: 10px; border-bottom: 1px solid #eee; text-align: right; font-weight: bold;">${mov.type === 'IN' ? '+' : '-'}${mov.quantity.toFixed(2)} kg</td>
+                <td style="padding: 10px; border-bottom: 1px solid #eee; text-align: right; font-weight: bold;">${mov.type === 'IN' ? '+' : '-'}${Math.floor(mov.quantity / 0.2)} Packs</td>
                 <td style="padding: 10px; border-bottom: 1px solid #eee; text-align: right; font-size: 11px;">${mov.performedBy.split('@')[0]}</td>
             </tr>
         `).join('');
@@ -387,7 +412,7 @@ export const InventoryDelivery: React.FC<Props> = ({
                                 <th>Timestamp</th>
                                 <th>Action</th>
                                 <th>Reference & Details</th>
-                                <th style="text-align: right;">Net Mass</th>
+                                <th style="text-align: right;">Net Units (Packs)</th>
                                 <th style="text-align: right;">User</th>
                             </tr>
                         </thead>
@@ -401,12 +426,13 @@ export const InventoryDelivery: React.FC<Props> = ({
     };
 
     const handleExportDeliveryHistoryCSV = () => {
-        if (!isAdmin) return;
-        const headers = ["DO ID", "Date", "Customer", "Address", "Driver", "Vehicle", "Status", "Reason", "Delivered At"];
+        if (!canViewHistory) return;
+        const headers = ["DO ID", "Date", "Customer", "PIC", "Address", "Driver", "Vehicle", "Status", "Reason", "Delivered At"];
         const rows = deliveries.sort((a, b) => (b.deliveryDate || '').localeCompare(a.deliveryDate || '')).map(del => [
             `DO-${del.id.slice(-6).toUpperCase()}`,
             del.deliveryDate,
             del.customerName || 'N/A',
+            del.pic || 'N/A',
             del.destinationAddress.replace(/,/g, ';'),
             del.driverName,
             del.vehicleType,
@@ -425,7 +451,7 @@ export const InventoryDelivery: React.FC<Props> = ({
     };
 
     const handlePrintDeliveryHistoryPDF = () => {
-        if (!isAdmin) return;
+        if (!canViewHistory) return;
         const printWindow = window.open('', '_blank');
         if (!printWindow) return;
         
@@ -436,6 +462,7 @@ export const InventoryDelivery: React.FC<Props> = ({
                 <td style="padding: 10px; border-bottom: 1px solid #eee;">
                     <div style="font-weight: bold;">${del.customerName || 'N/A'}</div>
                     <div style="font-size: 9px; color: #666;">${del.destinationAddress}</div>
+                    <div style="font-size: 9px; font-weight: bold;">PIC: ${del.pic || 'N/A'}</div>
                 </td>
                 <td style="padding: 10px; border-bottom: 1px solid #eee;">${del.driverName}</td>
                 <td style="padding: 10px; border-bottom: 1px solid #eee; text-align: center;">
@@ -484,6 +511,16 @@ export const InventoryDelivery: React.FC<Props> = ({
         printWindow.document.close();
     };
 
+    const activeCounts = useMemo(() => {
+        return {
+            ALL: deliveries.filter(d => d.status !== 'DELIVERED').length,
+            PENDING_SCHEDULE: deliveries.filter(d => d.status === 'PENDING_SCHEDULE').length,
+            SCHEDULED: deliveries.filter(d => d.status === 'SCHEDULED').length,
+            OUT_FOR_DELIVERY: deliveries.filter(d => d.status === 'OUT_FOR_DELIVERY').length,
+            FAILED: deliveries.filter(d => d.status === 'FAILED').length,
+        };
+    }, [deliveries]);
+
     return (
         <div className="space-y-6 animate-fade-in-up">
             <div className="flex border-b border-gray-100 overflow-x-auto scrollbar-hide">
@@ -492,7 +529,11 @@ export const InventoryDelivery: React.FC<Props> = ({
                     { id: 'delivery', label: 'Logistics & Dispatch' },
                     { id: 'history', label: 'Delivery History' },
                     { id: 'movement', label: 'Stock Movements' }
-                ].filter(tab => (tab.id !== 'history' && tab.id !== 'movement') || isAdmin)
+                ].filter(tab => {
+                    if (tab.id === 'history') return canViewHistory;
+                    if (tab.id === 'movement') return canViewMovements;
+                    return true;
+                })
                 .map(tab => (
                     <button 
                         key={tab.id} 
@@ -593,7 +634,8 @@ export const InventoryDelivery: React.FC<Props> = ({
                                             </button>
                                         </div>
                                         <h4 className="text-base font-black text-slate-900 mb-1 truncate">{del.customerName}</h4>
-                                        <p className="text-[11px] text-slate-500 font-bold uppercase leading-relaxed line-clamp-2 min-h-[32px] mb-4 italic">"{del.orderSummary}"</p>
+                                        <p className="text-[11px] text-slate-500 font-bold uppercase leading-relaxed line-clamp-2 min-h-[32px] mb-2 italic">"{del.orderSummary}"</p>
+                                        <div className="text-[10px] text-slate-400 font-bold uppercase">PIC: {del.pic || 'TBD'}</div>
                                         <div className="flex items-center gap-3 pt-4 border-t border-slate-50">
                                             <div className="flex-1">
                                                 <div className="text-[9px] font-black text-slate-400 uppercase mb-0.5">Sale Reference</div>
@@ -617,12 +659,11 @@ export const InventoryDelivery: React.FC<Props> = ({
                         <div className="flex justify-between items-center bg-white/50 p-2 rounded-2xl border border-white shadow-sm flex-wrap gap-4">
                             <div className="flex gap-1 flex-wrap">
                                 {[
-                                    { id: 'ALL', label: 'All Logs' },
-                                    { id: 'PENDING_SCHEDULE', label: 'Unscheduled' },
-                                    { id: 'SCHEDULED', label: 'Scheduled' },
-                                    { id: 'OUT_FOR_DELIVERY', label: 'In Transit' },
-                                    { id: 'DELIVERED', label: 'Completed' },
-                                    { id: 'FAILED', label: 'Reschedule' }
+                                    { id: 'ALL', label: `All Active (${activeCounts.ALL})` },
+                                    { id: 'PENDING_SCHEDULE', label: `Unscheduled (${activeCounts.PENDING_SCHEDULE})` },
+                                    { id: 'SCHEDULED', label: `Scheduled (${activeCounts.SCHEDULED})` },
+                                    { id: 'OUT_FOR_DELIVERY', label: `In Transit (${activeCounts.OUT_FOR_DELIVERY})` },
+                                    { id: 'FAILED', label: `Reschedule (${activeCounts.FAILED})` }
                                 ].map(filter => (
                                     <button 
                                         key={filter.id} 
@@ -633,7 +674,7 @@ export const InventoryDelivery: React.FC<Props> = ({
                                     </button>
                                 ))}
                             </div>
-                            {isAdmin && (
+                            {canViewHistory && (
                                 <div className="flex gap-2">
                                     <button onClick={handleExportDeliveryHistoryCSV} className="px-4 py-2 bg-white border border-slate-200 rounded-xl text-[10px] font-black uppercase hover:bg-slate-50 transition-all flex items-center gap-2 shadow-sm">
                                         <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
@@ -652,89 +693,96 @@ export const InventoryDelivery: React.FC<Props> = ({
                                 <thead className="bg-gray-50 text-[10px] font-bold text-gray-400 uppercase tracking-widest">
                                     <tr>
                                         <th className="px-8 py-6">Status & Identifier</th>
-                                        <th className="px-8 py-6">Consignee & Order</th>
+                                        <th className="px-8 py-6">Consignee & Destination</th>
                                         <th className="px-8 py-6 text-center">Schedule</th>
                                         <th className="px-8 py-6">Personnel</th>
                                         <th className="px-8 py-6 text-right">Actions</th>
                                     </tr>
                                 </thead>
                                 <tbody className="divide-y divide-gray-100">
-                                    {filteredDeliveries.map(del => (
-                                        <tr key={del.id} className="hover:bg-slate-50/50 transition-colors">
-                                            <td className="px-8 py-6">
-                                                <div className="flex flex-col gap-1.5">
-                                                    <span className={`w-fit px-3 py-1 rounded-full text-[9px] font-black uppercase border ${
-                                                        del.status === 'DELIVERED' ? 'bg-green-50 text-green-700 border-green-100' : 
-                                                        del.status === 'OUT_FOR_DELIVERY' ? 'bg-blue-50 text-blue-700 border-blue-100' : 
-                                                        del.status === 'FAILED' ? 'bg-red-50 text-red-700 border-red-100' : 
-                                                        del.status === 'PENDING_SCHEDULE' ? 'bg-orange-50 text-orange-700 border-orange-100 animate-pulse' :
-                                                        'bg-gray-50 text-gray-700 border-gray-100'
-                                                    }`}>
-                                                        {del.status.replace(/_/g, ' ')}
-                                                    </span>
-                                                    <div className="text-[11px] font-mono font-black text-slate-300 uppercase tracking-tighter">#DO-{del.id.slice(-6).toUpperCase()}</div>
-                                                </div>
-                                            </td>
-                                            <td className="px-8 py-6">
-                                                <div className="font-black text-slate-900 truncate max-w-[200px] text-sm">
-                                                    {del.customerName || del.destinationAddress}
-                                                </div>
-                                                {del.orderSummary && (
-                                                    <div className="text-[10px] text-slate-400 font-bold truncate max-w-[200px] uppercase mt-0.5">{del.orderSummary}</div>
-                                                )}
-                                                <div className="text-[10px] text-indigo-500 italic font-bold mt-1">{del.customerPhone}</div>
-                                            </td>
-                                            <td className="px-8 py-6 text-center">
-                                                {del.deliveryDate ? (
-                                                    <>
-                                                        <div className="text-sm font-black text-slate-700">{new Date(del.deliveryDate).toLocaleDateString()}</div>
-                                                        <div className="text-[10px] text-slate-400 font-black tracking-widest">{del.deliveryTime}</div>
-                                                    </>
-                                                ) : <span className="text-[10px] font-black text-slate-300 italic">WAITING SCHEDULE</span>}
-                                            </td>
-                                            <td className="px-8 py-6">
-                                                <div className="font-black text-slate-700 text-xs">{del.driverName}</div>
-                                                <div className="text-[10px] text-slate-400 font-bold uppercase">{del.vehicleType}</div>
-                                            </td>
-                                            <td className="px-8 py-6 text-right">
-                                                <div className="flex justify-end items-center gap-3">
-                                                    <button title="Print Order" onClick={() => printDeliveryOrder(del)} className="p-2.5 bg-slate-50 rounded-2xl text-slate-400 hover:text-blue-600 hover:bg-blue-50 transition-all">
-                                                        <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z"/></svg>
-                                                    </button>
-                                                    
-                                                    {del.status === 'PENDING_SCHEDULE' && (
-                                                        <button onClick={() => { setActiveDelivery(del); setIsScheduleModalOpen(true); }} className="px-4 py-2 bg-orange-600 text-white text-[10px] font-black rounded-xl uppercase hover:bg-orange-700 shadow-md">Schedule</button>
-                                                    )}
-
-                                                    {del.status === 'SCHEDULED' && (
+                                    {filteredDeliveries.map(del => {
+                                        // Match PIC from CRM for direct visual linking
+                                        const linkedCust = customers.find(c => c.name === del.customerName);
+                                        const displayPIC = del.pic || linkedCust?.pic || 'N/A';
+                                        
+                                        return (
+                                            <tr key={del.id} className="hover:bg-slate-50/50 transition-colors">
+                                                <td className="px-8 py-6">
+                                                    <div className="flex flex-col gap-1.5">
+                                                        <span className={`w-fit px-3 py-1 rounded-full text-[9px] font-black uppercase border ${
+                                                            del.status === 'DELIVERED' ? 'bg-green-50 text-green-700 border-green-100' : 
+                                                            del.status === 'OUT_FOR_DELIVERY' ? 'bg-blue-50 text-blue-700 border-blue-100' : 
+                                                            del.status === 'FAILED' ? 'bg-red-50 text-red-700 border-red-100' : 
+                                                            del.status === 'PENDING_SCHEDULE' ? 'bg-orange-50 text-orange-700 border-orange-100 animate-pulse' :
+                                                            'bg-gray-50 text-gray-700 border-gray-100'
+                                                        }`}>
+                                                            {del.status.replace(/_/g, ' ')}
+                                                        </span>
+                                                        <div className="text-[11px] font-mono font-black text-slate-300 uppercase tracking-tighter">#DO-{del.id.slice(-6).toUpperCase()}</div>
+                                                    </div>
+                                                </td>
+                                                <td className="px-8 py-6">
+                                                    <div className="font-black text-slate-900 truncate max-w-[200px] text-sm">
+                                                        {del.customerName}
+                                                    </div>
+                                                    <div className="text-[10px] text-slate-400 font-bold truncate max-w-[200px] uppercase mt-0.5">{del.destinationAddress}</div>
+                                                    <div className="flex items-center gap-1.5 mt-1">
+                                                        <span className="text-[10px] text-indigo-500 font-black uppercase">PIC: {displayPIC}</span>
+                                                        {linkedCust && <span className="text-[8px] bg-indigo-50 text-indigo-600 px-1.5 py-0.5 rounded border border-indigo-100 font-bold">CRM LINKED</span>}
+                                                    </div>
+                                                </td>
+                                                <td className="px-8 py-6 text-center">
+                                                    {del.deliveryDate ? (
                                                         <>
-                                                            <button onClick={() => { setActiveDelivery(del); setIsScheduleModalOpen(true); }} className="px-3 py-1.5 bg-slate-100 text-slate-600 text-[10px] font-black rounded-xl uppercase hover:bg-slate-200">Edit</button>
-                                                            <button onClick={() => handleDepart(del)} className="px-4 py-2 bg-blue-600 text-white text-[10px] font-black rounded-xl uppercase hover:bg-blue-700 shadow-md">Depart</button>
+                                                            <div className="text-sm font-black text-slate-700">{new Date(del.deliveryDate).toLocaleDateString()}</div>
+                                                            <div className="text-[10px] text-slate-400 font-black tracking-widest">{del.deliveryTime}</div>
                                                         </>
-                                                    )}
-                                                    
-                                                    {del.status === 'OUT_FOR_DELIVERY' && (
-                                                        <div className="flex gap-2">
-                                                            <button onClick={() => { setActiveDelivery(del); setOutcomeType('DELIVERED'); setIsProofModalOpen(true); }} className="px-3 py-1.5 bg-emerald-600 text-white text-[10px] font-black rounded-xl uppercase shadow-md">Deliver</button>
-                                                            <button onClick={() => { setActiveDelivery(del); setOutcomeType('FAILED'); setIsProofModalOpen(true); }} className="px-3 py-1.5 bg-rose-600 text-white text-[10px] font-black rounded-xl uppercase shadow-md">Failed</button>
-                                                        </div>
-                                                    )}
-                                                    
-                                                    {del.status === 'FAILED' && (
-                                                        <button onClick={() => { setActiveDelivery(del); setIsScheduleModalOpen(true); }} className="px-4 py-2 bg-blue-500 text-white text-[10px] font-black rounded-xl uppercase shadow-md">Reschedule</button>
-                                                    )}
-
-                                                    {(del.status === 'DELIVERED' || del.status === 'FAILED') && (
-                                                        <button title="View Outcome" onClick={() => { setActiveDelivery(del); setProofImage(del.evidenceImage || null); setIsProofViewerOpen(true); }} className={`p-2.5 rounded-2xl transition-all border ${del.status === 'DELIVERED' ? 'bg-emerald-50' : 'bg-rose-50'}`}>
-                                                            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268-2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542 7-4.477 0-8.268-2.943-9.542-7z" /></svg>
+                                                    ) : <span className="text-[10px] font-black text-slate-300 italic">WAITING SCHEDULE</span>}
+                                                </td>
+                                                <td className="px-8 py-6">
+                                                    <div className="font-black text-slate-700 text-xs">{del.driverName}</div>
+                                                    <div className="text-[10px] text-slate-400 font-bold uppercase">{del.vehicleType}</div>
+                                                </td>
+                                                <td className="px-8 py-6 text-right">
+                                                    <div className="flex justify-end items-center gap-3">
+                                                        <button title="Print Order" onClick={() => printDeliveryOrder(del)} className="p-2.5 bg-slate-50 rounded-2xl text-slate-400 hover:text-blue-600 hover:bg-blue-50 transition-all">
+                                                            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z"/></svg>
                                                         </button>
-                                                    )}
-                                                </div>
-                                            </td>
-                                        </tr>
-                                    ))}
+                                                        
+                                                        {del.status === 'PENDING_SCHEDULE' && (
+                                                            <button onClick={() => { setActiveDelivery(del); setIsScheduleModalOpen(true); }} className="px-4 py-2 bg-orange-600 text-white text-[10px] font-black rounded-xl uppercase hover:bg-orange-700 shadow-md">Schedule</button>
+                                                        )}
+
+                                                        {del.status === 'SCHEDULED' && (
+                                                            <>
+                                                                <button onClick={() => { setActiveDelivery(del); setIsScheduleModalOpen(true); }} className="px-3 py-1.5 bg-slate-100 text-slate-600 text-[10px] font-black rounded-xl uppercase hover:bg-slate-200">Edit</button>
+                                                                <button onClick={() => handleDepart(del)} className="px-4 py-2 bg-blue-600 text-white text-[10px] font-black rounded-xl uppercase hover:bg-blue-700 shadow-md">Depart</button>
+                                                            </>
+                                                        )}
+                                                        
+                                                        {del.status === 'OUT_FOR_DELIVERY' && (
+                                                            <div className="flex gap-2">
+                                                                <button onClick={() => { setActiveDelivery(del); setOutcomeType('DELIVERED'); setIsProofModalOpen(true); }} className="px-3 py-1.5 bg-emerald-600 text-white text-[10px] font-black rounded-xl uppercase shadow-md">Deliver</button>
+                                                                <button onClick={() => { setActiveDelivery(del); setOutcomeType('FAILED'); setIsProofModalOpen(true); }} className="px-3 py-1.5 bg-rose-600 text-white text-[10px] font-black rounded-xl uppercase shadow-md">Failed</button>
+                                                            </div>
+                                                        )}
+                                                        
+                                                        {del.status === 'FAILED' && (
+                                                            <button onClick={() => { setActiveDelivery(del); setIsScheduleModalOpen(true); }} className="px-4 py-2 bg-blue-500 text-white text-[10px] font-black rounded-xl uppercase shadow-md">Reschedule</button>
+                                                        )}
+
+                                                        {(del.status === 'DELIVERED' || del.status === 'FAILED') && (
+                                                            <button title="View Outcome" onClick={() => { setActiveDelivery(del); setProofImage(del.evidenceImage || null); setIsProofViewerOpen(true); }} className={`p-2.5 rounded-2xl transition-all border ${del.status === 'DELIVERED' ? 'bg-emerald-50' : 'bg-rose-50'}`}>
+                                                                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268-2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542 7-4.477 0-8.268-2.943-9.542-7z" /></svg>
+                                                            </button>
+                                                        )}
+                                                    </div>
+                                                </td>
+                                            </tr>
+                                        );
+                                    })}
                                     {filteredDeliveries.length === 0 && (
-                                        <tr><td colSpan={5} className="px-8 py-20 text-center text-slate-300 italic font-medium">No activity records found for this segment.</td></tr>
+                                        <tr><td colSpan={5} className="px-8 py-20 text-center text-slate-300 italic font-medium">No active delivery records found for this segment.</td></tr>
                                     )}
                                 </tbody>
                             </table>
@@ -743,7 +791,7 @@ export const InventoryDelivery: React.FC<Props> = ({
                 </div>
             )}
 
-            {(subTab === 'history' && isAdmin) && (
+            {(subTab === 'history' && canViewHistory) && (
                 <div className="space-y-4 animate-fade-in">
                     <div className="flex justify-between items-center bg-white p-4 rounded-xl border border-gray-200 shadow-sm">
                         <div>
@@ -775,38 +823,44 @@ export const InventoryDelivery: React.FC<Props> = ({
                             <tbody className="divide-y divide-gray-100">
                                 {deliveries.filter(d => d.status === 'DELIVERED' || d.status === 'FAILED')
                                     .sort((a,b) => (b.deliveryDate || '').localeCompare(a.deliveryDate || ''))
-                                    .map(del => (
-                                    <tr key={del.id} className="hover:bg-slate-50/50 transition-colors">
-                                        <td className="px-8 py-6">
-                                            <div className="text-xs font-black text-slate-700">{del.deliveryDate}</div>
-                                            <div className="text-[10px] font-mono text-slate-400 uppercase">#DO-{del.id.slice(-6).toUpperCase()}</div>
-                                        </td>
-                                        <td className="px-8 py-6">
-                                            <div className="text-sm font-black text-slate-900">{del.customerName || 'N/A'}</div>
-                                            <div className="text-[10px] text-slate-400 font-bold uppercase truncate max-w-[200px]">{del.destinationAddress}</div>
-                                        </td>
-                                        <td className="px-8 py-6">
-                                            <div className="text-xs font-black text-slate-700">{del.driverName}</div>
-                                            <div className="text-[10px] text-slate-400 font-bold uppercase">{del.vehicleType}</div>
-                                        </td>
-                                        <td className="px-8 py-6 text-center">
-                                            <span className={`px-3 py-1 rounded-full text-[9px] font-black uppercase border ${del.status === 'DELIVERED' ? 'bg-green-50 text-green-700 border-green-100' : 'bg-red-50 text-red-700 border-red-100'}`}>
-                                                {del.status}
-                                            </span>
-                                            {del.failureReason && <div className="text-[8px] text-red-400 font-bold mt-1 uppercase italic">{del.failureReason}</div>}
-                                        </td>
-                                        <td className="px-8 py-6 text-right">
-                                            <div className="flex justify-end gap-2">
-                                                <button onClick={() => { setActiveDelivery(del); setProofImage(del.evidenceImage || null); setIsProofViewerOpen(true); }} className="p-2 bg-slate-50 rounded-xl text-slate-400 hover:text-indigo-600 transition-colors border border-slate-100">
-                                                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268-2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542 7-4.477 0-8.268-2.943-9.542-7z" /></svg>
-                                                </button>
-                                                <button onClick={() => printDeliveryOrder(del)} className="p-2 bg-slate-50 rounded-xl text-slate-400 hover:text-blue-600 transition-colors border border-slate-100">
-                                                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z" /></svg>
-                                                </button>
-                                            </div>
-                                        </td>
-                                    </tr>
-                                ))}
+                                    .map(del => {
+                                        const linkedCust = customers.find(c => c.name === del.customerName);
+                                        const displayPIC = del.pic || linkedCust?.pic || 'N/A';
+                                        
+                                        return (
+                                            <tr key={del.id} className="hover:bg-slate-50/50 transition-colors">
+                                                <td className="px-8 py-6">
+                                                    <div className="text-xs font-black text-slate-700">{del.deliveryDate}</div>
+                                                    <div className="text-[10px] font-mono text-slate-400 uppercase">#DO-{del.id.slice(-6).toUpperCase()}</div>
+                                                </td>
+                                                <td className="px-8 py-6">
+                                                    <div className="text-sm font-black text-slate-900">{del.customerName || 'N/A'}</div>
+                                                    <div className="text-[10px] text-slate-400 font-bold uppercase truncate max-w-[200px]">{del.destinationAddress}</div>
+                                                    <div className="text-[10px] text-indigo-500 font-bold">PIC: {displayPIC}</div>
+                                                </td>
+                                                <td className="px-8 py-6">
+                                                    <div className="text-xs font-black text-slate-700">{del.driverName}</div>
+                                                    <div className="text-[10px] text-slate-400 font-bold uppercase">{del.vehicleType}</div>
+                                                </td>
+                                                <td className="px-8 py-6 text-center">
+                                                    <span className={`px-3 py-1 rounded-full text-[9px] font-black uppercase border ${del.status === 'DELIVERED' ? 'bg-green-50 text-green-700 border-green-100' : 'bg-red-50 text-red-700 border-red-100'}`}>
+                                                        {del.status}
+                                                    </span>
+                                                    {del.failureReason && <div className="text-[8px] text-red-400 font-bold mt-1 uppercase italic">{del.failureReason}</div>}
+                                                </td>
+                                                <td className="px-8 py-6 text-right">
+                                                    <div className="flex justify-end gap-2">
+                                                        <button onClick={() => { setActiveDelivery(del); setProofImage(del.evidenceImage || null); setIsProofViewerOpen(true); }} className="p-2 bg-slate-50 rounded-xl text-slate-400 hover:text-indigo-600 transition-colors border border-slate-100">
+                                                            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268-2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542 7-4.477 0-8.268-2.943-9.542-7z" /></svg>
+                                                        </button>
+                                                        <button onClick={() => printDeliveryOrder(del)} className="p-2 bg-slate-50 rounded-xl text-slate-400 hover:text-blue-600 transition-colors border border-slate-100">
+                                                            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z" /></svg>
+                                                        </button>
+                                                    </div>
+                                                </td>
+                                            </tr>
+                                        );
+                                    })}
                                 {deliveries.filter(d => d.status === 'DELIVERED' || d.status === 'FAILED').length === 0 && (
                                     <tr><td colSpan={5} className="px-8 py-20 text-center text-slate-300 italic font-medium">No historical fulfillment records available.</td></tr>
                                 )}
@@ -816,7 +870,7 @@ export const InventoryDelivery: React.FC<Props> = ({
                 </div>
             )}
 
-            {(subTab === 'movement' && isAdmin) && (
+            {(subTab === 'movement' && canViewMovements) && (
                 <div className="space-y-4">
                     <div className="flex justify-between items-center bg-white p-4 rounded-xl border border-gray-200 shadow-sm">
                         <div className="flex bg-gray-100 p-1 rounded-xl w-fit">
@@ -825,7 +879,7 @@ export const InventoryDelivery: React.FC<Props> = ({
                                 { id: 'IN', label: 'Stock In' },
                                 { id: 'OUT', label: 'Stock Out' }
                             ].map(f => (
-                                <button key={f.id} onClick={() => setMovementFilter(f.id as any)} className={`px-6 py-2.5 rounded-xl text-[10px] font-black uppercase transition-all whitespace-nowrap ${movementFilter === f.id ? 'bg-white text-blue-600 shadow-md ring-1 ring-blue-100' : 'text-gray-400 hover:text-gray-600'}`}>{f.label}</button>
+                                <button key={f.id} onClick={() => setMovementFilter(f.id as any)} className={`px-6 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all whitespace-nowrap ${movementFilter === f.id ? 'bg-white text-blue-600 shadow-md ring-1 ring-blue-100' : 'text-gray-400 hover:text-gray-600'}`}>{f.label}</button>
                             ))}
                         </div>
                         <div className="flex gap-2">
@@ -842,7 +896,7 @@ export const InventoryDelivery: React.FC<Props> = ({
                     <div className="bg-white rounded-[2.5rem] border border-gray-100 overflow-hidden shadow-sm">
                         <table className="min-w-full divide-y divide-gray-200 text-sm">
                             <thead className="bg-gray-50 text-[10px] font-bold text-gray-400 uppercase tracking-widest">
-                                <tr><th className="px-8 py-6 text-left">Timestamp</th><th className="px-8 py-6 text-left">Action</th><th className="px-8 py-6 text-left">Reference & Detail</th><th className="px-8 py-6 text-center">Net Weight</th><th className="px-8 py-6 text-right">Performed By</th></tr>
+                                <tr><th className="px-8 py-6 text-left">Timestamp</th><th className="px-8 py-6 text-left">Action</th><th className="px-8 py-6 text-left">Reference & Detail</th><th className="px-8 py-6 text-center">Net Units (Packs)</th><th className="px-8 py-6 text-right">Performed By</th></tr>
                             </thead>
                             <tbody className="divide-y divide-gray-100">
                                 {filteredMovements.sort((a,b)=>b.date.localeCompare(a.date)).map(mov => (
@@ -861,7 +915,7 @@ export const InventoryDelivery: React.FC<Props> = ({
                                                 {!(mov as any).mushroomType && !(mov as any).details && `Batch #${mov.batchId}`}
                                             </div>
                                         </td>
-                                        <td className="px-8 py-6 text-center font-black text-slate-900">{mov.type === 'IN' ? '+' : '-'}{mov.quantity.toFixed(1)} kg</td>
+                                        <td className="px-8 py-6 text-center font-black text-slate-900">{mov.type === 'IN' ? '+' : '-'}{Math.floor(mov.quantity / 0.2)} Packs</td>
                                         <td className="px-8 py-6 text-right text-[11px] font-bold text-slate-400 uppercase">{mov.performedBy.split('@')[0]}</td>
                                     </tr>
                                 ))}
@@ -960,10 +1014,15 @@ export const InventoryDelivery: React.FC<Props> = ({
                             <button onClick={() => setIsScheduleModalOpen(false)} className="text-white hover:text-white/80 font-bold text-3xl">×</button>
                         </div>
                         <div className="p-10 space-y-8">
-                            <div className="p-5 bg-indigo-50 rounded-[1.5rem] border border-indigo-100">
-                                <p className="text-[10px] font-black text-indigo-400 uppercase tracking-widest mb-2">Customer Order Information</p>
-                                <p className="text-slate-900 font-black text-lg mb-1 leading-tight">{activeDelivery.customerName}</p>
-                                <p className="text-indigo-700 font-bold italic text-xs leading-relaxed">"{activeDelivery.orderSummary || 'No items listed'}"</p>
+                            <div className="p-5 bg-indigo-50 rounded-[1.5rem] border border-indigo-100 flex justify-between items-start">
+                                <div>
+                                    <p className="text-[10px] font-black text-indigo-400 uppercase tracking-widest mb-2">Customer Order Information</p>
+                                    <p className="text-slate-900 font-black text-lg mb-1 leading-tight">{activeDelivery.customerName}</p>
+                                    <p className="text-indigo-700 font-bold italic text-xs leading-relaxed">"{activeDelivery.orderSummary || 'No items listed'}"</p>
+                                </div>
+                                {customers.some(c => c.name === activeDelivery.customerName) && (
+                                    <span className="bg-emerald-100 text-emerald-700 text-[8px] font-black px-2 py-1 rounded-lg border border-emerald-200">CRM LINKED</span>
+                                )}
                             </div>
                             
                             <div className="grid grid-cols-2 gap-5">
@@ -1006,15 +1065,15 @@ export const InventoryDelivery: React.FC<Props> = ({
                                 </div>
                             </div>
                             
-                            <div>
-                                <label className="block text-[10px] font-black text-slate-500 uppercase ml-1 mb-1.5 tracking-widest">Optimized Route</label>
-                                <select 
-                                    value={scheduleRoute} 
-                                    onChange={e => setScheduleRoute(e.target.value)} 
-                                    className="w-full p-4 rounded-2xl bg-slate-100 border-none text-sm font-bold shadow-inner"
-                                >
-                                    {ROUTE_LIST.map(r => <option key={r} value={r}>{r}</option>)}
-                                </select>
+                            <div className="space-y-4">
+                                <div>
+                                    <label className="block text-[10px] font-black text-slate-500 uppercase ml-1 mb-1.5 tracking-widest">Person In Charge (PIC)</label>
+                                    <input type="text" value={schedulePIC} onChange={e=>setSchedulePIC(e.target.value)} className="w-full p-4 rounded-2xl bg-slate-100 border-none text-sm font-bold shadow-inner" placeholder="Enter recipient name" />
+                                </div>
+                                <div>
+                                    <label className="block text-[10px] font-black text-slate-500 uppercase ml-1 mb-1.5 tracking-widest">Full Delivery Address</label>
+                                    <textarea value={scheduleAddress} onChange={e=>setScheduleAddress(e.target.value)} className="w-full p-4 rounded-2xl bg-slate-100 border-none text-sm font-bold shadow-inner h-24" placeholder="Enter full address" />
+                                </div>
                             </div>
                             
                             <button 
@@ -1046,9 +1105,14 @@ export const InventoryDelivery: React.FC<Props> = ({
                             <div className="flex-1 space-y-6 w-full text-left">
                                 <div className="p-5 bg-slate-50 rounded-[1.5rem] border border-slate-100">
                                     <h4 className="text-[10px] font-black text-slate-400 uppercase mb-3 tracking-widest">Recipient Identity</h4>
-                                    <div className="text-sm font-black text-slate-900">{activeDelivery.customerName || activeDelivery.destinationAddress}</div>
-                                    <div className="text-[11px] text-indigo-600 font-black mt-2 uppercase tracking-tighter">{activeDelivery.customerEmail}</div>
+                                    <div className="text-sm font-black text-slate-900">{activeDelivery.customerName}</div>
+                                    <div className="text-[11px] text-slate-700 font-bold mt-2 uppercase">PIC: {activeDelivery.pic || 'N/A'}</div>
+                                    <div className="text-[11px] text-indigo-600 font-black mt-1 uppercase tracking-tighter">{activeDelivery.customerEmail}</div>
                                     <div className="text-[11px] text-slate-500 font-bold mt-0.5">{activeDelivery.customerPhone}</div>
+                                    <div className="mt-4 pt-4 border-t border-slate-200">
+                                        <h4 className="text-[10px] font-black text-slate-400 uppercase mb-2 tracking-widest">Full Address</h4>
+                                        <div className="text-xs font-bold text-slate-700">{activeDelivery.destinationAddress}</div>
+                                    </div>
                                 </div>
                                 {activeDelivery.orderSummary && (
                                     <div className="p-5 bg-blue-50/50 rounded-[1.5rem] border border-blue-100">

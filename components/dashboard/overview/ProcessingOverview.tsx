@@ -1,7 +1,7 @@
+
 import React from 'react';
 import { FinancialRecord } from '../../../types';
 
-// Fix: Changed property types from literal 0 to number to avoid assignability errors in OverviewTab
 interface ProcessingViewProps {
     financeOverviewData: any;
     financialRecords: FinancialRecord[];
@@ -9,6 +9,7 @@ interface ProcessingViewProps {
     processingStats: { intake: number; qc: number; packing: number; ready: number; };
     logisticsStats: { scheduled: number; delivering: number; failed: number; };
     predictedYield?: number;
+    yieldForecasts?: any[];
 }
 
 // 1. FINANCE ROLE (The 3 Pillars + Pulse)
@@ -137,7 +138,7 @@ export const ProcessingFinanceView: React.FC<ProcessingViewProps> = ({
 
 // 2. USER ROLE (Floor Operations - Reduced Tabs)
 export const ProcessingUserView: React.FC<ProcessingViewProps> = ({
-    processingStats, logisticsStats, setActiveTab, predictedYield
+    processingStats, logisticsStats, setActiveTab, predictedYield, yieldForecasts = []
 }) => {
     return (
         <div className="space-y-8 animate-fade-in-up">
@@ -161,12 +162,55 @@ export const ProcessingUserView: React.FC<ProcessingViewProps> = ({
                         <p className="text-[10px] text-slate-400 font-black uppercase tracking-widest">Scheduled Ships</p>
                         <p className="text-2xl font-black text-orange-600">{logisticsStats.scheduled}</p>
                     </div>
-                    {/* New Card for Predicted Yield */}
-                    <div className="w-px bg-slate-200 h-10"></div>
-                    <div className="text-center px-4">
-                        <p className="text-[10px] text-slate-400 font-black uppercase tracking-widest">Predicted Inbound</p>
-                        <p className="text-2xl font-black text-green-600">{predictedYield ? predictedYield.toFixed(0) : '0'} kg</p>
-                    </div>
+                </div>
+            </div>
+
+            {/* Detailed Forecast Interface */}
+            <div className="bg-white p-6 rounded-3xl border border-gray-200 shadow-sm overflow-hidden">
+                <div className="flex justify-between items-center mb-4">
+                    <h3 className="text-sm font-black text-gray-700 uppercase tracking-widest flex items-center gap-2">
+                        <svg className="w-4 h-4 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" /></svg>
+                        Incoming Yield Forecasts (Active)
+                    </h3>
+                    <span className="text-[10px] bg-green-50 text-green-700 px-2 py-1 rounded font-bold">{yieldForecasts.length} Batches</span>
+                </div>
+                <div className="overflow-x-auto max-h-[300px]">
+                    <table className="min-w-full text-xs text-left">
+                        <thead className="bg-gray-50 text-gray-400 uppercase font-bold sticky top-0">
+                            <tr>
+                                <th className="px-6 py-3">Batch ID</th>
+                                <th className="px-6 py-3">Strain</th>
+                                <th className="px-6 py-3">Source</th>
+                                <th className="px-6 py-3 text-right">Predicted Total</th>
+                                <th className="px-6 py-3 text-right">Current Harvest</th>
+                                <th className="px-6 py-3 text-center">Completion</th>
+                            </tr>
+                        </thead>
+                        <tbody className="divide-y divide-gray-100">
+                            {yieldForecasts.length === 0 ? (
+                                <tr><td colSpan={6} className="px-6 py-8 text-center text-gray-400 italic">No incoming forecasts available.</td></tr>
+                            ) : (
+                                yieldForecasts.map(f => {
+                                    const progress = f.predictedQty > 0 ? (f.currentYield / f.predictedQty) * 100 : 0;
+                                    return (
+                                        <tr key={f.id} className="hover:bg-gray-50 transition-colors">
+                                            <td className="px-6 py-3 font-mono font-bold text-slate-700">{f.batchId}</td>
+                                            <td className="px-6 py-3 font-bold">{f.strain}</td>
+                                            <td className="px-6 py-3 text-gray-500 uppercase text-[10px]">{f.villageId}</td>
+                                            <td className="px-6 py-3 text-right font-black text-green-600">{f.predictedQty.toFixed(1)} kg</td>
+                                            <td className="px-6 py-3 text-right font-bold text-slate-600">{f.currentYield?.toFixed(1) || '0.0'} kg</td>
+                                            <td className="px-6 py-3 text-center">
+                                                <div className="w-24 h-1.5 bg-gray-100 rounded-full mx-auto overflow-hidden">
+                                                    <div className="h-full bg-blue-500" style={{ width: `${Math.min(100, progress)}%` }}></div>
+                                                </div>
+                                                <span className="text-[9px] text-gray-400 mt-1 block">{progress.toFixed(0)}%</span>
+                                            </td>
+                                        </tr>
+                                    );
+                                })
+                            )}
+                        </tbody>
+                    </table>
                 </div>
             </div>
 

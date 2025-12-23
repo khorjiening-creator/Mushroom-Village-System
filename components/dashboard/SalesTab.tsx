@@ -65,6 +65,8 @@ export const SalesTab: React.FC<SalesTabProps> = ({
     const [custName, setCustName] = useState('');
     const [custEmail, setCustEmail] = useState('');
     const [custPhone, setCustPhone] = useState('');
+    const [custAddress, setCustAddress] = useState('');
+    const [custPIC, setCustPIC] = useState('');
     const [custType, setCustType] = useState<'WHOLESALE' | 'RETAIL' | 'LOCAL'>('RETAIL');
 
     useEffect(() => {
@@ -135,13 +137,24 @@ export const SalesTab: React.FC<SalesTabProps> = ({
             
             const inProcessStock = Math.floor(inProcessKg / 0.2);
 
-            // Costing + 15% Margin
+            // DYNAMIC PRICING: TIERED LOGIC APPLIED AFTER OVERHEAD & MARGIN
             const variety = MUSHROOM_VARIETIES.find(v => p.name.includes(v)) || 'Oyster';
-            const rawCostPerKg = MUSHROOM_PRICES[variety] || 15;
-            const unitRawCost = rawCostPerKg * 0.2;
+            const baseRawCostPerKg = MUSHROOM_PRICES[variety] || 15;
+            
+            const unitRawCost = baseRawCostPerKg * 0.2; // 200g pack base raw cost
             const packagingOverhead = 0.85; 
             const totalUnitCost = unitRawCost + packagingOverhead;
-            const calculatedPrice = Number((totalUnitCost * 1.15).toFixed(2));
+            
+            // Step 1: Base Price (Cost + 15% Margin)
+            const basePriceWithMargin = totalUnitCost * 1.15;
+
+            // Step 2: Apply Tiered Multiplier based on Grade
+            // Grade A: +20% premium
+            // Grade B: Base
+            // Grade C: -20% discount
+            const gradeMultiplier = p.grade === 'A' ? 1.2 : p.grade === 'C' ? 0.8 : 1.0;
+            
+            const calculatedPrice = Number((basePriceWithMargin * gradeMultiplier).toFixed(2));
 
             return { 
                 ...p, 
@@ -161,9 +174,13 @@ export const SalesTab: React.FC<SalesTabProps> = ({
                 const productName = `${variety} (200g Pack) - Grade ${grade}`;
                 const productId = `VC-PROD-${variety.replace(/\s/g, '')}-${grade}`;
                 
-                const rawCostPerKg = MUSHROOM_PRICES[variety] || 15;
-                const totalUnitCost = (rawCostPerKg * 0.2) + 0.85;
-                const calculatedPrice = Number((totalUnitCost * 1.15).toFixed(2));
+                const baseRawCostPerKg = MUSHROOM_PRICES[variety] || 15;
+                const unitRawCost = baseRawCostPerKg * 0.2;
+                const packagingOverhead = 0.85;
+                const basePriceWithMargin = (unitRawCost + packagingOverhead) * 1.15;
+                
+                const gradeMultiplier = grade === 'A' ? 1.2 : grade === 'C' ? 0.8 : 1.0;
+                const calculatedPrice = Number((basePriceWithMargin * gradeMultiplier).toFixed(2));
 
                 const pData = {
                     id: productId,
@@ -378,7 +395,34 @@ export const SalesTab: React.FC<SalesTabProps> = ({
             await setDoc(doc(db, finCol, txnId), txnData);
             await setDoc(doc(db, incomeCol, txnId), txnData);
 
-            onSuccess("Sale Logged: Transaction added to ledger as PENDING.");
+            // --- LINK TO LOGISTICS & DISPATCH ---
+            const deliveryId = `DEL-${saleId.split('-')[1]}`;
+            const orderSummary = cart.map(i => `${i.quantity}x ${i.name}`).join(', ');
+            const deliveryData: DeliveryRecord = {
+                id: deliveryId,
+                saleId: saleId,
+                customerName: customer.name, // Company Name
+                customerEmail: customer.email,
+                customerPhone: customer.phone,
+                destinationAddress: customer.address || "Address Not Specified", // Linked Company Address
+                pic: customer.pic || "N/A", // Linked PIC
+                status: 'PENDING_SCHEDULE',
+                deliveryDate: '',
+                deliveryTime: '',
+                route: '',
+                zone: '',
+                driverId: '',
+                driverName: 'Unassigned',
+                vehicleId: '',
+                vehicleType: 'Unassigned',
+                villageId: VillageType.C,
+                orderSummary: orderSummary
+            };
+
+            await setDoc(doc(db, "delivery_records", deliveryId), deliveryData);
+            // -------------------------------------
+
+            onSuccess("Sale Logged & Delivery Queued: Destination address and PIC linked to logistics.");
             setCart([]); setSelectedCustomerId('');
         } catch (err: any) {
             console.error("Sale Error:", err);
@@ -390,7 +434,14 @@ export const SalesTab: React.FC<SalesTabProps> = ({
         e.preventDefault();
         setIsSubmittingCustomer(true);
         try {
-            const data: any = { name: custName.trim(), email: custEmail.trim().toLowerCase(), phone: custPhone.trim(), type: custType };
+            const data: any = { 
+                name: custName.trim(), 
+                email: custEmail.trim().toLowerCase(), 
+                phone: custPhone.trim(), 
+                address: custAddress.trim(), // Linked to logistics
+                pic: custPIC.trim(),         // Linked to logistics
+                type: custType 
+            };
             if (editingCustomer) {
                 await updateDoc(doc(db, 'customers', editingCustomer.id), data);
             } else {
@@ -399,6 +450,7 @@ export const SalesTab: React.FC<SalesTabProps> = ({
             }
             setShowCustomerModal(false);
             setEditingCustomer(null);
+            onSuccess("Customer profile synchronized with network.");
         } catch (err: any) { 
             console.error(err);
         } finally { setIsSubmittingCustomer(false); }
@@ -423,12 +475,25 @@ export const SalesTab: React.FC<SalesTabProps> = ({
     };
 
     const openEditCustomer = (c: Customer) => {
-        setEditingCustomer(c); setCustName(c.name); setCustEmail(c.email); setCustPhone(c.phone); setCustType(c.type); setShowCustomerModal(true);
+        setEditingCustomer(c); 
+        setCustName(c.name); 
+        setCustEmail(c.email); 
+        setCustPhone(c.phone); 
+        setCustAddress(c.address || ''); 
+        setCustPIC(c.pic || '');
+        setCustType(c.type); 
+        setShowCustomerModal(true);
     };
 
     const openNewCustomerModal = () => {
-        // Fix: Changed 'setEditingUser' to 'setEditingCustomer' to resolve 'Cannot find name' error.
-        setEditingCustomer(null); setCustName(''); setCustEmail(''); setCustPhone(''); setCustType('RETAIL'); setShowCustomerModal(true);
+        setEditingCustomer(null); 
+        setCustName(''); 
+        setCustEmail(''); 
+        setCustPhone(''); 
+        setCustAddress('');
+        setCustPIC('');
+        setCustType('RETAIL'); 
+        setShowCustomerModal(true);
     };
 
     const filteredProducts = productsWithLiveStock.filter(p => p.name.toLowerCase().includes(searchQuery.toLowerCase()));
@@ -606,7 +671,7 @@ export const SalesTab: React.FC<SalesTabProps> = ({
                         <div><h3 className="text-xl font-black text-slate-900 tracking-tight">Customer Relationship Matrix</h3><p className="text-[10px] text-slate-400 uppercase font-black tracking-widest mt-1">Village C Customer Registry</p></div>
                         <button onClick={openNewCustomerModal} className="px-6 py-3 bg-slate-900 text-white rounded-2xl text-xs font-black uppercase tracking-widest shadow-xl hover:bg-slate-800 transition-all flex items-center gap-2"><svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 6v6m0 0v6m0-6h6m-6 0H6" /></svg>Enroll New Customer</button>
                     </div>
-                    <table className="min-w-full"><thead className="bg-slate-50"><tr className="text-[10px] font-black text-slate-400 uppercase tracking-widest"><th className="px-8 py-6 text-left">Identity Profile</th><th className="px-8 py-6 text-left">Category</th><th className="px-8 py-6 text-right">LTV (Spent)</th><th className="px-8 py-6 text-center">Points</th><th className="px-8 py-6 text-center">Actions</th></tr></thead><tbody className="divide-y divide-slate-100">{customers.map(c => (<tr key={c.id} className="hover:bg-slate-50 transition-colors"><td className="px-8 py-6"><p className="text-sm font-black text-slate-900">{c.name}</p><p className="text-[10px] text-slate-400 font-bold uppercase tracking-tight">{c.email}</p></td><td className="px-8 py-6"><span className="px-3 py-1 rounded-full text-[9px] font-black uppercase bg-slate-100 text-slate-500 border border-slate-200">{c.type}</span></td><td className="px-8 py-6 text-right"><p className="text-sm font-black text-emerald-600 font-mono">RM{(c.totalSpent || 0).toLocaleString(undefined, {minimumFractionDigits: 2})}</p></td><td className="px-8 py-6 text-center"><span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-black bg-amber-100 text-amber-800">{c.loyaltyPoints || 0}</span></td><td className="px-8 py-6 text-center"><div className="flex justify-center gap-3"><button onClick={() => openEditCustomer(c)} className="text-indigo-600 font-black text-[10px] uppercase tracking-widest hover:underline">Edit</button></div></td></tr>))}</tbody></table>
+                    <table className="min-w-full"><thead className="bg-slate-50"><tr className="text-[10px] font-black text-slate-400 uppercase tracking-widest"><th className="px-8 py-6 text-left">Identity Profile</th><th className="px-8 py-6 text-left">PIC</th><th className="px-8 py-6 text-left">Category</th><th className="px-8 py-6 text-right">LTV (Spent)</th><th className="px-8 py-6 text-center">Points</th><th className="px-8 py-6 text-center">Actions</th></tr></thead><tbody className="divide-y divide-slate-100">{customers.map(c => (<tr key={c.id} className="hover:bg-slate-50 transition-colors"><td className="px-8 py-6"><p className="text-sm font-black text-slate-900">{c.name}</p><p className="text-[10px] text-slate-400 font-bold uppercase tracking-tight">{c.email}</p></td><td className="px-8 py-6"><span className="text-xs font-bold text-indigo-600">{c.pic || 'N/A'}</span></td><td className="px-8 py-6"><span className="px-3 py-1 rounded-full text-[9px] font-black uppercase bg-slate-100 text-slate-500 border border-slate-200">{c.type}</span></td><td className="px-8 py-6 text-right"><p className="text-sm font-black text-emerald-600 font-mono">RM{(c.totalSpent || 0).toLocaleString(undefined, {minimumFractionDigits: 2})}</p></td><td className="px-8 py-6 text-center"><span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-black bg-amber-100 text-amber-800">{c.loyaltyPoints || 0}</span></td><td className="px-8 py-6 text-center"><div className="flex justify-center gap-3"><button onClick={() => openEditCustomer(c)} className="text-indigo-600 font-black text-[10px] uppercase tracking-widest hover:underline">Edit</button></div></td></tr>))}</tbody></table>
                 </div>
             )}
 
@@ -628,11 +693,25 @@ export const SalesTab: React.FC<SalesTabProps> = ({
             {/* Enrollment / Edit Customer Modal */}
             {showCustomerModal && (
                 <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in">
-                    <div className="bg-white rounded-[3rem] shadow-2xl w-full max-w-lg p-10 animate-scale-in max-h-[90vh] overflow-y-auto">
+                    <div className="bg-white rounded-[3rem] shadow-2xl w-full max-w-2xl p-10 animate-scale-in max-h-[90vh] overflow-y-auto">
                         <div className="flex justify-between items-center mb-8"><h3 className="text-2xl font-black text-slate-900 tracking-tight">{editingCustomer ? 'Edit Profile' : 'Enroll Client'}</h3><button onClick={() => setShowCustomerModal(false)} className="p-2 hover:bg-slate-100 rounded-full transition-colors"><svg className="w-6 h-6 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" /></svg></button></div>
                         <form onSubmit={handleSaveCustomer} className="space-y-5">
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4"><div><label className="block text-[10px] font-black text-slate-500 uppercase ml-1 mb-1.5">Legal Identity / Name</label><input type="text" required value={custName} onChange={e => setCustName(e.target.value)} className="w-full p-4 rounded-2xl bg-slate-100 border-none text-sm font-bold" placeholder="e.g. John Trading Co." /></div><div><label className="block text-[10px] font-black text-slate-500 uppercase ml-1 mb-1.5">Segment Type</label><select value={custType} onChange={e => setCustType(e.target.value as any)} className="w-full p-4 rounded-2xl bg-slate-100 border-none text-sm font-bold"><option value="RETAIL">Retail Consumer</option><option value="WHOLESALE">Wholesale Distributor</option><option value="LOCAL">Local Vendor</option></select></div></div>
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4"><div><label className="block text-[10px] font-black text-slate-500 uppercase ml-1 mb-1.5">Email Address</label><input type="email" value={custEmail} onChange={e => setCustEmail(e.target.value)} className="w-full p-4 rounded-2xl bg-slate-100 border-none text-sm font-bold" placeholder="client@email.com" /></div><div><label className="block text-[10px] font-black text-slate-500 uppercase ml-1 mb-1.5">Contact Number</label><input type="tel" value={custPhone} onChange={e => setCustPhone(e.target.value)} className="w-full p-4 rounded-2xl bg-slate-100 border-none text-sm font-bold" placeholder="+60..." /></div></div>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <div><label className="block text-[10px] font-black text-slate-500 uppercase ml-1 mb-1.5">Company Identity / Name</label><input type="text" required value={custName} onChange={e => setCustName(e.target.value)} className="w-full p-4 rounded-2xl bg-slate-100 border-none text-sm font-bold" placeholder="e.g. John Trading Co." /></div>
+                                <div><label className="block text-[10px] font-black text-slate-500 uppercase ml-1 mb-1.5">Segment Type</label><select value={custType} onChange={e => setCustType(e.target.value as any)} className="w-full p-4 rounded-2xl bg-slate-100 border-none text-sm font-bold"><option value="RETAIL">Retail Consumer</option><option value="WHOLESALE">Wholesale Distributor</option><option value="LOCAL">Local Vendor</option></select></div>
+                            </div>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <div><label className="block text-[10px] font-black text-slate-500 uppercase ml-1 mb-1.5">Person In Charge (PIC)</label><input type="text" required value={custPIC} onChange={e => setCustPIC(e.target.value)} className="w-full p-4 rounded-2xl bg-slate-100 border-none text-sm font-bold" placeholder="Recipient Contact Name" /></div>
+                                <div><label className="block text-[10px] font-black text-slate-500 uppercase ml-1 mb-1.5">Contact Number</label><input type="tel" value={custPhone} onChange={e => setCustPhone(e.target.value)} className="w-full p-4 rounded-2xl bg-slate-100 border-none text-sm font-bold" placeholder="+60..." /></div>
+                            </div>
+                            <div>
+                                <label className="block text-[10px] font-black text-slate-500 uppercase ml-1 mb-1.5">Email Address</label>
+                                <input type="email" value={custEmail} onChange={e => setCustEmail(e.target.value)} className="w-full p-4 rounded-2xl bg-slate-100 border-none text-sm font-bold" placeholder="client@email.com" />
+                            </div>
+                            <div>
+                                <label className="block text-[10px] font-black text-slate-500 uppercase ml-1 mb-1.5">Company Address (Linked to Logistics)</label>
+                                <textarea required value={custAddress} onChange={e => setCustAddress(e.target.value)} className="w-full p-4 rounded-2xl bg-slate-100 border-none text-sm font-bold h-24" placeholder="Full delivery location details..."></textarea>
+                            </div>
                             {editingCustomer && (<div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2"><div className="p-4 bg-slate-50 rounded-2xl border border-slate-100"><label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Accumulated Points</label><div className="text-lg font-black text-amber-600">{editingCustomer.loyaltyPoints || 0} pts</div></div><div className="p-4 bg-slate-50 rounded-2xl border border-slate-100"><label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Lifetime Value (Spent)</label><div className="text-lg font-black text-emerald-600">RM {(editingCustomer.totalSpent || 0).toLocaleString()}</div></div></div>)}
                             <button type="submit" disabled={isSubmittingCustomer} className="w-full py-5 bg-indigo-600 text-white rounded-3xl font-black uppercase tracking-widest text-sm shadow-xl active:scale-95 disabled:opacity-30 mt-4">{isSubmittingCustomer ? 'Syncing...' : editingCustomer ? 'Update Profile' : 'Enroll Customer'}</button>
                         </form>

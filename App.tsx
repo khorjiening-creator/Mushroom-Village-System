@@ -3,7 +3,7 @@ import React, { useState, useEffect } from 'react';
 // Fix: Separate named imports for modular auth functions and type User
 import { signInWithEmailAndPassword, onAuthStateChanged, signOut } from 'firebase/auth';
 import type { User } from 'firebase/auth';
-import { doc, getDoc, setDoc } from 'firebase/firestore';
+import { doc, getDoc, setDoc, collection, addDoc } from 'firebase/firestore';
 import { auth, db } from './services/firebase';
 import { VillageType, UserProfile } from './types';
 import { VILLAGES } from './constants';
@@ -130,6 +130,15 @@ function App() {
               }
           }
           
+          // RECORD LOGIN ACTIVITY (RECOVERY)
+          await addDoc(collection(db, "activity_logs"), {
+            action: 'USER_LOGIN',
+            details: `Member authorized access via profile recovery in ${selectedVillage}.`,
+            userEmail: email,
+            villageId: selectedVillage,
+            timestamp: new Date().toISOString()
+          });
+
           setUser(currentUser);
           setIsLoggingIn(false);
           return;
@@ -138,15 +147,26 @@ function App() {
       const userData = userDocSnap.data() as UserProfile;
 
       // 3. Auto-correct Village Selection
+      let finalVillage = selectedVillage;
       if (userData.villageId && userData.villageId !== selectedVillage && userData.role !== 'admin') {
           console.log(`Auto-switching village from ${selectedVillage} to ${userData.villageId}`);
           setSelectedVillage(userData.villageId);
+          finalVillage = userData.villageId;
       }
 
       // Success
       setIsAdmin(userData.role === 'admin');
       setUserProfile(userData);
       setUser(currentUser);
+
+      // RECORD SUCCESSFUL LOGIN ACTIVITY
+      await addDoc(collection(db, "activity_logs"), {
+          action: 'USER_LOGIN',
+          details: `Authorized session initiated for ${email} in ${finalVillage}.`,
+          userEmail: email,
+          villageId: finalVillage,
+          timestamp: new Date().toISOString()
+      });
 
     } catch (error: any) {
       console.error(error);
