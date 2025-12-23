@@ -39,13 +39,13 @@ export const FarmingTab: React.FC<FarmingTabProps> = ({
   const [isLoadingBatches, setIsLoadingBatches] = useState(false);
   const [envPrompt, setEnvPrompt] = useState<{batchId: string, room: string} | null>(null);
   
-  // Default filter range for initial fetch
-  const [filterStartDate] = useState(() => {
+  // Lifted State: Date Filters
+  const [filterStartDate, setFilterStartDate] = useState(() => {
     const d = new Date();
     d.setDate(d.getDate() - 30); 
     return d.toISOString().split('T')[0];
   });
-  const [filterEndDate] = useState(() => new Date().toISOString().split('T')[0]);
+  const [filterEndDate, setFilterEndDate] = useState(() => new Date().toISOString().split('T')[0]);
 
   const fetchBatches = async () => {
     setIsLoadingBatches(true);
@@ -53,6 +53,12 @@ export const FarmingTab: React.FC<FarmingTabProps> = ({
         const start = new Date(filterStartDate);
         const end = new Date(filterEndDate);
         end.setHours(23, 59, 59, 999);
+        
+        // Ensure valid dates
+        if (isNaN(start.getTime()) || isNaN(end.getTime())) {
+            throw new Error("Invalid date range");
+        }
+
         const q = query(collection(db, collectionName), where("timestamp", ">=", start.toISOString()), where("timestamp", "<=", end.toISOString()), orderBy("timestamp", "desc"), limit(100));
         const snapshot = await getDocs(q);
         const logs: ExtendedActivityLog[] = [];
@@ -81,10 +87,11 @@ export const FarmingTab: React.FC<FarmingTabProps> = ({
       }
   };
 
+  // Trigger fetch when village or dates change
   useEffect(() => {
     fetchBatches();
     fetchRecordedWastage();
-  }, [villageId, collectionName]);
+  }, [villageId, collectionName, filterStartDate, filterEndDate]);
 
   const handleRefresh = () => {
       fetchBatches();
@@ -147,6 +154,11 @@ export const FarmingTab: React.FC<FarmingTabProps> = ({
                 onError={onError}
                 setActiveTab={setActiveTab}
                 triggerEnvPrompt={setEnvPrompt}
+                // Pass state control props
+                filterStartDate={filterStartDate}
+                setFilterStartDate={setFilterStartDate}
+                filterEndDate={filterEndDate}
+                setFilterEndDate={setFilterEndDate}
             />
         ) : (
             <FarmingReports 

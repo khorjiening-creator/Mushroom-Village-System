@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useMemo } from 'react';
 import { collection, query, getDocs, orderBy, limit, where } from 'firebase/firestore';
 import { db } from '../../services/firebase';
@@ -36,6 +37,7 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
     const [processingStats, setProcessingStats] = useState({ intake: 0, qc: 0, packing: 0, ready: 0 });
     const [logisticsStats, setLogisticsStats] = useState({ scheduled: 0, delivering: 0, failed: 0 });
     const [latestEnvLog, setLatestEnvLog] = useState<any>(null);
+    const [predictedYield, setPredictedYield] = useState(0);
 
     useEffect(() => {
         const fetchData = async () => {
@@ -99,6 +101,12 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
                         if (s === 'FAILED') logStats.failed++;
                     });
                     setLogisticsStats(logStats);
+
+                    // Fetch Yield Forecasts
+                    const forecastQ = query(collection(db, "yield_forecasts"));
+                    const forecastSnap = await getDocs(forecastQ);
+                    const totalPredicted = forecastSnap.docs.reduce((acc, doc) => acc + (doc.data().predictedQty || 0), 0);
+                    setPredictedYield(totalPredicted);
                 }
             } catch (e) {
                 console.error("Overview data fetch error", e);
@@ -170,6 +178,7 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
                 setActiveTab={setActiveTab} 
                 processingStats={processingStats} 
                 logisticsStats={logisticsStats} 
+                predictedYield={predictedYield}
             />;
         } else if (isFinance) {
             return <ProcessingFinanceView 
@@ -178,6 +187,7 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
                 setActiveTab={setActiveTab}
                 processingStats={processingStats} 
                 logisticsStats={logisticsStats}
+                predictedYield={predictedYield}
             />;
         } else {
             // User Role
@@ -187,6 +197,7 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
                 setActiveTab={setActiveTab}
                 processingStats={processingStats} 
                 logisticsStats={logisticsStats}
+                predictedYield={predictedYield}
             />;
         }
     }

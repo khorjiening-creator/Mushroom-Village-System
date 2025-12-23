@@ -122,11 +122,15 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({
     const getInventoryColName = (vid: VillageType) => vid === VillageType.A ? 'inventoryA' : vid === VillageType.B ? 'inventoryB' : 'inventoryC';
     const getHarvestColName = (vid: VillageType) => vid === VillageType.A ? 'harvestYield_A' : vid === VillageType.B ? 'harvestYield_B' : 'harvestYield_A';
     
-    const getFinancialCollectionName = (vid: VillageType) => {
-        if (vid === VillageType.A) return "financialRecords_A";
-        if (vid === VillageType.B) return "financialRecords_B";
-        if (vid === VillageType.C) return "financialRecords_C";
-        return "financialRecords"; 
+    // Updated Helper: Returns both Main and Expense collections
+    const getFinancialCollections = (vid: VillageType) => {
+        let suffix = 'C';
+        if (vid === VillageType.A) suffix = 'A';
+        if (vid === VillageType.B) suffix = 'B';
+        return {
+            main: `financialRecords_${suffix}`,
+            expense: `expenses_${suffix}`
+        };
     };
 
     const handleViewHistory = async (item: FirestoreResource) => {
@@ -507,8 +511,8 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({
             snapToday.forEach(doc => todayTotal += (doc.data().totalYield || doc.data().weightKg || 0));
             setTodayProduction(todayTotal);
 
-            const finColName = getFinancialCollectionName(villageId);
-            const finCol = collection(db, finColName);
+            const { main } = getFinancialCollections(villageId);
+            const finCol = collection(db, main);
             const qSales = query(finCol, where('villageId', '==', villageId), where('type', '==', 'INCOME'), where('category', '==', 'Sales'));
             const snapSales = await getDocs(qSales);
             setInventoryOutCount(snapSales.size);
@@ -646,14 +650,14 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({
         const selectedResource = resources.find(r => r.id === purchaseItemId);
         if (!selectedResource) return;
         try {
-            const finColName = getFinancialCollectionName(villageId);
+            const { main, expense } = getFinancialCollections(villageId);
             const transactionId = "TXN-" + Date.now().toString().slice(-6) + Math.floor(100 + Math.random() * 900);
             const totalCost = parseFloat(purchaseCost) || 0;
             const qty = parseFloat(purchaseQty) || 1;
             const factor = selectedResource.unit === 'L' ? 10 : 1;
             const calcUnitCost = totalCost / (qty / factor);
 
-            await setDoc(doc(db, finColName, transactionId), {
+            const recordData = {
                 type: 'EXPENSE',
                 status: 'PENDING',
                 category: 'Supplies', 
@@ -667,7 +671,12 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({
                 orderQty: qty,
                 receivedInStock: false,
                 createdAt: new Date().toISOString()
-            });
+            };
+
+            // DUAL WRITE: Write to specific expenses collection AND main financialRecords collection
+            await setDoc(doc(db, expense, transactionId), recordData);
+            await setDoc(doc(db, main, transactionId), recordData);
+
             setActiveNotification({
                 title: "Purchase Request Sent",
                 message: `Request for ${selectedResource.name} (Ref: ${transactionId}) has been sent to Finance.`
@@ -697,8 +706,10 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({
 
             const resColName = getResourceColName(villageId);
             const itemRef = doc(db, resColName, rec.materialId);
-            const finColName = getFinancialCollectionName(villageId);
-            const finRef = doc(db, finColName, rec.id);
+            
+            const { main, expense } = getFinancialCollections(villageId);
+            const mainFinRef = doc(db, main, rec.id);
+            const expFinRef = doc(db, expense, rec.id);
 
             await updateDoc(itemRef, {
                 quantity: increment(actualQty),
@@ -713,13 +724,25 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({
                 timestamp: new Date().toISOString()
             });
 
-            await updateDoc(finRef, {
+            const updateData: any = {
                 receivedInStock: true,
                 orderQty: orderQty, 
                 actualReceivedQty: actualQty,
                 updatedAt: new Date().toISOString(),
                 varianceResolved: actualQty === orderQty 
-            });
+            };
+
+            // DUAL UPDATE: Update both specific expense collection AND main collection
+            await updateDoc(mainFinRef, updateData);
+            
+            // Check if exists in expense collection before updating (just in case)
+            // Or assume valid data structure. Since we just created it in purchase request, it should exist.
+            // If it's a very old record it might not exist in split collection, but we assume migrated data or new system.
+            try {
+                await updateDoc(expFinRef, updateData);
+            } catch (err) {
+                console.warn("Could not update split expense collection (legacy record?):", err);
+            }
 
             if (onSuccess) onSuccess(`Stock updated: +${actualQty} received for supply ${rec.transactionId}`);
             

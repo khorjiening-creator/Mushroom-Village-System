@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useMemo } from 'react';
 import { collection, query, orderBy, limit, onSnapshot, getDocs, where } from 'firebase/firestore';
 import { db } from '../../services/firebase';
@@ -172,7 +173,7 @@ export const CostingTab: React.FC<CostingTabProps> = ({ villageId, userEmail, th
                         disabled={isLoadingBatches}
                         className="w-full p-4 rounded-2xl bg-slate-100 border-none text-sm font-bold shadow-inner focus:ring-2 focus:ring-indigo-500 appearance-none disabled:opacity-50"
                     >
-                        <option value="">{isLoadingBatches ? 'Syncing Network...' : '-- Choose Sold Batch --'}</option>
+                        <option value="">{isLoadingBatches ? 'Syncing Network...' : '-- Choose Batch --'}</option>
                         {availableBatches.map(id => (
                             <option key={id} value={id}>{id}</option>
                         ))}

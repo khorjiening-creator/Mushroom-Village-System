@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useMemo } from 'react';
 import { addDoc, collection, query, orderBy, limit, getDocs, setDoc, doc, updateDoc, increment, getDoc, arrayUnion } from 'firebase/firestore';
 import { db } from '../../services/firebase';
@@ -21,6 +22,11 @@ interface FarmingRegistryProps {
     onError: (msg: string) => void;
     setActiveTab?: (tab: any) => void;
     triggerEnvPrompt?: (data: {batchId: string, room: string}) => void;
+    // New Props for lifted state
+    filterStartDate: string;
+    setFilterStartDate: (date: string) => void;
+    filterEndDate: string;
+    setFilterEndDate: (date: string) => void;
 }
 
 const AVAILABLE_ROOMS = Object.values(MUSHROOM_ROOM_MAPPING).flat().sort();
@@ -55,7 +61,8 @@ const STRAIN_YIELD_PREDICTIONS: Record<string, number> = {
 };
 
 export const FarmingRegistry: React.FC<FarmingRegistryProps> = ({
-    villageId, userEmail, theme, batchList, recordedWastageList, onRefresh, onSuccess, onError, setActiveTab, triggerEnvPrompt
+    villageId, userEmail, theme, batchList, recordedWastageList, onRefresh, onSuccess, onError, setActiveTab, triggerEnvPrompt,
+    filterStartDate, setFilterStartDate, filterEndDate, setFilterEndDate
 }) => {
     const getCollectionName = (vid: VillageType) => {
         if (vid === VillageType.A) return "dailyfarming_logA";
@@ -69,7 +76,16 @@ export const FarmingRegistry: React.FC<FarmingRegistryProps> = ({
         return "resourcesA";
     };
 
-    const getIncomeCollection = (vid: VillageType) => vid === VillageType.A ? 'income_A' : vid === VillageType.B ? 'income_B' : 'income_C';
+    // Helper for financial collections
+    const getFinancialCollections = (vid: VillageType) => {
+        let suffix = 'C';
+        if (vid === VillageType.A) suffix = 'A';
+        if (vid === VillageType.B) suffix = 'B';
+        return {
+            main: `financialRecords_${suffix}`,
+            income: `income_${suffix}`
+        };
+    };
 
     const collectionName = getCollectionName(villageId);
 
@@ -78,6 +94,7 @@ export const FarmingRegistry: React.FC<FarmingRegistryProps> = ({
     const [activityBatchId, setActivityBatchId] = useState('');
     const [activityRoomId, setActivityRoomId] = useState('A1');
     const [activityNotes, setActivityNotes] = useState('');
+    const [activityDate, setActivityDate] = useState(new Date().toISOString().split('T')[0]);
     const [batchStrain, setBatchStrain] = useState('Oyster'); 
     const [predictedYield, setPredictedYield] = useState(STRAIN_YIELD_PREDICTIONS['Oyster'].toString()); 
     const [isSubmittingActivity, setIsSubmittingActivity] = useState(false);
@@ -87,6 +104,7 @@ export const FarmingRegistry: React.FC<FarmingRegistryProps> = ({
     const [harvestBatch, setHarvestBatch] = useState('');
     const [harvestWeight, setHarvestWeight] = useState('');
     const [harvestStrain, setHarvestStrain] = useState('Oyster');
+    const [harvestDate, setHarvestDate] = useState(new Date().toISOString().split('T')[0]);
     const [isSubmittingHarvest, setIsSubmittingHarvest] = useState(false);
 
     // Wastage State
@@ -98,12 +116,6 @@ export const FarmingRegistry: React.FC<FarmingRegistryProps> = ({
     const [originalWastageWeight, setOriginalWastageWeight] = useState<number | null>(null);
 
     // Filtering & Edit Modal State
-    const [filterStartDate, setFilterStartDate] = useState(() => {
-        const d = new Date();
-        d.setDate(d.getDate() - 30); 
-        return d.toISOString().split('T')[0];
-    });
-    const [filterEndDate, setFilterEndDate] = useState(() => new Date().toISOString().split('T')[0]);
     const [filterStrain, setFilterStrain] = useState('All');
     const [filterStatus, setFilterStatus] = useState('All');
 
@@ -207,14 +219,14 @@ export const FarmingRegistry: React.FC<FarmingRegistryProps> = ({
     // Effect: Generate Batch ID
     useEffect(() => {
         if (activityType === 'SUBSTRATE_PREP') {
-            const today = new Date();
-            const dateStr = today.toISOString().slice(2, 10).replace(/-/g, '');
+            // Use selected activityDate for Batch ID generation to match
+            const dateStr = activityDate.slice(2).replace(/-/g, ''); // YYYY-MM-DD -> YYMMDD
             const random = Math.floor(1000 + Math.random() * 9000);
             setActivityBatchId(`B${dateStr}-${random}`);
         } else {
             setActivityBatchId('');
         }
-    }, [activityType]);
+    }, [activityType, activityDate]);
 
     // Effect: Populate Harvest Strain
     useEffect(() => {
@@ -318,11 +330,14 @@ export const FarmingRegistry: React.FC<FarmingRegistryProps> = ({
         setIsSubmittingActivity(true);
         try {
             const finalBatchId = activityBatchId.trim();
+            const currentTime = new Date().toTimeString().split(' ')[0]; // HH:MM:SS
+            const timestamp = new Date(`${activityDate}T${currentTime}`).toISOString();
+
             const newLog: any = {
                 type: activityType as any,
                 details: activityNotes,
                 userEmail: userEmail,
-                timestamp: new Date().toISOString(),
+                timestamp: timestamp,
                 villageId: villageId,
                 batchId: finalBatchId,
             };
@@ -366,7 +381,7 @@ export const FarmingRegistry: React.FC<FarmingRegistryProps> = ({
                 if (triggerEnvPrompt) {
                     triggerEnvPrompt({ batchId: finalBatchId, room: activityRoomId });
                 }
-                onSuccess(`Batch created. Materials automatically deducted (Straw -20kg, Water -50L).`);
+                onSuccess(`Batch created with date ${activityDate}. Materials deducted.`);
 
             } else {
                 if (!finalBatchId) {
@@ -408,7 +423,7 @@ export const FarmingRegistry: React.FC<FarmingRegistryProps> = ({
                               await performAutoDeduction(item.id, totalDeduct, activityType.replace('_', ' '), finalBatchId);
                             }
                         }
-                        onSuccess(`${activityType.replace('_', ' ')} logged. Materials deducted.`);
+                        onSuccess(`${activityType.replace('_', ' ')} logged for ${activityDate}. Materials deducted.`);
                     } else {
                         onSuccess(`${activityType.replace('_', ' ')} log updated. Cost deduction skipped (already recorded).`);
                     }
@@ -420,12 +435,8 @@ export const FarmingRegistry: React.FC<FarmingRegistryProps> = ({
             setActivityNotes('');
             setPredictedYield(STRAIN_YIELD_PREDICTIONS['Oyster'].toString());
             
-            if (activityType === 'SUBSTRATE_PREP') {
-                const today = new Date();
-                const dateStr = today.toISOString().slice(2, 10).replace(/-/g, '');
-                const random = Math.floor(1000 + Math.random() * 9000);
-                setActivityBatchId(`B${dateStr}-${random}`);
-            } else {
+            // Trigger ID regeneration by effect
+            if (activityType !== 'SUBSTRATE_PREP') {
                 setActivityBatchId('');
             }
   
@@ -446,7 +457,9 @@ export const FarmingRegistry: React.FC<FarmingRegistryProps> = ({
             const harvestCollection = villageId === VillageType.A ? "harvestYield_A" : villageId === VillageType.B ? "harvestYield_B" : null;
             if (!harvestCollection) throw new Error("Invalid village for harvest logging");
             
-            const timestamp = new Date().toISOString();
+            const currentTime = new Date().toTimeString().split(' ')[0];
+            const timestamp = new Date(`${harvestDate}T${currentTime}`).toISOString();
+
             const harvestDocRef = doc(db, harvestCollection, harvestBatch);
             
             await setDoc(harvestDocRef, { batchId: harvestBatch, strain: harvestStrain, totalYield: increment(weight), lastRecordedBy: userEmail, timestamp, villageId }, { merge: true });
@@ -466,16 +479,16 @@ export const FarmingRegistry: React.FC<FarmingRegistryProps> = ({
                     
                     if (predicted > 0 && (totalYield + totalWastage) >= predicted) {
                         await updateDoc(batchRef, { batchStatus: 'COMPLETED' });
-                        onSuccess(`Harvest recorded. Batch ${harvestBatch} marked COMPLETED (Target Yield Met).`);
+                        onSuccess(`Harvest recorded on ${harvestDate}. Batch ${harvestBatch} marked COMPLETED (Target Yield Met).`);
                     } else {
-                        onSuccess(`Harvest recorded. Batch remains active.`);
+                        onSuccess(`Harvest recorded on ${harvestDate}. Batch remains active.`);
                     }
                 }
             }
   
             const pricePerKg = MUSHROOM_PRICES[harvestStrain] || 10;
             const totalSaleAmount = weight * pricePerKg;
-            const finColName = getIncomeCollection(villageId);
+            const { main, income } = getFinancialCollections(villageId);
             const transactionId = "TXN-SALE-" + Date.now().toString().slice(-6);
             
             const saleRecord: Partial<FinancialRecord> = {
@@ -484,7 +497,7 @@ export const FarmingRegistry: React.FC<FarmingRegistryProps> = ({
               category: 'Sales',
               amount: totalSaleAmount,
               weightKg: weight,
-              date: new Date().toISOString().split('T')[0],
+              date: harvestDate, // Use selected harvest date for financial record
               batchId: harvestBatch,
               description: `Auto-generated sale from harvest: ${weight}kg of ${harvestStrain} @ RM${pricePerKg}/kg`,
               recordedBy: 'System/Automation',
@@ -492,7 +505,10 @@ export const FarmingRegistry: React.FC<FarmingRegistryProps> = ({
               status: 'PENDING', 
               createdAt: timestamp
             };
-            await setDoc(doc(db, finColName, transactionId), saleRecord);
+
+            // DUAL WRITE: Write to main collection AND specific income collection
+            await setDoc(doc(db, income, transactionId), saleRecord);
+            await setDoc(doc(db, main, transactionId), saleRecord);
   
             // --- NEW: Pending Shipment to Village C (Instead of auto-intake) ---
             await addDoc(collection(db, "pending_shipments"), {
@@ -629,7 +645,7 @@ export const FarmingRegistry: React.FC<FarmingRegistryProps> = ({
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                 <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200 flex flex-col h-full">
                     <h2 className="text-lg font-bold text-gray-900 mb-4 flex items-center gap-2">
-                        <svg className={`w-5 h-5 ${theme.textIcon}`} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" /></svg>
+                        <svg className={`w-5 h-5 ${theme.textIcon}`} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 00-2-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" /></svg>
                         Daily Farming Log ({villageId === VillageType.A ? 'A' : villageId === VillageType.B ? 'B' : 'Gen'})
                     </h2>
                     <form onSubmit={handleLogActivity} className="space-y-4 flex-1">
@@ -662,6 +678,13 @@ export const FarmingRegistry: React.FC<FarmingRegistryProps> = ({
                             </div>
                         </div>
                         
+                        <div className="grid grid-cols-2 gap-4">
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-1">Date</label>
+                                <input type="date" value={activityDate} onChange={(e) => setActivityDate(e.target.value)} className="block w-full rounded-md border-gray-300 shadow-sm focus:border-green-500 focus:ring-green-500 sm:text-sm border p-2" required />
+                            </div>
+                        </div>
+
                         {activityType === 'SUBSTRATE_PREP' && (
                             <div className="grid grid-cols-2 gap-4 animate-fade-in-up">
                                 <div>
@@ -716,6 +739,10 @@ export const FarmingRegistry: React.FC<FarmingRegistryProps> = ({
                                 <label className="block text-sm font-medium text-gray-700 mb-1">Weight (kg)</label>
                                 <input type="number" step="0.1" required value={harvestWeight} onChange={(e) => setHarvestWeight(e.target.value)} className="block w-full rounded-md border-gray-300 shadow-sm focus:border-green-500 focus:ring-green-500 sm:text-sm border p-2" />
                             </div>
+                        </div>
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">Harvest Date</label>
+                            <input type="date" value={harvestDate} onChange={(e) => setHarvestDate(e.target.value)} className="block w-full rounded-md border-gray-300 shadow-sm focus:border-green-500 focus:ring-green-500 sm:text-sm border p-2" required />
                         </div>
                         <div>
                             <label className="block text-sm font-medium text-gray-700 mb-1">Strain</label>
@@ -821,7 +848,21 @@ export const FarmingRegistry: React.FC<FarmingRegistryProps> = ({
                         </div>
                     </div>
                     <div className="flex items-center gap-2">
-                        <div className="flex items-center bg-white border border-gray-300 rounded-md shadow-sm"><input type="date" value={filterStartDate} onChange={(e) => setFilterStartDate(e.target.value)} className="text-xs border-none focus:ring-0 rounded-l-md py-1.5 pl-2 text-gray-600" /><span className="text-gray-400 text-xs px-1">to</span><input type="date" value={filterEndDate} onChange={(e) => setFilterEndDate(e.target.value)} className="text-xs border-none focus:ring-0 rounded-r-md py-1.5 pr-2 text-gray-600" /></div>
+                        <div className="flex items-center bg-white border border-gray-300 rounded-md shadow-sm">
+                            <input 
+                                type="date" 
+                                value={filterStartDate} 
+                                onChange={(e) => setFilterStartDate(e.target.value)} 
+                                className="text-xs border-none focus:ring-0 rounded-l-md py-1.5 pl-2 text-gray-600" 
+                            />
+                            <span className="text-gray-400 text-xs px-1">to</span>
+                            <input 
+                                type="date" 
+                                value={filterEndDate} 
+                                onChange={(e) => setFilterEndDate(e.target.value)} 
+                                className="text-xs border-none focus:ring-0 rounded-r-md py-1.5 pr-2 text-gray-600" 
+                            />
+                        </div>
                         <button onClick={onRefresh} className="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-md"><svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg></button>
                     </div>
                 </div>

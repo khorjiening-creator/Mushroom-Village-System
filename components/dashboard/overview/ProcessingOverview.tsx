@@ -1,12 +1,15 @@
+
 import React from 'react';
 import { FinancialRecord } from '../../../types';
 
+// Fix: Changed property types from literal 0 to number to avoid assignability errors in OverviewTab
 interface ProcessingViewProps {
     financeOverviewData: any;
     financialRecords: FinancialRecord[];
     setActiveTab: (tab: any) => void;
-    processingStats: { intake: 0, qc: 0, packing: 0, ready: 0 };
-    logisticsStats: { scheduled: 0, delivering: 0, failed: 0 };
+    processingStats: { intake: number; qc: number; packing: number; ready: number; };
+    logisticsStats: { scheduled: number; delivering: number; failed: number; };
+    predictedYield?: number;
 }
 
 // 1. FINANCE ROLE (The 3 Pillars + Pulse)
@@ -135,14 +138,14 @@ export const ProcessingFinanceView: React.FC<ProcessingViewProps> = ({
 
 // 2. USER ROLE (Floor Operations - Reduced Tabs)
 export const ProcessingUserView: React.FC<ProcessingViewProps> = ({
-    processingStats, logisticsStats, setActiveTab
+    processingStats, logisticsStats, setActiveTab, predictedYield
 }) => {
     return (
         <div className="space-y-8 animate-fade-in-up">
             <div className="bg-white border border-slate-200 p-8 rounded-[2.5rem] shadow-sm flex flex-col md:flex-row justify-between items-center gap-6">
                 <div>
                     <h1 className="text-3xl font-black tracking-tight text-slate-900 mb-1">Floor Operations</h1>
-                    <p className="text-sm text-slate-500 font-bold uppercase tracking-widest">Village C • Workflow Dashboard</p>
+                    <p className="text-sm text-gray-500 font-bold uppercase tracking-widest">Village C • Workflow Dashboard</p>
                 </div>
                 <div className="flex gap-4">
                     <div className="text-center px-4">
@@ -159,10 +162,16 @@ export const ProcessingUserView: React.FC<ProcessingViewProps> = ({
                         <p className="text-[10px] text-slate-400 font-black uppercase tracking-widest">Scheduled Ships</p>
                         <p className="text-2xl font-black text-orange-600">{logisticsStats.scheduled}</p>
                     </div>
+                    {/* New Card for Predicted Yield */}
+                    <div className="w-px bg-slate-200 h-10"></div>
+                    <div className="text-center px-4">
+                        <p className="text-[10px] text-slate-400 font-black uppercase tracking-widest">Predicted Inbound</p>
+                        <p className="text-2xl font-black text-green-600">{predictedYield ? predictedYield.toFixed(0) : '0'} kg</p>
+                    </div>
                 </div>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
                 <button onClick={() => setActiveTab('processing')} className="bg-blue-50 p-8 rounded-3xl border border-blue-100 hover:shadow-lg hover:bg-blue-100 transition-all text-left group">
                     <div className="bg-white w-14 h-14 rounded-2xl flex items-center justify-center text-blue-600 mb-6 shadow-sm group-hover:scale-110 transition-transform">
                         <svg className="w-8 h-8" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" /></svg>
@@ -193,6 +202,18 @@ export const ProcessingUserView: React.FC<ProcessingViewProps> = ({
                     <p className="text-xs text-orange-700 font-medium mt-2">Manage deliveries and warehouse.</p>
                     <div className="mt-6 flex items-center gap-2 text-xs font-bold text-orange-600 uppercase tracking-widest group-hover:gap-3 transition-all">
                         View Logistics <span className="text-lg">→</span>
+                    </div>
+                </button>
+
+                {/* New shortcut for standard users to access Sales Hub */}
+                <button onClick={() => setActiveTab('sales')} className="bg-emerald-50 p-8 rounded-3xl border border-emerald-100 hover:shadow-lg hover:bg-emerald-100 transition-all text-left group">
+                    <div className="bg-white w-14 h-14 rounded-2xl flex items-center justify-center text-emerald-600 mb-6 shadow-sm group-hover:scale-110 transition-transform">
+                        <svg className="w-8 h-8" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 3h2l.4 2M7 13h10l4-8H5.4M7 13L5.4 5M7 13l-2.293 2.293c-.63.63-.184 1.707.707 1.707H17m0 0a2 2 0 100 4 2 2 0 000-4zm-8 2a2 2 0 11-4 0 2 2 0 014 0z" /></svg>
+                    </div>
+                    <h3 className="text-xl font-black text-emerald-900">Sales Hub</h3>
+                    <p className="text-xs text-emerald-700 font-medium mt-2">POS Terminal & CRM.</p>
+                    <div className="mt-6 flex items-center gap-2 text-xs font-bold text-emerald-600 uppercase tracking-widest group-hover:gap-3 transition-all">
+                        Open Sales <span className="text-lg">→</span>
                     </div>
                 </button>
             </div>

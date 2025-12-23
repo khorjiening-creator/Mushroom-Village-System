@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useRef } from 'react';
 import { FinancialRecord, VillageType } from '../types';
 
@@ -50,11 +51,19 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
       setAttachmentName(initialData.attachmentName || null);
       setTransBatchId(initialData.batchId || '');
       setTransOrderNumber(initialData.orderNumber || '');
-    } else {
-      // Defaults
-      if (!initialData) {
-          // Defaults handled by state initialization
-      }
+    } else if (isOpen) {
+      // Explicitly clear all information when opening for a NEW record
+      setTransType('EXPENSE');
+      setTransAmount('');
+      setTransWeight('');
+      setTransCategory('Supplies');
+      setTransDate(new Date().toISOString().split('T')[0]);
+      setTransDesc('');
+      setTransPaymentMethod('Cash');
+      setTransIsPending(false);
+      setAttachmentName(null);
+      setTransBatchId('');
+      setTransOrderNumber('');
     }
     setError(null);
   }, [initialData, isOpen]);
@@ -179,12 +188,19 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
                              </div>
                          </div>
 
-                         {/* Only show Order/Batch if Village C or Expense logic dictates, logic remains same but simplified conditional check */}
                          {(isVillageC) ? (
                             <div className="grid grid-cols-2 gap-4 p-3 bg-blue-50 rounded-xl border border-blue-100">
                                 <div>
-                                    <label className="block text-[10px] font-black text-blue-800 uppercase mb-1">Order #</label>
-                                    <input type="text" value={transOrderNumber} onChange={e => setTransOrderNumber(e.target.value)} className="w-full border border-blue-200 rounded-lg p-2 text-sm" placeholder="SO-001" />
+                                    <label className="block text-[10px] font-black text-blue-800 uppercase mb-1">
+                                        {transType === 'INCOME' ? 'Customer Order #' : 'Invoice #'}
+                                    </label>
+                                    <input 
+                                        type="text" 
+                                        value={transOrderNumber} 
+                                        onChange={e => setTransOrderNumber(e.target.value)} 
+                                        className="w-full border border-blue-200 rounded-lg p-2 text-sm" 
+                                        placeholder="Auto-generated if empty" 
+                                    />
                                 </div>
                                 <div>
                                     <label className="block text-[10px] font-black text-blue-800 uppercase mb-1">Batch ID</label>
@@ -192,7 +208,6 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
                                 </div>
                             </div>
                          ) : (
-                             // Only show Batch ID for A/B, no Order Number per original requirement, but simplified to just Batch ID if needed for A/B Expense tracking
                              <div className="p-3 bg-gray-50 rounded-xl border border-gray-100">
                                  <label className="block text-[10px] font-black text-gray-500 uppercase mb-1">Batch Link (Optional)</label>
                                  <input type="text" value={transBatchId} onChange={e => setTransBatchId(e.target.value)} className="w-full border border-gray-200 rounded-lg p-2 text-sm" placeholder="B-24-001" />
@@ -211,7 +226,6 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
                              </label>
                          </div>
 
-                         {/* Only show attachment for Village C */}
                          {isVillageC && (
                              <div>
                                 <label className="block text-sm font-medium text-gray-700 mb-1">Document/Receipt Attachment</label>
@@ -235,7 +249,7 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
                          )}
 
                          <div className="flex gap-3 mt-6">
-                            {initialData && onDelete ? (
+                            {initialData && onDelete && !isVillageC ? (
                                 <button type="button" onClick={onDelete} className="bg-red-50 border border-red-200 text-red-600 font-bold py-2.5 px-4 rounded-lg hover:bg-red-100 transition-colors text-sm">
                                     Delete
                                 </button>

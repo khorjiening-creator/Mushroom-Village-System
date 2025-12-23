@@ -332,9 +332,18 @@ export const Dashboard: React.FC<DashboardProps> = ({ villageId, userEmail, user
           } else {
               // CREATE MODE
               const transactionId = "TXN-" + Date.now().toString(); // Use full timestamp to avoid ID collision
+              
+              // AUTOMATIC CUSTOMER ORDER NO / INVOICE NO GENERATION
+              let autoRef = data.orderNumber;
+              if (!autoRef) {
+                  const suffix = Date.now().toString().slice(-6);
+                  autoRef = data.type === 'INCOME' ? `ORD-${suffix}` : `INV-${suffix}`;
+              }
+
               const newRecord = { 
                   ...cleanData, 
                   transactionId, 
+                  orderNumber: autoRef,
                   recordedBy: userEmail, 
                   villageId 
               };
@@ -386,7 +395,24 @@ export const Dashboard: React.FC<DashboardProps> = ({ villageId, userEmail, user
           // 2. Update General Collection
           await updateDoc(doc(db, generalCol, settleTransaction.id), updateData);
 
+          // --- SYNC SALE STATUS ---
+          // If this is a Sales income record in Village C, update the corresponding Sale status
+          if (villageId === VillageType.C && settleTransaction.type === 'INCOME' && settleTransaction.category === 'Sales' && settleTransaction.orderNumber) {
+              const saleId = settleTransaction.orderNumber;
+              try {
+                  const saleRef = doc(db, 'sales_VillageC', saleId);
+                  await updateDoc(saleRef, { status: 'COMPLETED' });
+                  console.log(`Synced Sale status for ${saleId}`);
+              } catch (saleErr) {
+                  console.warn("Failed to sync sale status (might be a manual record):", saleErr);
+              }
+          }
+
           await fetchFinancialRecords();
+          // Force filter override to 'ALL' so the now-completed record remains visible in the list
+          // This prevents the row from disappearing if the user was filtering by "PENDING"
+          setFinancialFilterOverride({ status: 'ALL' }); 
+          
           showNotification(`Transaction settled.`, "success");
           setShowSettleModal(false);
       } catch (error) { 
@@ -446,8 +472,8 @@ export const Dashboard: React.FC<DashboardProps> = ({ villageId, userEmail, user
       if (userRole === 'admin' || userRole === 'finance') {
           baseItems.push({ id: 'costing', label: 'Costing', icon: 'M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z' });
       }
-      // Sales Hub - C Finance/Sales/Admin
-      if (userRole === 'admin' || userRole === 'finance' || userRole === 'sales') {
+      // Sales Hub - C Finance/Sales/Admin/User
+      if (userRole === 'admin' || userRole === 'finance' || userRole === 'sales' || userRole === 'user') {
           baseItems.push({ id: 'sales', label: 'Sales Hub', icon: 'M3 3h2l.4 2M7 13h10l4-8H5.4M7 13L5.4 5M7 13l-2.293 2.293c-.63.63-.184 1.707.707 1.707H17m0 0a2 2 0 100 4 2 2 0 000-4zm-8 2a2 2 0 11-4 0 2 2 0 014 0z' });
       }
     }
@@ -547,6 +573,9 @@ export const Dashboard: React.FC<DashboardProps> = ({ villageId, userEmail, user
                     onSettleRecord={(r) => {setSettleTransaction(r); setShowSettleModal(true);}}
                     onInjectCapital={handleInjectCapital}
                     onDeleteRecord={async (id) => {
+                        // Village C transactions are non-deletable via UI buttons, but logic kept for A/B if necessary
+                        if (villageId === VillageType.C) return;
+                        
                         if (confirm("Delete this record permanently?")) {
                             const recordToDelete = financialRecords.find(r => r.id === id);
                             if (!recordToDelete) return;

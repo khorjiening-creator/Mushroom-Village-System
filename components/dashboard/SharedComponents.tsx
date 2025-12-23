@@ -2,7 +2,7 @@
 import React from 'react';
 import { STAFF_LIST } from '../../constants';
 
-export const MUSHROOM_VARIETIES = ["Oyster", "Button", "Shiitake", "King Oyster"];
+export const MUSHROOM_VARIETIES = ["Oyster", "Shiitake", "Button", "Lion's Mane"];
 export const SUPERVISOR_LIST = ["Sarah Connor", "Mike Manager", "Dr. Spore"];
 export const DISPOSAL_METHODS = ["Composting", "Animal Feed", "Incineration", "Other"];
 export const CUSTOMER_LIST = ["Fresh Market Co.", "City Grocers", "Organic Eats Ltd.", "Local Restaurant Group"];
