@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useMemo } from 'react';
 import { collection, onSnapshot, doc, updateDoc, addDoc, setDoc, query, where, getDocs, increment, Timestamp, orderBy, limit } from 'firebase/firestore';
 import { db } from '../../services/firebase';
@@ -584,6 +583,42 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({
             } catch (err) {
                 console.warn("Could not update split expense collection (legacy record?):", err);
             }
+
+            // --- AUTOMATIC REFUND GENERATION FOR SHORTAGES (Village A & B) ---
+            if (actualQty < orderQty && (villageId === VillageType.A || villageId === VillageType.B)) {
+                const shortage = orderQty - actualQty;
+                // Calculate refund value based on original cost per unit
+                const unitPrice = orderQty > 0 ? (rec.amount / orderQty) : 0;
+                const refundValue = parseFloat((shortage * unitPrice).toFixed(2));
+
+                if (refundValue > 0) {
+                    const refundId = `TXN-REF-${Date.now().toString().slice(-6)}`;
+                    const suffix = villageId === VillageType.A ? 'A' : 'B';
+                    const incomeCol = `income_${suffix}`;
+                    const mainCol = `financialRecords_${suffix}`;
+                    
+                    const refundRecord = {
+                        transactionId: refundId,
+                        type: 'INCOME',
+                        category: 'Others', // Classified as 'Others' or could be 'Refund' if system allows
+                        amount: refundValue,
+                        date: new Date().toISOString().split('T')[0],
+                        description: `Auto-Refund: Shortage of ${shortage} units from Txn ${rec.transactionId}`,
+                        recordedBy: 'System/Automation',
+                        villageId: villageId,
+                        status: 'PENDING', // Mark as Pending for review
+                        relatedTransactionId: rec.transactionId,
+                        createdAt: new Date().toISOString()
+                    };
+
+                    // Write Refund to Income & Main Ledger
+                    await setDoc(doc(db, incomeCol, refundId), refundRecord);
+                    await setDoc(doc(db, mainCol, refundId), refundRecord);
+                    
+                    if (onSuccess) onSuccess(`Refund (Pending) of RM${refundValue} generated for shortage.`);
+                }
+            }
+            // -----------------------------------------------------------------
 
             if (onSuccess) onSuccess(`Stock updated: +${actualQty} received for supply ${rec.transactionId}`);
             

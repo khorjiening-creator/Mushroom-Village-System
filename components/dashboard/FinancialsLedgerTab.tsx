@@ -460,6 +460,7 @@ export const FinancialsLedgerTab: React.FC<FinancialsLedgerTabProps> = ({
                     <table className="min-w-full divide-y divide-gray-200">
                         <thead className="bg-gray-50">
                             <tr>
+                                <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Transaction ID</th>
                                 <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Date</th>
                                 <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Type</th>
                                 <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Category</th>
@@ -482,6 +483,9 @@ export const FinancialsLedgerTab: React.FC<FinancialsLedgerTabProps> = ({
 
                                 return (
                                     <tr key={record.id} className={`hover:bg-gray-50 ${delayed ? 'bg-red-50/30' : ''}`}>
+                                        <td className="px-6 py-4 whitespace-nowrap text-xs font-mono font-bold text-gray-500" onClick={() => onEditRecord(record)}>
+                                            {record.transactionId ? record.transactionId.replace('TXN-', '') : record.id.slice(0, 8)}
+                                        </td>
                                         <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{new Date(record.date).toLocaleDateString()}</td>
                                         <td className="px-6 py-4 whitespace-nowrap"><span className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${record.type === 'INCOME' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>{record.type}</span></td>
                                         <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{record.category}</td>
