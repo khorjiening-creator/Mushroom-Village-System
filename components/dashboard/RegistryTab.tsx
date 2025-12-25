@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useMemo } from 'react';
 import { collection, getDocs, doc, updateDoc, setDoc, query, orderBy, limit, addDoc, onSnapshot } from 'firebase/firestore';
 // Fix: Import from @firebase/app to resolve type errors as seen in services/firebase.ts
@@ -118,6 +117,7 @@ export const RegistryTab: React.FC<RegistryTabProps> = ({ adminEmail }) => {
         villageId: newUserVillage, 
         role: newUserRole, 
         jobTitle: newUserJobTitle,
+        password: newUserPassword, // Store password in DB as requested
         createdAt: new Date().toISOString()
       };
       
