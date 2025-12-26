@@ -39,6 +39,7 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
     const [latestEnvLog, setLatestEnvLog] = useState<any>(null);
     const [predictedYield, setPredictedYield] = useState(0);
     const [yieldForecasts, setYieldForecasts] = useState<any[]>([]);
+    const [pendingShipments, setPendingShipments] = useState<any[]>([]);
 
     useEffect(() => {
         const fetchData = async () => {
@@ -137,6 +138,11 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
                     const totalPredicted = activeForecasts.reduce((acc, curr) => acc + curr.predictedQty, 0);
                     setPredictedYield(totalPredicted);
                     setYieldForecasts(activeForecasts);
+
+                    // Fetch Pending Shipments
+                    const shipQ = query(collection(db, "pending_shipments"), where("status", "==", "PENDING"));
+                    const shipSnap = await getDocs(shipQ);
+                    setPendingShipments(shipSnap.docs.map(d => ({id: d.id, ...d.data()})));
                 }
             } catch (e) {
                 console.error("Overview data fetch error", e);
@@ -229,6 +235,7 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
                 logisticsStats={logisticsStats}
                 predictedYield={predictedYield}
                 yieldForecasts={yieldForecasts}
+                pendingShipments={pendingShipments}
             />;
         }
     }

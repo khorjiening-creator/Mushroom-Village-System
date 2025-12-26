@@ -1,5 +1,6 @@
+
 import React, { useState, useMemo, useEffect } from 'react';
-import { collection, setDoc, doc, updateDoc, getDocs, query, where, limit, addDoc } from '@firebase/firestore';
+import { collection, setDoc, doc, updateDoc, getDocs, query, where, limit, addDoc, increment } from '@firebase/firestore';
 import { db } from '../../services/firebase';
 import { ProcessingLog, VillageType, PackagingLogData, InventoryItem, UserRole } from '../../types';
 import { 
@@ -114,6 +115,7 @@ export const Packaging: React.FC<Props> = ({
     };
 
     const updateInventoryStock = async (variety: string, grade: string, weightAdded: number) => {
+        let targetId = `INV-${variety}-${grade}-${villageId}`;
         try {
             const q = query(
                 collection(db, "inventory_items"), 
@@ -126,6 +128,7 @@ export const Packaging: React.FC<Props> = ({
             
             if (!snap.empty) {
                 const itemDoc = snap.docs[0];
+                targetId = itemDoc.id; // Use existing ID if found via query
                 const currentData = itemDoc.data() as InventoryItem;
                 await updateDoc(doc(db, "inventory_items", itemDoc.id), {
                     currentStock: currentData.currentStock + weightAdded,
@@ -141,17 +144,18 @@ export const Packaging: React.FC<Props> = ({
                     minThreshold: 20,
                     maxThreshold: 500,
                     harvestDate: new Date().toISOString(),
-                    expiryDate: packExpiry,
+                    expiryDate: packExpiry, // Initial expiry for the inventory record
                     warehouseLocation: STORAGE_LOCATIONS[0],
                     storageTemperature: "2-4°C",
                     villageId,
                     lastUpdated: new Date().toISOString()
                 };
-                await setDoc(doc(db, "inventory_items", `INV-${variety}-${grade}-${villageId}`), newItem);
+                await setDoc(doc(db, "inventory_items", targetId), newItem);
             }
         } catch (err) {
             console.error("Inventory update failed:", err);
         }
+        return targetId;
     };
 
     const handlePackagingSubmit = async (e: React.FormEvent) => {
@@ -168,7 +172,18 @@ export const Packaging: React.FC<Props> = ({
             const sorted = [...selectedPackBatches].sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
             let weightToDeduct = massNeeded;
 
-            await updateInventoryStock(mainTab, gradeTab, massNeeded);
+            const targetInventoryId = await updateInventoryStock(mainTab, gradeTab, massNeeded);
+
+            // Update Product Stock in products_VillageC (Sync with Sales Hub)
+            const productId = `VC-PROD-${mainTab.replace(/\s/g, '')}-${gradeTab}`;
+            try {
+                // Update stock directly. Assuming document exists (created by SalesTab seeding).
+                await updateDoc(doc(db, "products_VillageC", productId), {
+                    stock: increment(unitsToProduce)
+                });
+            } catch (err) {
+                console.warn(`Could not update sales product stock for ${productId} (might not exist yet):`, err);
+            }
 
             // Record STOCK IN movement
             await addDoc(collection(db, "stock_movements"), {
@@ -212,6 +227,17 @@ export const Packaging: React.FC<Props> = ({
                     
                     const docId = `${batch.batchId}-${gradeTab}`;
                     await setDoc(doc(db, "Packaging_logs", docId), { ...newLog, villageId, recordedBy: userEmail });
+
+                    // Link packaging log to inventory collection with expiry date
+                    await setDoc(doc(db, "inventory_items", targetInventoryId, "packaging_history", docId), {
+                        packagingLogId: docId,
+                        batchId: batch.batchId,
+                        units: batchPortionUnits,
+                        weightUsed: deduct,
+                        timestamp: new Date().toISOString(),
+                        operator: packOperator.join(', '),
+                        expiryDate: packExpiry
+                    });
                 }
 
                 const updatedStatus: any = { ...batch.packagingStatus, [`grade${gradeTab}`]: leftInBatch <= 0.001 ? 'COMPLETED' : 'PENDING' };

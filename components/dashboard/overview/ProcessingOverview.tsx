@@ -10,6 +10,7 @@ interface ProcessingViewProps {
     logisticsStats: { scheduled: number; delivering: number; failed: number; };
     predictedYield?: number;
     yieldForecasts?: any[];
+    pendingShipments?: any[];
 }
 
 // 1. FINANCE ROLE (The 3 Pillars + Pulse)
@@ -138,7 +139,7 @@ export const ProcessingFinanceView: React.FC<ProcessingViewProps> = ({
 
 // 2. USER ROLE (Floor Operations - Reduced Tabs)
 export const ProcessingUserView: React.FC<ProcessingViewProps> = ({
-    processingStats, logisticsStats, setActiveTab, predictedYield, yieldForecasts = []
+    processingStats, logisticsStats, setActiveTab, predictedYield, yieldForecasts = [], pendingShipments = []
 }) => {
     return (
         <div className="space-y-8 animate-fade-in-up">
@@ -164,6 +165,37 @@ export const ProcessingUserView: React.FC<ProcessingViewProps> = ({
                     </div>
                 </div>
             </div>
+
+            {/* Pending Inbound Shipments Alert */}
+            {pendingShipments.length > 0 && (
+                <div className="bg-blue-50 border border-blue-100 p-6 rounded-3xl shadow-sm animate-pulse-subtle">
+                    <div className="flex justify-between items-center mb-4">
+                        <h3 className="text-sm font-black text-blue-900 uppercase tracking-widest flex items-center gap-2">
+                            <span className="relative flex h-3 w-3">
+                              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75"></span>
+                              <span className="relative inline-flex rounded-full h-3 w-3 bg-blue-500"></span>
+                            </span>
+                            Inbound Harvests (Action Required)
+                        </h3>
+                        <button onClick={() => setActiveTab('processing')} className="text-[10px] font-bold bg-white text-blue-600 px-3 py-1.5 rounded-lg shadow-sm hover:bg-blue-600 hover:text-white transition-colors uppercase">
+                            Go to Intake
+                        </button>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+                        {pendingShipments.map(s => (
+                            <div key={s.id} className="bg-white p-4 rounded-2xl border border-blue-200 shadow-sm">
+                                <div className="flex justify-between items-start mb-2">
+                                    <span className="text-[10px] font-bold text-gray-400 uppercase">{s.sourceVillage}</span>
+                                    <span className="text-[10px] font-mono font-bold text-blue-300">{s.batchId}</span>
+                                </div>
+                                <div className="font-black text-lg text-gray-800">{s.strain}</div>
+                                <div className="text-sm font-bold text-blue-600 mt-1">{s.weight} kg</div>
+                                <div className="text-[9px] text-gray-400 mt-2 font-medium">Arrived: {new Date(s.timestamp).toLocaleDateString()}</div>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            )}
 
             {/* Detailed Forecast Interface */}
             <div className="bg-white p-6 rounded-3xl border border-gray-200 shadow-sm overflow-hidden">
