@@ -1,3 +1,4 @@
+
 import React, { useState, useMemo, useEffect } from 'react';
 import { FinancialRecord, UserRole, VillageType } from '../../types';
 import { MUSHROOM_PRICES } from '../../constants';
@@ -278,7 +279,6 @@ export const FinancialsLedgerTab: React.FC<FinancialsLedgerTabProps> = ({
         printWindow.document.close();
     };
 
-    // Specialized Print Helper for Village C Ledger
     const handlePrintSpecializedDoc = (record: FinancialRecord, docType: 'SALES RECEIPT' | 'CUSTOMER ORDER' | 'PURCHASE INVOICE') => {
         const printWindow = window.open('', '_blank');
         if (!printWindow) return;
@@ -448,7 +448,12 @@ export const FinancialsLedgerTab: React.FC<FinancialsLedgerTabProps> = ({
                      </select>
                      <select value={filterCategory} onChange={(e) => handleFilterUpdate(financialPeriod, e.target.value, filterStatus)} className="block w-full sm:w-auto pl-3 pr-10 py-2 text-base border-gray-300 rounded-md border bg-gray-700 text-white">
                          <option value="ALL">All Categories</option>
-                         <optgroup label="Revenue"><option value="Sales">Sales</option><option value="Investment">Investment</option><option value="Others">Others</option></optgroup>
+                         <optgroup label="Revenue">
+                             {/* Only show sales for Village C */}
+                             {isVillageC && <option value="Sales">Sales</option>}
+                             <option value="Investment">Investment</option>
+                             <option value="Others">Others</option>
+                         </optgroup>
                          <optgroup label="Expenses"><option value="Supplies">Supplies</option><option value="Equipment">Equipment</option><option value="Logistic">Logistic</option><option value="Labor">Labor</option><option value="Utilities">Utilities</option><option value="Maintenance">Maintenance</option><option value="Others">Others</option></optgroup>
                      </select>
                      <select value={filterStatus} onChange={(e) => handleFilterUpdate(financialPeriod, filterCategory, e.target.value as any)} className="block w-full sm:w-auto pl-3 pr-10 py-2 text-base border-gray-300 rounded-md border bg-gray-700 text-white">
@@ -464,9 +469,14 @@ export const FinancialsLedgerTab: React.FC<FinancialsLedgerTabProps> = ({
                                 <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Date</th>
                                 <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Type</th>
                                 <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Category</th>
-                                <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                                    {isVillageC ? 'Order/Inv #' : 'Batch Link'}
-                                </th>
+                                
+                                {/* Only show Batch/Order column for Village C */}
+                                {isVillageC && (
+                                    <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                        Order/Inv #
+                                    </th>
+                                )}
+                                
                                 <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Description</th>
                                 <th scope="col" className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Amount</th>
                                 <th scope="col" className="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
@@ -489,17 +499,14 @@ export const FinancialsLedgerTab: React.FC<FinancialsLedgerTabProps> = ({
                                         <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{new Date(record.date).toLocaleDateString()}</td>
                                         <td className="px-6 py-4 whitespace-nowrap"><span className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${record.type === 'INCOME' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>{record.type}</span></td>
                                         <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{record.category}</td>
-                                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500" onClick={() => onEditRecord(record)}>
-                                            {isVillageC ? (
+                                        
+                                        {/* Only show Batch/Order cell for Village C */}
+                                        {isVillageC && (
+                                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500" onClick={() => onEditRecord(record)}>
                                                 <span className="font-mono font-bold text-indigo-600">{record.orderNumber || record.transactionId?.slice(-6)}</span>
-                                            ) : (
-                                                (record.category === 'Sales' && record.type === 'INCOME') ? (
-                                                    <span className="font-mono font-bold text-indigo-600">{record.batchId || '-'}</span>
-                                                ) : (
-                                                    '-'
-                                                )
-                                            )}
-                                        </td>
+                                            </td>
+                                        )}
+
                                         <td className="px-6 py-4 text-sm text-gray-500 truncate max-w-xs">{record.description}</td>
                                         <td className={`px-6 py-4 whitespace-nowrap text-sm font-bold text-right ${record.type === 'INCOME' ? 'text-green-600' : 'text-red-600'}`}>RM{record.amount.toFixed(2)}</td>
                                         <td className="px-6 py-4 whitespace-nowrap text-center">
