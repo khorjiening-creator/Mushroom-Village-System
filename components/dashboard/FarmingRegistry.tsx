@@ -35,7 +35,7 @@ const AVAILABLE_ROOMS = Object.values(MUSHROOM_ROOM_MAPPING).flat().sort();
 const ACTIVITY_RECIPES: Record<string, { id: string, name: string, amount: number }[]> = {
     'SUBSTRATE_PREP': [
         { id: "MAT-573260995", name: "Straw", amount: 20 }, // 20kg Straw per batch
-        { id: "MAT-545594408", name: "Water", amount: 50 }, // 50L Water per batch
+        { id: "MAT-545594408", name: "Water", amount: 5 }, // 50L Water per batch
     ],
     'SUBSTRATE_MIXING': [
         { id: "MAT-406637503", name: "Bran", amount: 0.5 },
@@ -45,10 +45,10 @@ const ACTIVITY_RECIPES: Record<string, { id: string, name: string, amount: numbe
         { id: "MAT-282015830", name: "Spawn", amount: 1 },
     ],
     'HUMIDITY_CONTROL': [
-        { id: "MAT-545594408", name: "Water", amount: 5 },
+        { id: "MAT-545594408", name: "Water", amount: 0.5 },
     ],
     'FLUSH_REHYDRATION': [
-        { id: "MAT-545594408", name: "Water", amount: 20 },
+        { id: "MAT-545594408", name: "Water", amount: 2 },
     ]
 };
 
